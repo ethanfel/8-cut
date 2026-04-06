@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
     QComboBox, QDialog, QPlainTextEdit, QCheckBox,
 )
+from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeyEvent
 import mpv
@@ -441,91 +442,98 @@ class TimelineWidget(QWidget):
         self._seek_timer.start()     # debounce the mpv seek
 
 
-class MpvWidget(QFrame):
+def _mpv_get_proc_address(_, name):
+    """Resolve OpenGL/EGL function pointers for mpv's render context."""
+    import ctypes, ctypes.util
+    for lib_name in ("EGL", "GL"):
+        lib_path = ctypes.util.find_library(lib_name)
+        if not lib_path:
+            continue
+        try:
+            lib = ctypes.CDLL(lib_path)
+            for fn_name in ("eglGetProcAddress", "glXGetProcAddressARB", "glXGetProcAddress"):
+                fn = getattr(lib, fn_name, None)
+                if fn is None:
+                    continue
+                fn.restype = ctypes.c_void_p
+                fn.argtypes = [ctypes.c_char_p]
+                addr = fn(name)
+                if addr:
+                    return addr
+        except Exception:
+            continue
+    return None
+
+
+class MpvWidget(QOpenGLWidget):
     file_loaded = pyqtSignal()   # emitted (on Qt thread) when a file is ready
     crop_clicked = pyqtSignal(float)  # x fraction 0–1 when user clicks video
 
     def __init__(self):
         super().__init__()
         self.setMinimumSize(640, 360)
-        self.setStyleSheet("background: black;")
-        # Required so Qt creates a real native window handle for mpv to embed into.
-        # Without these, mpv opens a separate window instead of embedding.
-        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_PaintOnScreen, True)
-        self._player = None
+        self._player = mpv.MPV(keep_open=True, pause=True)
+        self._render_ctx = None
 
-    def paintEngine(self):
-        # mpv owns the native window; Qt has no paint engine here.
-        # Returning None suppresses the "paintEngine == 0" warnings.
-        return None
-
-    def paintEvent(self, event):
-        # QFrame's default paintEvent would call QPainter on this widget,
-        # which has no engine (mpv owns the surface). Do nothing instead.
-        pass
-
-    def _init_player(self):
-        if self._player is not None:
-            return
-        _wd = os.environ.pop("WAYLAND_DISPLAY", None)
-        wid = int(self.winId())
-        print(f"[mpv] platform={QApplication.platformName()} wid={wid} WAYLAND_DISPLAY was={_wd}", flush=True)
-        try:
-            self._player = mpv.MPV(
-                wid=str(wid),
-                keep_open=True,
-                pause=True,
-            )
-        finally:
-            if _wd is not None:
-                os.environ["WAYLAND_DISPLAY"] = _wd
-        # mpv fires events on its own thread; bounce to Qt thread via QTimer.
         @self._player.event_callback("file-loaded")
         def _on_file_loaded(event):
             QTimer.singleShot(0, self.file_loaded.emit)
 
+    def initializeGL(self):
+        self._render_ctx = mpv.MpvRenderContext(
+            self._player, "opengl",
+            opengl_init_params={"get_proc_address": _mpv_get_proc_address},
+        )
+        self._render_ctx.update_cb = self._on_mpv_update
+
+    def _on_mpv_update(self):
+        # Called from mpv thread; schedule a repaint on the Qt thread.
+        self.update()
+
+    def paintGL(self):
+        if self._render_ctx:
+            fbo = self.defaultFramebufferObject()
+            r = self.devicePixelRatio()
+            self._render_ctx.render(
+                flip_y=True,
+                opengl_fbo={"w": int(self.width() * r), "h": int(self.height() * r), "fbo": fbo},
+            )
+
+    def resizeGL(self, w, h):
+        if self._render_ctx:
+            self.update()
+
     def load(self, path: str):
-        self._init_player()
         self._player.play(path)
 
     def seek(self, t: float):
-        if self._player:
-            self._player.pause = True
-            self._player.seek(t, "absolute")
+        self._player.pause = True
+        self._player.seek(t, "absolute")
 
     def play_loop(self, a: float, b: float):
-        if self._player:
-            self._player["ab-loop-a"] = a
-            # Clamp b to duration so AB loop fires even on clips shorter than 8s.
-            self._player["ab-loop-b"] = min(b, self._player.duration or b)
-            self._player.pause = False
+        self._player["ab-loop-a"] = a
+        # Clamp b to duration so AB loop fires even on clips shorter than 8s.
+        self._player["ab-loop-b"] = min(b, self._player.duration or b)
+        self._player.pause = False
 
     def stop_loop(self):
-        if self._player:
-            # ab-loop-a/b are numeric properties — setting to "no" via dict
-            # accessor throws TypeError. Disable loop via ab_loop_count instead.
-            self._player.ab_loop_count = 0
-            self._player.pause = True
+        # ab-loop-a/b are numeric properties — setting to "no" via dict
+        # accessor throws TypeError. Disable loop via ab_loop_count instead.
+        self._player.ab_loop_count = 0
+        self._player.pause = True
 
     def get_duration(self) -> float:
-        if self._player:
-            d = self._player.duration
-            return d if d else 0.0
-        return 0.0
+        d = self._player.duration
+        return d if d else 0.0
 
     def get_video_size(self) -> tuple[int, int]:
-        if self._player:
-            return (self._player.width or 0, self._player.height or 0)
-        return (0, 0)
+        return (self._player.width or 0, self._player.height or 0)
 
     def get_fps(self) -> float:
-        if self._player:
-            return self._player.container_fps or 25.0
-        return 25.0
+        return self._player.container_fps or 25.0
 
     def is_playing(self) -> bool:
-        return bool(self._player and not self._player.pause)
+        return not self._player.pause
 
     def mousePressEvent(self, event):
         w = self.width()
@@ -533,8 +541,9 @@ class MpvWidget(QFrame):
             self.crop_clicked.emit(event.position().x() / w)
 
     def closeEvent(self, event):
-        if self._player:
-            self._player.terminate()
+        if self._render_ctx:
+            self._render_ctx.free()
+        self._player.terminate()
         super().closeEvent(event)
 
 
@@ -812,11 +821,6 @@ class SettingsDialog(QDialog):
 
 
 def main():
-    # Force X11/XCB (XWayland) so mpv can embed via wid.
-    # mpv's wid parameter requires an X11 window ID; it does not work with
-    # Wayland surface handles. Override rather than setdefault so this takes
-    # effect even when QT_QPA_PLATFORM=wayland is already set by the session.
-    os.environ["QT_QPA_PLATFORM"] = "xcb"
     app = QApplication(sys.argv)
     locale.setlocale(locale.LC_NUMERIC, "C")  # QApplication resets locale; re-apply for libmpv
     app.setStyle("Fusion")
