@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QDialog, QPlainTextEdit, QCheckBox,
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSettings
-from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent, QCursor, QFont
+from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeyEvent
 import mpv
 
 
@@ -415,6 +415,14 @@ class MpvWidget(QFrame):
         if self._player:
             return (self._player.width or 0, self._player.height or 0)
         return (0, 0)
+
+    def get_fps(self) -> float:
+        if self._player:
+            return self._player.container_fps or 25.0
+        return 25.0
+
+    def is_playing(self) -> bool:
+        return bool(self._player and not self._player.pause)
 
     def mousePressEvent(self, event):
         w = self.width()
@@ -968,6 +976,53 @@ class MainWindow(QMainWindow):
     def _on_pause(self):
         self._mpv.stop_loop()
         self._mpv.seek(self._cursor)
+
+    def _step_cursor(self, delta: float) -> None:
+        if not self._file_path:
+            return
+        dur = self._mpv.get_duration()
+        new_t = max(0.0, min(self._cursor + delta, max(0.0, dur - 8.0)))
+        self._timeline.set_cursor(new_t)
+        self._on_cursor_changed(new_t)
+
+    def _jump_to_next_marker(self) -> None:
+        markers = sorted(self._timeline._markers, key=lambda m: m[0])
+        if not markers:
+            return
+        for (t, _num, _path) in markers:
+            if t > self._cursor + 0.1:
+                self._step_cursor(t - self._cursor)
+                return
+        self._step_cursor(markers[0][0] - self._cursor)  # wrap to first
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        focused = QApplication.focusWidget()
+        if isinstance(focused, (QLineEdit, QPlainTextEdit)):
+            super().keyPressEvent(event)
+            return
+
+        key = event.key()
+        shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        frame = 1.0 / self._mpv.get_fps()
+        step = 1.0 if shift else frame
+
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_J):
+            self._step_cursor(-step)
+        elif key in (Qt.Key.Key_Right, Qt.Key.Key_L):
+            self._step_cursor(step)
+        elif key in (Qt.Key.Key_Space, Qt.Key.Key_P):
+            if self._mpv.is_playing():
+                self._on_pause()
+            else:
+                self._on_play()
+        elif key == Qt.Key.Key_K:
+            self._on_pause()
+        elif key == Qt.Key.Key_E:
+            self._on_export()
+        elif key == Qt.Key.Key_M:
+            self._jump_to_next_marker()
+        else:
+            super().keyPressEvent(event)
 
     # --- Export ---
 
