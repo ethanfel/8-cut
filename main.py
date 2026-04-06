@@ -17,9 +17,8 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
     QComboBox, QDialog, QPlainTextEdit, QCheckBox,
 )
-from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSettings
-from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeyEvent
+from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
 import mpv
 
 
@@ -51,6 +50,7 @@ def build_ffmpeg_command(
     # (libx264/aac), so there is no keyframe-alignment issue from pre-input seek.
     cmd = [
         "ffmpeg", "-y",
+        "-threads", "0",
         "-ss", str(start),
         "-i", input_path,
         "-t", "8",
@@ -73,8 +73,8 @@ def build_ffmpeg_command(
         cmd += [
             "-an",
             "-c:v", "libwebp",
-            "-lossless", "1",
-            "-compression_level", "4",
+            "-quality", "85",
+            "-compression_level", "1",
             os.path.join(output_path, "frame_%04d.webp"),
         ]
     else:
@@ -220,6 +220,12 @@ class ProcessedDB:
         )
         self._con.commit()
 
+    def delete_by_output_path(self, output_path: str) -> None:
+        if not self._enabled:
+            return
+        self._con.execute("DELETE FROM processed WHERE output_path = ?", (output_path,))
+        self._con.commit()
+
     def find_similar(self, filename: str) -> str | None:
         if not self._enabled:
             return None
@@ -321,11 +327,15 @@ class ExportWorker(QThread):
 
 
 class TimelineWidget(QWidget):
-    cursor_changed = pyqtSignal(float)  # emits position in seconds
+    cursor_changed = pyqtSignal(float)        # emits position in seconds
+    marker_delete_requested = pyqtSignal(str) # emits output_path
+
+    _RULER_H = 22   # pixels reserved for the time ruler
+    _HANDLE_H = 8   # height of the playhead triangle
 
     def __init__(self):
         super().__init__()
-        self.setMinimumHeight(40)
+        self.setMinimumHeight(80)
         self.setMouseTracking(True)
         self._duration = 0.0
         self._cursor = 0.0
@@ -333,12 +343,16 @@ class TimelineWidget(QWidget):
         self._hover_cache: list[tuple[float, str]] = []  # (t/duration, path)
 
         # Cached paint resources — created once, reused every frame
-        self._cursor_pen = QPen(QColor(255, 200, 0))
+        self._cursor_pen = QPen(QColor(255, 210, 0))
         self._cursor_pen.setWidth(2)
         self._marker_pen = QPen(QColor(220, 60, 60))
         self._marker_pen.setWidth(2)
+        self._ruler_pen = QPen(QColor(120, 120, 120))
+        self._ruler_pen.setWidth(1)
         self._marker_font = QFont()
         self._marker_font.setPixelSize(9)
+        self._ruler_font = QFont()
+        self._ruler_font.setPixelSize(9)
 
         # Debounce timer: update visual cursor immediately but only emit
         # cursor_changed (which triggers mpv.seek) at most once per interval.
@@ -383,33 +397,102 @@ class TimelineWidget(QWidget):
         return ratio * self._duration
 
     def paintEvent(self, event):
+        from PyQt6.QtGui import QPolygon
+        from PyQt6.QtCore import QPoint
         p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         try:
             w, h = self.width(), self.height()
-            p.fillRect(0, 0, w, h, QColor(30, 30, 30))
+            rh = self._RULER_H
+            th = h - rh          # track height
+
+            # ── backgrounds ──────────────────────────────────────────────
+            p.fillRect(0, 0, w, rh, QColor(22, 22, 22))        # ruler bg
+            p.fillRect(0, rh, w, th, QColor(32, 32, 32))       # track bg
+
+            # subtle track lane (slightly raised strip in the middle)
+            lane_y = rh + th // 4
+            lane_h = th // 2
+            p.fillRect(0, lane_y, w, lane_h, QColor(42, 42, 42))
 
             if self._duration <= 0:
+                p.setPen(QColor(80, 80, 80))
+                p.drawText(0, 0, w, h, Qt.AlignmentFlag.AlignCenter, "No file loaded")
                 return
 
-            # 8s selection highlight
+            # ── time ruler ticks & labels ─────────────────────────────────
+            # Pick a tick interval so we get ~8-12 major ticks across the width
+            raw_step = self._duration / 10.0
+            for candidate in (0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300):
+                if candidate >= raw_step:
+                    major_step = candidate
+                    break
+            else:
+                major_step = int(raw_step / 60 + 1) * 60
+
+            minor_step = major_step / 5.0
+            p.setFont(self._ruler_font)
+
+            t = 0.0
+            while t <= self._duration + minor_step * 0.1:
+                rx = int(t / self._duration * w)
+                is_major = (round(t / major_step) * major_step - t) < minor_step * 0.1
+                if is_major:
+                    p.setPen(self._ruler_pen)
+                    p.drawLine(rx, rh - 10, rx, rh)
+                    # label
+                    mins = int(t) // 60
+                    secs = int(t) % 60
+                    label = f"{mins}:{secs:02d}" if mins else f"{secs}s"
+                    p.setPen(QColor(160, 160, 160))
+                    p.drawText(rx + 3, 0, 60, rh - 2,
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
+                               label)
+                else:
+                    p.setPen(QPen(QColor(70, 70, 70)))
+                    p.drawLine(rx, rh - 5, rx, rh)
+                t += minor_step
+
+            # ruler bottom border
+            p.setPen(QPen(QColor(55, 55, 55)))
+            p.drawLine(0, rh, w, rh)
+
+            # ── 8-second selection region ─────────────────────────────────
             x_start = int(self._cursor / self._duration * w)
-            x_end = int(min(self._cursor + 8.0, self._duration) / self._duration * w)
-            p.fillRect(x_start, 0, x_end - x_start, h, QColor(60, 120, 200, 120))
+            x_end   = int(min(self._cursor + 8.0, self._duration) / self._duration * w)
+            sel_w   = max(x_end - x_start, 1)
+            p.fillRect(x_start, rh, sel_w, th, QColor(60, 130, 220, 90))
+            # left/right edges of selection
+            p.setPen(QPen(QColor(60, 130, 220, 180), 1))
+            p.drawLine(x_start, rh, x_start, h)
+            p.drawLine(x_end,   rh, x_end,   h)
 
-            # Cursor line
-            p.setPen(self._cursor_pen)
-            p.drawLine(x_start, 0, x_start, h)
-
-            # Markers
+            # ── export markers ────────────────────────────────────────────
             p.setFont(self._marker_font)
             for (t, num, _path) in self._markers:
-                if self._duration <= 0:
-                    break
                 mx = int(t / self._duration * w)
                 p.setPen(self._marker_pen)
-                p.drawLine(mx, 0, mx, h)
+                p.drawLine(mx, rh, mx, h)
+                # small filled rectangle label
+                p.fillRect(mx, rh + 2, 14, 12, QColor(200, 50, 50))
                 p.setPen(QColor(255, 255, 255))
-                p.drawText(mx + 2, 10, str(num))
+                p.drawText(mx + 1, rh + 2, 13, 12,
+                           Qt.AlignmentFlag.AlignCenter, str(num))
+
+            # ── playhead ──────────────────────────────────────────────────
+            p.setPen(self._cursor_pen)
+            p.drawLine(x_start, rh, x_start, h)
+            # downward-pointing triangle handle in the ruler
+            hh = self._HANDLE_H
+            tri = QPolygon([
+                QPoint(x_start - hh // 2, rh - hh),
+                QPoint(x_start + hh // 2, rh - hh),
+                QPoint(x_start,           rh),
+            ])
+            p.setBrush(QColor(255, 210, 0))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawPolygon(tri)
+
         finally:
             p.end()
 
@@ -436,6 +519,25 @@ class TimelineWidget(QWidget):
         self._seek_timer.stop()
         self.cursor_changed.emit(self._cursor)
 
+    def contextMenuEvent(self, event):
+        if not self._hover_cache or self._duration <= 0:
+            return
+        x = event.pos().x()
+        w = self.width()
+        hit_path = None
+        for (frac, output_path) in self._hover_cache:
+            if abs(x - frac * w) <= 6:
+                hit_path = output_path
+                break
+        if hit_path is None:
+            return
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        name = os.path.basename(hit_path)
+        action = menu.addAction(f"Delete marker: {name}")
+        if menu.exec(event.globalPos()) == action:
+            self.marker_delete_requested.emit(hit_path)
+
     def _seek(self, x: float):
         t = self._pos_to_time(int(x))
         self.set_cursor(t)           # update visuals immediately
@@ -445,79 +547,119 @@ class TimelineWidget(QWidget):
 import ctypes
 
 
-class MpvWidget(QOpenGLWidget):
-    file_loaded = pyqtSignal()   # emitted (on Qt thread) when a file is ready
-    crop_clicked = pyqtSignal(float)  # x fraction 0–1 when user clicks video
+class MpvWidget(QWidget):
+    """Embeds mpv using an off-screen OpenGL FBO with QPainter readback.
+
+    mpv renders each frame into a QOpenGLFramebufferObject on an off-screen
+    surface.  The FBO is read back to a QImage and displayed via QPainter,
+    bypassing Wayland sub-surface compositing issues that affect both
+    QOpenGLWidget and QOpenGLWindow+createWindowContainer.
+    """
+    file_loaded = pyqtSignal()
+    crop_clicked = pyqtSignal(float)
+    _do_file_loaded = pyqtSignal()  # mpv thread → Qt main thread for file-loaded event
 
     def __init__(self):
         super().__init__()
         self.setMinimumSize(640, 360)
-        _log_file = open("/tmp/8cut-mpv.log", "w", buffering=1)
-        self._log_file = _log_file
-
-        def _log_handler(level, component, message):
-            _log_file.write(f"[mpv/{component}] {level}: {message}\n")
-
-        self._player = mpv.MPV(keep_open=True, pause=True, log_handler=_log_handler, loglevel="info")
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._frame: "QImage | None" = None
         self._render_ctx = None
+        self._fbo = None
+        self._needs_render = False  # set True by mpv update_cb (any thread)
 
-        @self._player.event_callback("file-loaded")
-        def _on_file_loaded(event):
-            QTimer.singleShot(0, self.file_loaded.emit)
+        from PyQt6.QtGui import QOffscreenSurface, QOpenGLContext, QSurfaceFormat
+        from PyQt6.QtOpenGL import QOpenGLFramebufferObject
 
-    def _8cut_log(self, msg):
-        self._log_file.write(f"[8-cut] {msg}\n")
+        fmt = QSurfaceFormat.defaultFormat()
+        self._gl_surface = QOffscreenSurface()
+        self._gl_surface.setFormat(fmt)
+        self._gl_surface.create()
 
-    def initializeGL(self):
-        from PyQt6.QtGui import QOpenGLContext
-        self._8cut_log(f"initializeGL called, platform={QApplication.platformName()}")
+        self._gl_ctx = QOpenGLContext()
+        self._gl_ctx.setFormat(fmt)
+        self._gl_ctx.create()
+        self._gl_ctx.makeCurrent(self._gl_surface)
 
-        # Build the get_proc_address C callback using the live Qt OpenGL context.
-        # Must be created here (inside initializeGL) so QOpenGLContext.currentContext()
-        # is valid, and stored on self to prevent garbage collection.
         _PROC_ADDR_T = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)
 
         @_PROC_ADDR_T
         def _get_proc_addr(_, name):
-            ctx = QOpenGLContext.currentContext()
-            if ctx is None:
-                self._8cut_log(f"get_proc_addr: no current context for {name}")
-                return 0
-            addr = ctx.getProcAddress(name)
+            addr = self._gl_ctx.getProcAddress(name)
             return int(addr) if addr else 0
 
-        self._get_proc_addr_fn = _get_proc_addr  # keep alive
+        self._get_proc_addr_fn = _get_proc_addr
 
+        self._player = mpv.MPV(keep_open=True, pause=True, vo="libmpv")
         try:
             self._render_ctx = mpv.MpvRenderContext(
                 self._player, "opengl",
                 opengl_init_params={"get_proc_address": self._get_proc_addr_fn},
             )
-            self._8cut_log("MpvRenderContext created OK")
+            self._render_ctx.update_cb = self._on_mpv_update
         except Exception as e:
-            self._8cut_log(f"MpvRenderContext FAILED: {e}")
-            return
-        self._render_ctx.update_cb = self._on_mpv_update
+            print(f"[8-cut] MpvRenderContext failed: {e}", file=sys.stderr)
+
+        self._gl_ctx.doneCurrent()
+
+        # Timer polls for new frames at ~60 fps; avoids flooding the event loop
+        # from mpv's C thread which calls update_cb at playback rate.
+        self._render_timer = QTimer(self)
+        self._render_timer.setInterval(16)
+        self._render_timer.timeout.connect(self._poll_render)
+        self._render_timer.start()
+
+        self._do_file_loaded.connect(self.file_loaded)
+
+        @self._player.event_callback("file-loaded")
+        def _on_file_loaded(event):
+            self._do_file_loaded.emit()
 
     def _on_mpv_update(self):
-        # Called from mpv thread; schedule a repaint on the Qt thread.
-        self.update()
+        # Called from mpv's C thread — only set a flag, no Qt calls here.
+        self._needs_render = True
 
-    def paintGL(self):
-        if self._render_ctx:
-            fbo = self.defaultFramebufferObject()
-            r = self.devicePixelRatio()
+    def _poll_render(self):
+        if self._needs_render and self._render_ctx and self._render_ctx.update():
+            self._needs_render = False
+            self._render_frame()
+
+    def _render_frame(self):
+        from PyQt6.QtOpenGL import QOpenGLFramebufferObject
+        if not self._render_ctx:
+            return
+        w, h = max(self.width(), 1), max(self.height(), 1)
+        self._gl_ctx.makeCurrent(self._gl_surface)
+        try:
+            if self._fbo is None or self._fbo.width() != w or self._fbo.height() != h:
+                self._fbo = QOpenGLFramebufferObject(w, h)
             self._render_ctx.render(
                 flip_y=True,
-                opengl_fbo={"w": int(self.width() * r), "h": int(self.height() * r), "fbo": fbo},
+                opengl_fbo={"w": w, "h": h, "fbo": self._fbo.handle()},
             )
+            self._render_ctx.report_swap()
+            self._frame = self._fbo.toImage()
+        except Exception as e:
+            print(f"[8-cut] render error: {e}", file=sys.stderr)
+        finally:
+            self._gl_ctx.doneCurrent()
+        self.update()
 
-    def resizeGL(self, w, h):
-        if self._render_ctx:
-            self.update()
+    def paintEvent(self, event):
+        p = QPainter(self)
+        if self._frame and not self._frame.isNull():
+            p.drawImage(self.rect(), self._frame)
+        else:
+            p.fillRect(self.rect(), QColor(0, 0, 0))
+        p.end()
 
-    def load(self, path: str):
-        self._player.play(path)
+    def mousePressEvent(self, event):
+        w = self.width()
+        if w > 0:
+            self.crop_clicked.emit(event.position().x() / w)
+
+    def load(self, path: str): self._player.play(path)
 
     def seek(self, t: float):
         self._player.pause = True
@@ -525,14 +667,12 @@ class MpvWidget(QOpenGLWidget):
 
     def play_loop(self, a: float, b: float):
         self._player["ab-loop-a"] = a
-        # Clamp b to duration so AB loop fires even on clips shorter than 8s.
         self._player["ab-loop-b"] = min(b, self._player.duration or b)
         self._player.pause = False
 
     def stop_loop(self):
-        # ab-loop-a/b are numeric properties — setting to "no" via dict
-        # accessor throws TypeError. Disable loop via ab_loop_count instead.
-        self._player.ab_loop_count = 0
+        self._player["ab-loop-a"] = "no"
+        self._player["ab-loop-b"] = "no"
         self._player.pause = True
 
     def get_duration(self) -> float:
@@ -548,15 +688,13 @@ class MpvWidget(QOpenGLWidget):
     def is_playing(self) -> bool:
         return not self._player.pause
 
-    def mousePressEvent(self, event):
-        w = self.width()
-        if w > 0:
-            self.crop_clicked.emit(event.position().x() / w)
-
     def closeEvent(self, event):
+        self._render_timer.stop()
         if self._render_ctx:
             self._render_ctx.free()
+            self._render_ctx = None
         self._player.terminate()
+        self._fbo = None
         super().closeEvent(event)
 
 
@@ -834,6 +972,15 @@ class SettingsDialog(QDialog):
 
 
 def main():
+    # Force desktop OpenGL (not GLES) so mpv's render context produces non-black output.
+    # Must be set before QApplication.
+    from PyQt6.QtGui import QSurfaceFormat
+    _fmt = QSurfaceFormat()
+    _fmt.setRenderableType(QSurfaceFormat.RenderableType.OpenGL)
+    _fmt.setVersion(3, 3)
+    _fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+    QSurfaceFormat.setDefaultFormat(_fmt)
+
     app = QApplication(sys.argv)
     locale.setlocale(locale.LC_NUMERIC, "C")  # QApplication resets locale; re-apply for libmpv
     app.setStyle("Fusion")
@@ -880,7 +1027,9 @@ class MainWindow(QMainWindow):
         self._mpv = MpvWidget()
         self._mpv.file_loaded.connect(self._after_load)
         self._timeline = TimelineWidget()
+        self._timeline.setFixedHeight(160)
         self._timeline.cursor_changed.connect(self._on_cursor_changed)
+        self._timeline.marker_delete_requested.connect(self._on_delete_marker)
 
         self._lbl_file = QLabel("Drop files onto the queue →")
         self._lbl_file.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -897,17 +1046,20 @@ class MainWindow(QMainWindow):
         self._lbl_cursor = QLabel("cursor: --")
         self._lbl_duration = QLabel("dur: --")
 
+        self._settings = QSettings("8cut", "8cut")
+
         self._txt_name = QLineEdit("clip")
         self._txt_name.setPlaceholderText("base name")
         self._txt_name.setMaximumWidth(150)
         self._txt_name.textChanged.connect(self._reset_counter)
 
-        self._txt_folder = QLineEdit(str(Path.home()))
+        self._txt_folder = QLineEdit(self._settings.value("export_folder", str(Path.home())))
         self._txt_folder.textChanged.connect(self._reset_counter)
+        self._txt_folder.textChanged.connect(
+            lambda v: self._settings.setValue("export_folder", v)
+        )
         self._btn_folder = QPushButton("Browse")
         self._btn_folder.clicked.connect(self._pick_folder)
-
-        self._settings = QSettings("8cut", "8cut")
         self._txt_resize = QLineEdit()
         self._txt_resize.setPlaceholderText("px (opt.)")
         self._txt_resize.setMaximumWidth(70)
@@ -990,35 +1142,44 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self._lbl_file, stretch=1)
         top_bar.addWidget(self._btn_settings)
 
-        controls = QHBoxLayout()
-        controls.addWidget(self._btn_play)
-        controls.addWidget(self._btn_pause)
-        controls.addStretch()
-        controls.addWidget(self._lbl_cursor)
-        controls.addWidget(self._lbl_duration)
+        # Row 1 — transport + annotation + export trigger
+        transport_row = QHBoxLayout()
+        transport_row.addWidget(self._btn_play)
+        transport_row.addWidget(self._btn_pause)
+        transport_row.addWidget(self._lbl_cursor)
+        transport_row.addWidget(self._lbl_duration)
+        transport_row.addStretch()
+        transport_row.addWidget(QLabel("Label:"))
+        transport_row.addWidget(self._txt_label)
+        transport_row.addWidget(QLabel("Cat:"))
+        transport_row.addWidget(self._cmb_category)
+        transport_row.addWidget(self._lbl_next)
+        transport_row.addWidget(self._btn_export)
 
-        export_row = QHBoxLayout()
-        export_row.addWidget(QLabel("Name:"))
-        export_row.addWidget(self._txt_name)
-        export_row.addWidget(QLabel("Folder:"))
-        export_row.addWidget(self._txt_folder, stretch=1)
-        export_row.addWidget(self._btn_folder)
-        export_row.addWidget(QLabel("Short side:"))
-        export_row.addWidget(self._txt_resize)
-        export_row.addWidget(QLabel("Portrait:"))
-        export_row.addWidget(self._cmb_portrait)
-        export_row.addWidget(QLabel("Format:"))
-        export_row.addWidget(self._cmb_format)
-        export_row.addWidget(self._lbl_next)
-        export_row.addWidget(self._btn_export)
+        # Row 2 — output path + encoding settings (bottom)
+        settings_row = QHBoxLayout()
+        settings_row.addWidget(QLabel("Name:"))
+        settings_row.addWidget(self._txt_name)
+        settings_row.addWidget(QLabel("Folder:"))
+        settings_row.addWidget(self._txt_folder, stretch=1)
+        settings_row.addWidget(self._btn_folder)
+        settings_row.addWidget(QLabel("Short side:"))
+        settings_row.addWidget(self._txt_resize)
+        settings_row.addWidget(QLabel("Portrait:"))
+        settings_row.addWidget(self._cmb_portrait)
+        settings_row.addWidget(QLabel("Format:"))
+        settings_row.addWidget(self._cmb_format)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(4)
         right_layout.addLayout(top_bar)
         right_layout.addWidget(self._mpv, stretch=1)
         right_layout.addWidget(self._timeline)
         right_layout.addWidget(self._crop_bar)
+        right_layout.addLayout(transport_row)
+        right_layout.addLayout(settings_row)
 
         self._mask_row_widget = QWidget()
         mask_row = QHBoxLayout(self._mask_row_widget)
@@ -1030,16 +1191,6 @@ class MainWindow(QMainWindow):
         show_masks = self._settings.value("show_masks_row", "true") == "true"
         self._mask_row_widget.setVisible(show_masks)
 
-        annotation_row = QHBoxLayout()
-        annotation_row.addWidget(QLabel("Label:"))
-        annotation_row.addWidget(self._txt_label)
-        annotation_row.addWidget(QLabel("Category:"))
-        annotation_row.addWidget(self._cmb_category)
-        annotation_row.addStretch()
-
-        right_layout.addLayout(controls)
-        right_layout.addLayout(export_row)
-        right_layout.addLayout(annotation_row)
         right_layout.addWidget(self._mask_row_widget)
 
         # Left: queue label + playlist
@@ -1062,6 +1213,32 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(splitter)
         self.setStatusBar(QStatusBar())
         self._crop_bar.setVisible(saved_ratio != "Off")
+
+        # Application-wide shortcuts — fire regardless of which widget has focus.
+        ctx = Qt.ShortcutContext.ApplicationShortcut
+        for key in ("Left", "J"):
+            QShortcut(QKeySequence(key), self, context=ctx).activated.connect(
+                lambda: self._step_cursor(-1.0 / self._fps)
+            )
+        for key in ("Right", "L"):
+            QShortcut(QKeySequence(key), self, context=ctx).activated.connect(
+                lambda: self._step_cursor(1.0 / self._fps)
+            )
+        for key in ("Shift+Left", "Shift+J"):
+            QShortcut(QKeySequence(key), self, context=ctx).activated.connect(
+                lambda: self._step_cursor(-1.0)
+            )
+        for key in ("Shift+Right", "Shift+L"):
+            QShortcut(QKeySequence(key), self, context=ctx).activated.connect(
+                lambda: self._step_cursor(1.0)
+            )
+        for key in ("Space", "P"):
+            QShortcut(QKeySequence(key), self, context=ctx).activated.connect(
+                self._toggle_play
+            )
+        QShortcut(QKeySequence("K"), self, context=ctx).activated.connect(self._on_pause)
+        QShortcut(QKeySequence("E"), self, context=ctx).activated.connect(self._on_export)
+        QShortcut(QKeySequence("M"), self, context=ctx).activated.connect(self._jump_to_next_marker)
 
     def _load_file(self, path: str):
         self._file_path = path
@@ -1110,6 +1287,13 @@ class MainWindow(QMainWindow):
             markers = []
         self._timeline.set_markers(markers)
 
+    def _on_delete_marker(self, output_path: str) -> None:
+        self._db.delete_by_output_path(output_path)
+        self._refresh_markers()
+        self.statusBar().showMessage(
+            f"Deleted marker: {os.path.basename(output_path)}", 4000
+        )
+
     def _on_portrait_ratio_changed(self, text: str) -> None:
         ratio = None if text == "Off" else text
         self._crop_bar.set_portrait_ratio(ratio)
@@ -1130,6 +1314,14 @@ class MainWindow(QMainWindow):
         self._cursor = t
         self._lbl_cursor.setText(f"cursor: {format_time(t)}")
         self._mpv.seek(t)
+
+    def _toggle_play(self):
+        if not self._file_path:
+            return
+        if self._mpv.is_playing():
+            self._on_pause()
+        else:
+            self._on_play()
 
     def _on_play(self):
         if not self._file_path:
@@ -1161,35 +1353,6 @@ class MainWindow(QMainWindow):
                 self._step_cursor(t - self._cursor)
                 return
         self._step_cursor(markers[0][0] - self._cursor)  # wrap to first
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        focused = QApplication.focusWidget()
-        if isinstance(focused, (QLineEdit, QPlainTextEdit)):
-            super().keyPressEvent(event)
-            return
-
-        key = event.key()
-        shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-        frame = 1.0 / self._fps
-        step = 1.0 if shift else frame
-
-        if key in (Qt.Key.Key_Left, Qt.Key.Key_J):
-            self._step_cursor(-step)
-        elif key in (Qt.Key.Key_Right, Qt.Key.Key_L):
-            self._step_cursor(step)
-        elif key in (Qt.Key.Key_Space, Qt.Key.Key_P):
-            if self._mpv.is_playing():
-                self._on_pause()
-            else:
-                self._on_play()
-        elif key == Qt.Key.Key_K:
-            self._on_pause()
-        elif key == Qt.Key.Key_E:
-            self._on_export()
-        elif key == Qt.Key.Key_M:
-            self._jump_to_next_marker()
-        else:
-            super().keyPressEvent(event)
 
     # --- Export ---
 
@@ -1239,6 +1402,10 @@ class MainWindow(QMainWindow):
 
         self._btn_export.setEnabled(False)
         self.statusBar().showMessage(f"Exporting {os.path.basename(output)}…")
+
+        # Show marker immediately — don't wait for ffmpeg to finish.
+        pending = self._timeline._markers + [(self._cursor, self._export_counter, output)]
+        self._timeline.set_markers(pending)
 
         ratio_text = self._cmb_portrait.currentText()
         portrait_ratio = None if ratio_text == "Off" else ratio_text
