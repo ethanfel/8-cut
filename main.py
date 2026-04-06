@@ -452,20 +452,25 @@ class MpvWidget(QOpenGLWidget):
     def __init__(self):
         super().__init__()
         self.setMinimumSize(640, 360)
-        self._player = mpv.MPV(keep_open=True, pause=True, log_handler=self._log, loglevel="debug")
+        _log_file = open("/tmp/8cut-mpv.log", "w", buffering=1)
+        self._log_file = _log_file
+
+        def _log_handler(level, component, message):
+            _log_file.write(f"[mpv/{component}] {level}: {message}\n")
+
+        self._player = mpv.MPV(keep_open=True, pause=True, log_handler=_log_handler, loglevel="info")
         self._render_ctx = None
 
         @self._player.event_callback("file-loaded")
         def _on_file_loaded(event):
             QTimer.singleShot(0, self.file_loaded.emit)
 
-    @staticmethod
-    def _log(level, component, message):
-        print(f"[mpv/{component}] {level}: {message}", flush=True)
+    def _8cut_log(self, msg):
+        self._log_file.write(f"[8-cut] {msg}\n")
 
     def initializeGL(self):
         from PyQt6.QtGui import QOpenGLContext
-        print(f"[8-cut] initializeGL called, platform={QApplication.platformName()}", flush=True)
+        self._8cut_log(f"initializeGL called, platform={QApplication.platformName()}")
 
         # Build the get_proc_address C callback using the live Qt OpenGL context.
         # Must be created here (inside initializeGL) so QOpenGLContext.currentContext()
@@ -476,7 +481,7 @@ class MpvWidget(QOpenGLWidget):
         def _get_proc_addr(_, name):
             ctx = QOpenGLContext.currentContext()
             if ctx is None:
-                print(f"[8-cut] get_proc_addr: no current context for {name}", flush=True)
+                self._8cut_log(f"get_proc_addr: no current context for {name}")
                 return 0
             addr = ctx.getProcAddress(name)
             return int(addr) if addr else 0
@@ -488,9 +493,9 @@ class MpvWidget(QOpenGLWidget):
                 self._player, "opengl",
                 opengl_init_params={"get_proc_address": self._get_proc_addr_fn},
             )
-            print(f"[8-cut] MpvRenderContext created OK", flush=True)
+            self._8cut_log("MpvRenderContext created OK")
         except Exception as e:
-            print(f"[8-cut] MpvRenderContext FAILED: {e}", flush=True)
+            self._8cut_log(f"MpvRenderContext FAILED: {e}")
             return
         self._render_ctx.update_cb = self._on_mpv_update
 
