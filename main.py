@@ -1,6 +1,10 @@
 import sys
 import os
+import re
+import sqlite3
 import subprocess
+from datetime import datetime
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -37,6 +41,62 @@ def build_ffmpeg_command(input_path: str, start: float, output_path: str) -> lis
         "-c:a", "aac",
         output_path,
     ]
+
+
+def _normalize_filename(filename: str) -> str:
+    """Strip extension and common resolution/quality tags for fuzzy comparison."""
+    name = os.path.splitext(filename)[0].lower()
+    name = re.sub(
+        r'(?<![a-z0-9])(2160p?|4k|8k|1080p?|720p?|480p?|360p?|240p?'
+        r'|hdr|sdr|x264|x265|h264|h265|hevc|avc'
+        r'|blu[-_.]?ray|webrip|web[-_.]dl|dvdrip|hdtv)(?![a-z0-9])',
+        '', name, flags=re.IGNORECASE,
+    )
+    name = re.sub(r'[\s_\-\.]+', '_', name).strip('_')
+    return name
+
+
+class ProcessedDB:
+    def __init__(self, db_path: str | None = None):
+        if db_path is None:
+            db_path = str(Path.home() / ".8cut.db")
+        try:
+            self._con = sqlite3.connect(db_path)
+            self._con.execute(
+                "CREATE TABLE IF NOT EXISTS processed "
+                "(filename TEXT NOT NULL, processed_at TEXT NOT NULL)"
+            )
+            self._con.commit()
+            self._enabled = True
+        except Exception as e:
+            print(f"8-cut: DB unavailable: {e}", file=sys.stderr)
+            self._con = None
+            self._enabled = False
+
+    def add(self, filename: str) -> None:
+        if not self._enabled:
+            return
+        self._con.execute(
+            "INSERT INTO processed (filename, processed_at) VALUES (?, ?)",
+            (filename, datetime.utcnow().isoformat()),
+        )
+        self._con.commit()
+
+    def find_similar(self, filename: str) -> str | None:
+        if not self._enabled:
+            return None
+        rows = self._con.execute(
+            "SELECT DISTINCT filename FROM processed"
+        ).fetchall()
+        norm_new = _normalize_filename(filename)
+        best_ratio, best_match = 0.0, None
+        for (stored,) in rows:
+            ratio = SequenceMatcher(
+                None, norm_new, _normalize_filename(stored)
+            ).ratio()
+            if ratio >= 0.75 and ratio > best_ratio:
+                best_ratio, best_match = ratio, stored
+        return best_match
 
 
 class ExportWorker(QThread):

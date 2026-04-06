@@ -1,4 +1,6 @@
+import tempfile, os
 from main import build_export_path, format_time, build_ffmpeg_command
+from main import _normalize_filename, ProcessedDB
 
 
 def test_build_export_path_first():
@@ -32,3 +34,62 @@ def test_ffmpeg_command():
     assert "-t" in cmd
     assert "8" in cmd
     assert cmd[-1] == "/out/clip_001.mp4"
+
+
+# --- _normalize_filename ---
+
+def test_normalize_strips_extension():
+    assert _normalize_filename("clip.mp4") == "clip"
+
+def test_normalize_strips_resolution():
+    assert _normalize_filename("clip_2160p.mp4") == "clip"
+
+def test_normalize_strips_1080p():
+    assert _normalize_filename("clip_1080p.mkv") == "clip"
+
+def test_normalize_strips_multiple_tags():
+    assert _normalize_filename("show_1080p_HDR.mkv") == "show"
+
+def test_normalize_lowercases():
+    assert _normalize_filename("MyVideo_4K.mp4") == "myvideo"
+
+def test_normalize_collapses_separators():
+    assert _normalize_filename("my__video--2160p.mp4") == "my_video"
+
+
+# --- ProcessedDB ---
+
+def test_db_add_and_find_exact():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    try:
+        db = ProcessedDB(path)
+        db.add("video.mp4")
+        assert db.find_similar("video.mp4") == "video.mp4"
+    finally:
+        os.unlink(path)
+
+def test_db_find_similar_resolution_variant():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    try:
+        db = ProcessedDB(path)
+        db.add("episode_s01e01_2160p.mkv")
+        assert db.find_similar("episode_s01e01_1080p.mkv") == "episode_s01e01_2160p.mkv"
+    finally:
+        os.unlink(path)
+
+def test_db_find_similar_no_match():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    try:
+        db = ProcessedDB(path)
+        db.add("alpha.mp4")
+        assert db.find_similar("completely_different_zzzz.mp4") is None
+    finally:
+        os.unlink(path)
+
+def test_db_disabled_survives_bad_path():
+    db = ProcessedDB("/no/such/directory/8cut.db")
+    db.add("x.mp4")           # must not raise
+    assert db.find_similar("x.mp4") is None   # gracefully returns None
