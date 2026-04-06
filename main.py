@@ -452,6 +452,11 @@ class MpvWidget(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_PaintOnScreen, True)
         self._player = None
 
+    def paintEngine(self):
+        # mpv owns the native window; Qt has no paint engine here.
+        # Returning None suppresses the "paintEngine == 0" warnings.
+        return None
+
     def _init_player(self):
         if self._player is not None:
             return
