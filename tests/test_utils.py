@@ -192,8 +192,8 @@ def test_build_sequence_dir_counter():
 
 def test_ffmpeg_command_image_sequence():
     cmd = build_ffmpeg_command("/in/v.mp4", 0.0, "/out/seq_001", image_sequence=True)
-    assert "-vcodec" in cmd
-    assert cmd[cmd.index("-vcodec") + 1] == "libwebp"
+    assert "-c:v" in cmd
+    assert cmd[cmd.index("-c:v") + 1] == "libwebp"
     assert "-lossless" in cmd
     assert cmd[cmd.index("-lossless") + 1] == "1"
     assert "-compression_level" in cmd
@@ -209,5 +209,6 @@ def test_ffmpeg_command_image_sequence_with_resize():
 
 def test_ffmpeg_command_image_sequence_no_audio():
     cmd = build_ffmpeg_command("/in/v.mp4", 0.0, "/out/seq_001", image_sequence=True)
+    assert "-an" in cmd
     assert "-c:a" not in cmd
     assert "aac" not in cmd

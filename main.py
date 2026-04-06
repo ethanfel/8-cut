@@ -66,7 +66,8 @@ def build_ffmpeg_command(
 
     if image_sequence:
         cmd += [
-            "-vcodec", "libwebp",
+            "-an",
+            "-c:v", "libwebp",
             "-lossless", "1",
             "-compression_level", "4",
             os.path.join(output_path, "frame_%04d.webp"),
