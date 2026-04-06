@@ -1,5 +1,17 @@
+import os
 import sys
 from PyQt6.QtWidgets import QApplication, QMainWindow
+
+
+def build_export_path(folder: str, basename: str, counter: int) -> str:
+    filename = f"{basename}_{counter:03d}.mp4"
+    return os.path.join(folder, filename)
+
+
+def format_time(seconds: float) -> str:
+    m = int(seconds) // 60
+    s = seconds - m * 60
+    return f"{m}:{s:04.1f}"
 
 
 def main():
