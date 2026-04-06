@@ -442,37 +442,7 @@ class TimelineWidget(QWidget):
         self._seek_timer.start()     # debounce the mpv seek
 
 
-import ctypes, ctypes.util
-
-def _make_get_proc_address():
-    """Return a ctypes C-callable for mpv's OpenGL get_proc_address."""
-    _libs = []
-    for lib_name in ("EGL", "GL"):
-        path = ctypes.util.find_library(lib_name)
-        if path:
-            try:
-                _libs.append(ctypes.CDLL(path))
-            except Exception:
-                pass
-
-    def _lookup(_, name):
-        for lib in _libs:
-            for fn_name in (b"eglGetProcAddress", b"glXGetProcAddressARB", b"glXGetProcAddress"):
-                fn = getattr(lib, fn_name.decode(), None)
-                if fn is None:
-                    continue
-                fn.restype = ctypes.c_void_p
-                fn.argtypes = [ctypes.c_char_p]
-                addr = fn(name)
-                if addr:
-                    return addr
-        return None
-
-    # mpv requires a real C function pointer, not a Python callable.
-    _PROC_ADDR_TYPE = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)
-    return _PROC_ADDR_TYPE(_lookup)
-
-_mpv_get_proc_address = _make_get_proc_address()
+import ctypes
 
 
 class MpvWidget(QOpenGLWidget):
@@ -494,12 +464,34 @@ class MpvWidget(QOpenGLWidget):
         print(f"[mpv/{component}] {level}: {message}", flush=True)
 
     def initializeGL(self):
+        from PyQt6.QtGui import QOpenGLContext
         print(f"[8-cut] initializeGL called, platform={QApplication.platformName()}", flush=True)
-        self._render_ctx = mpv.MpvRenderContext(
-            self._player, "opengl",
-            opengl_init_params={"get_proc_address": _mpv_get_proc_address},
-        )
-        print(f"[8-cut] MpvRenderContext created: {self._render_ctx}", flush=True)
+
+        # Build the get_proc_address C callback using the live Qt OpenGL context.
+        # Must be created here (inside initializeGL) so QOpenGLContext.currentContext()
+        # is valid, and stored on self to prevent garbage collection.
+        _PROC_ADDR_T = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)
+
+        @_PROC_ADDR_T
+        def _get_proc_addr(_, name):
+            ctx = QOpenGLContext.currentContext()
+            if ctx is None:
+                print(f"[8-cut] get_proc_addr: no current context for {name}", flush=True)
+                return 0
+            addr = ctx.getProcAddress(name)
+            return int(addr) if addr else 0
+
+        self._get_proc_addr_fn = _get_proc_addr  # keep alive
+
+        try:
+            self._render_ctx = mpv.MpvRenderContext(
+                self._player, "opengl",
+                opengl_init_params={"get_proc_address": self._get_proc_addr_fn},
+            )
+            print(f"[8-cut] MpvRenderContext created OK", flush=True)
+        except Exception as e:
+            print(f"[8-cut] MpvRenderContext FAILED: {e}", flush=True)
+            return
         self._render_ctx.update_cb = self._on_mpv_update
 
     def _on_mpv_update(self):
