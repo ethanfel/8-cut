@@ -266,8 +266,15 @@ def test_db_stores_label_and_category():
     try:
         db = ProcessedDB(path)
         db.add("video.mp4", 0.0, "/out/clip_001.mp4", label="dog barking", category="Animal")
-        markers = db.get_markers("video.mp4")
-        assert len(markers) == 1
-        assert markers[0][0] == 0.0
+        row = db._con.execute(
+            "SELECT label, category FROM processed WHERE filename = ?", ("video.mp4",)
+        ).fetchone()
+        assert row == ("dog barking", "Animal")
     finally:
         os.unlink(path)
+
+def test_append_to_tsv_missing_folder_creates_it():
+    with tempfile.TemporaryDirectory() as d:
+        nested = os.path.join(d, "subdir", "deep")
+        append_to_tsv(nested, "clip_001", "dog barking")
+        assert os.path.exists(os.path.join(nested, "dataset.tsv"))

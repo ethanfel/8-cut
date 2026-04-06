@@ -96,10 +96,15 @@ def build_annotation_tsv_path(folder: str) -> str:
 
 
 def append_to_tsv(folder: str, clip_stem: str, label: str) -> None:
-    """Append one line to <folder>/dataset.tsv (creates file if absent)."""
-    if not label:
+    """Append one line to <folder>/dataset.tsv (creates file if absent).
+
+    Format: ``{clip_stem}\\t{label}`` — matches VGGSound training TSV (2 columns).
+    Category is stored in the database only, not in the TSV.
+    """
+    if not label.strip():
         return
     tsv_path = build_annotation_tsv_path(folder)
+    os.makedirs(folder, exist_ok=True)
     with open(tsv_path, "a", encoding="utf-8") as f:
         f.write(f"{clip_stem}\t{label}\n")
 
@@ -144,6 +149,7 @@ _QUALITY_RE = re.compile(
     re.IGNORECASE,
 )
 _SEP_RE = re.compile(r'[\s_\-\.]+')
+_SELVA_CATEGORIES = ["", "Human", "Animal", "Vehicle", "Tool", "Music", "Nature", "Sport", "Other"]
 
 
 def _normalize_filename(filename: str) -> str:
@@ -912,7 +918,6 @@ class MainWindow(QMainWindow):
         )
 
         self._cmb_category = QComboBox()
-        _SELVA_CATEGORIES = ["", "Human", "Animal", "Vehicle", "Tool", "Music", "Nature", "Sport", "Other"]
         self._cmb_category.addItems(_SELVA_CATEGORIES)
         saved_cat = self._settings.value("sound_category", "")
         cat_idx = self._cmb_category.findText(saved_cat)
@@ -999,7 +1004,7 @@ class MainWindow(QMainWindow):
         annotation_row = QHBoxLayout()
         annotation_row.addWidget(QLabel("Label:"))
         annotation_row.addWidget(self._txt_label)
-        annotation_row.addWidget(QLabel("Cat:"))
+        annotation_row.addWidget(QLabel("Category:"))
         annotation_row.addWidget(self._cmb_category)
         annotation_row.addStretch()
 
