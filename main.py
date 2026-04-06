@@ -525,6 +525,12 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().clearMessage()
 
+        self._refresh_markers()
+
+    def _refresh_markers(self) -> None:
+        markers = self._db.get_markers(os.path.basename(self._file_path))
+        self._timeline.set_markers(markers)
+
     # --- Playback ---
 
     def _on_cursor_changed(self, t: float):
@@ -588,6 +594,7 @@ class MainWindow(QMainWindow):
         self._update_next_label()
         self._btn_export.setEnabled(True)
         self.statusBar().showMessage(f"Exported: {os.path.basename(path)}")
+        self._refresh_markers()
         self._playlist.advance()
 
     def _on_export_error(self, msg: str):
