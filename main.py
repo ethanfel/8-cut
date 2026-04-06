@@ -9,8 +9,8 @@ def build_export_path(folder: str, basename: str, counter: int) -> str:
 
 
 def format_time(seconds: float) -> str:
-    m = int(seconds) // 60
-    s = seconds - m * 60
+    m = int(seconds // 60)
+    s = int(seconds % 60 * 10) / 10  # floor-truncate to 1dp, prevents "X:60.0" rollover
     return f"{m}:{s:04.1f}"
 
 
