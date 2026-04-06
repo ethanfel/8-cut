@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QFileDialog, QFrame, QStatusBar,
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
+    QComboBox,
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent, QCursor, QFont
@@ -182,16 +183,24 @@ class ExportWorker(QThread):
     error = pyqtSignal(str)      # error message
 
     def __init__(self, input_path: str, start: float, output_path: str,
-                 short_side: int | None = None):
+                 short_side: int | None = None,
+                 portrait_ratio: str | None = None,
+                 crop_center: float = 0.5):
         super().__init__()
         self._input = input_path
         self._start = start
         self._output = output_path
         self._short_side = short_side
+        self._portrait_ratio = portrait_ratio
+        self._crop_center = crop_center
 
     def run(self):
-        cmd = build_ffmpeg_command(self._input, self._start, self._output,
-                                   self._short_side)
+        cmd = build_ffmpeg_command(
+            self._input, self._start, self._output,
+            short_side=self._short_side,
+            portrait_ratio=self._portrait_ratio,
+            crop_center=self._crop_center,
+        )
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode == 0:
@@ -298,7 +307,8 @@ class TimelineWidget(QWidget):
 
 
 class MpvWidget(QFrame):
-    file_loaded = pyqtSignal()  # emitted (on Qt thread) when a file is ready
+    file_loaded = pyqtSignal()   # emitted (on Qt thread) when a file is ready
+    crop_clicked = pyqtSignal(float)  # x fraction 0–1 when user clicks video
 
     def __init__(self):
         super().__init__()
@@ -351,6 +361,16 @@ class MpvWidget(QFrame):
             d = self._player.duration
             return d if d else 0.0
         return 0.0
+
+    def get_video_size(self) -> tuple[int, int]:
+        if self._player:
+            return (self._player.width or 0, self._player.height or 0)
+        return (0, 0)
+
+    def mousePressEvent(self, event):
+        w = self.width()
+        if w > 0:
+            self.crop_clicked.emit(event.position().x() / w)
 
     def closeEvent(self, event):
         if self._player:
@@ -579,6 +599,25 @@ class MainWindow(QMainWindow):
             lambda v: self._settings.setValue("resize_short_side", v)
         )
 
+        self._crop_center: float = float(
+            self._settings.value("crop_center", "0.5")
+        )
+
+        self._cmb_portrait = QComboBox()
+        self._cmb_portrait.addItems(["Off", "9:16", "4:5", "1:1"])
+        saved_ratio = self._settings.value("portrait_ratio", "Off")
+        idx = self._cmb_portrait.findText(saved_ratio)
+        self._cmb_portrait.setCurrentIndex(idx if idx >= 0 else 0)
+        self._cmb_portrait.currentTextChanged.connect(self._on_portrait_ratio_changed)
+
+        self._crop_bar = CropBarWidget()
+        self._crop_bar.set_crop_center(self._crop_center)
+        self._crop_bar.set_portrait_ratio(
+            None if saved_ratio == "Off" else saved_ratio
+        )
+        self._crop_bar.crop_changed.connect(self._on_crop_click)
+        self._mpv.crop_clicked.connect(self._on_crop_click)
+
         self._lbl_next = QLabel()
         self._update_next_label()
 
@@ -605,6 +644,8 @@ class MainWindow(QMainWindow):
         export_row.addWidget(self._btn_folder)
         export_row.addWidget(QLabel("Short side:"))
         export_row.addWidget(self._txt_resize)
+        export_row.addWidget(QLabel("Portrait:"))
+        export_row.addWidget(self._cmb_portrait)
         export_row.addWidget(self._lbl_next)
         export_row.addWidget(self._btn_export)
 
@@ -614,6 +655,7 @@ class MainWindow(QMainWindow):
         right_layout.addLayout(top_bar)
         right_layout.addWidget(self._mpv, stretch=1)
         right_layout.addWidget(self._timeline)
+        right_layout.addWidget(self._crop_bar)
         right_layout.addLayout(controls)
         right_layout.addLayout(export_row)
 
@@ -636,6 +678,7 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(splitter)
         self.setStatusBar(QStatusBar())
+        self._crop_bar.setVisible(saved_ratio != "Off")
 
     def _load_file(self, path: str):
         self._file_path = path
@@ -659,11 +702,26 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().clearMessage()
 
+        self._crop_bar.set_source_ratio(*self._mpv.get_video_size())
         self._refresh_markers()
 
     def _refresh_markers(self) -> None:
         markers = self._db.get_markers(os.path.basename(self._file_path))
         self._timeline.set_markers(markers)
+
+    def _on_portrait_ratio_changed(self, text: str) -> None:
+        ratio = None if text == "Off" else text
+        self._crop_bar.set_portrait_ratio(ratio)
+        self._crop_bar.setVisible(ratio is not None)
+        self._settings.setValue("portrait_ratio", text)
+
+    def _on_crop_click(self, frac: float) -> None:
+        ratio = self._cmb_portrait.currentText()
+        if ratio == "Off":
+            return
+        self._crop_center = max(0.0, min(1.0, frac))
+        self._settings.setValue("crop_center", str(self._crop_center))
+        self._crop_bar.set_crop_center(self._crop_center)
 
     # --- Playback ---
 
@@ -726,8 +784,15 @@ class MainWindow(QMainWindow):
         self._btn_export.setEnabled(False)
         self.statusBar().showMessage(f"Exporting {os.path.basename(output)}…")
 
-        self._export_worker = ExportWorker(self._file_path, self._cursor, output,
-                                           short_side)
+        ratio_text = self._cmb_portrait.currentText()
+        portrait_ratio = None if ratio_text == "Off" else ratio_text
+
+        self._export_worker = ExportWorker(
+            self._file_path, self._cursor, output,
+            short_side=short_side,
+            portrait_ratio=portrait_ratio,
+            crop_center=self._crop_center,
+        )
         self._export_worker.finished.connect(self._on_export_done)
         self._export_worker.error.connect(self._on_export_error)
         self._export_worker.start()
