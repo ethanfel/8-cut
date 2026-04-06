@@ -618,11 +618,7 @@ class PlaylistWidget(QListWidget):
 
     def __init__(self):
         super().__init__()
-        # Disable built-in drag-drop mode so Qt doesn't intercept drops
-        # through the viewport (which breaks on Wayland/KDE).
         self.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
-        self.setAcceptDrops(True)
-        self.viewport().setAcceptDrops(True)
         self.setMinimumWidth(200)
         self.setWordWrap(True)
         self._paths: list[str] = []
@@ -662,22 +658,6 @@ class PlaylistWidget(QListWidget):
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         self._select(self.row(item))
-
-    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dragMoveEvent(self, event) -> None:
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event: QDropEvent) -> None:
-        paths = [
-            u.toLocalFile() for u in event.mimeData().urls()
-            if os.path.isfile(u.toLocalFile())
-        ]
-        if paths:
-            self.add_files(paths)
 
 
 class SetupWorker(QThread):
@@ -852,6 +832,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("8-cut")
         self.resize(1100, 680)
+        self.setAcceptDrops(True)
 
         # Services
         self._db = ProcessedDB()
@@ -1274,6 +1255,22 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Export error: {msg}")
 
     # --- Mask generation ---
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        paths = [
+            u.toLocalFile() for u in event.mimeData().urls()
+            if os.path.isfile(u.toLocalFile())
+        ]
+        if paths:
+            self._playlist.add_files(paths)
 
     def _on_venv_installed(self) -> None:
         self._btn_masks.setEnabled(True)
