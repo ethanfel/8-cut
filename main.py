@@ -1039,6 +1039,9 @@ class MainWindow(QMainWindow):
         if not self._last_export_path:
             self.statusBar().showMessage("No clip exported yet — export first.")
             return
+        if os.path.isdir(self._last_export_path):
+            self.statusBar().showMessage("Mask generation requires an MP4 export — switch format to MP4 and export first.")
+            return
         if self._mask_worker and self._mask_worker.isRunning():
             self.statusBar().showMessage("Mask generation already running…")
             return
