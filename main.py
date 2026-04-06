@@ -275,9 +275,9 @@ class PlaylistWidget(QListWidget):
             self._select(0)
 
     def advance(self) -> None:
-        """Move to next item in queue. Does nothing if at end."""
+        """Move to next item in queue. Does nothing if at end or nothing selected."""
         row = self.currentRow()
-        if row < self.count() - 1:
+        if row >= 0 and row < self.count() - 1:
             self._select(row + 1)
 
     def current_path(self) -> str | None:
@@ -324,6 +324,9 @@ def main():
         QPushButton:disabled { color: #555; }
         QLineEdit { background: #2a2a2a; border: 1px solid #555; padding: 3px; border-radius: 3px; }
         QStatusBar { color: #aaa; }
+        QListWidget { background: #252525; }
+        QListWidget::item { padding: 4px; color: #ddd; }
+        QListWidget::item:selected { background: #3a6ea8; color: #fff; }
     """)
     win = MainWindow()
     win.show()
