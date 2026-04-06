@@ -30,18 +30,26 @@ def format_time(seconds: float) -> str:
     return f"{m}:{s:04.1f}"
 
 
-def build_ffmpeg_command(input_path: str, start: float, output_path: str) -> list[str]:
+def build_ffmpeg_command(
+    input_path: str, start: float, output_path: str,
+    short_side: int | None = None,
+) -> list[str]:
     # -ss before -i: fast input-seeking. Safe here because we always re-encode
     # (libx264/aac), so there is no keyframe-alignment issue from pre-input seek.
-    return [
+    cmd = [
         "ffmpeg", "-y",
         "-ss", str(start),
         "-i", input_path,
         "-t", "8",
-        "-c:v", "libx264",
-        "-c:a", "aac",
-        output_path,
     ]
+    if short_side is not None:
+        # Scale so the shorter dimension equals short_side.
+        # if(lt(iw,ih),...) → portrait: fix width; landscape: fix height.
+        # -2 keeps aspect ratio with even-pixel rounding (libx264 requirement).
+        scale = f"scale='if(lt(iw,ih),{short_side},-2)':'if(lt(iw,ih),-2,{short_side})'"
+        cmd += ["-vf", scale]
+    cmd += ["-c:v", "libx264", "-c:a", "aac", output_path]
+    return cmd
 
 
 def _normalize_filename(filename: str) -> str:

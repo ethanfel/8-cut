@@ -25,7 +25,7 @@ def test_format_time_no_sixty_rollover():
     assert format_time(59.95) == "0:59.9"
 
 
-def test_ffmpeg_command():
+def test_ffmpeg_command_no_resize():
     cmd = build_ffmpeg_command("/in/video.mp4", 12.5, "/out/clip_001.mp4")
     assert cmd[0] == "ffmpeg"
     assert "-y" in cmd
@@ -33,6 +33,15 @@ def test_ffmpeg_command():
     assert str(12.5) in cmd
     assert "-t" in cmd
     assert "8" in cmd
+    assert cmd[-1] == "/out/clip_001.mp4"
+    assert "-vf" not in cmd
+
+def test_ffmpeg_command_with_resize():
+    cmd = build_ffmpeg_command("/in/video.mp4", 0.0, "/out/clip_001.mp4", short_side=256)
+    assert "-vf" in cmd
+    vf_value = cmd[cmd.index("-vf") + 1]
+    assert "256" in vf_value
+    assert "scale" in vf_value
     assert cmd[-1] == "/out/clip_001.mp4"
 
 
