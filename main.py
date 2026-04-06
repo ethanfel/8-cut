@@ -457,6 +457,11 @@ class MpvWidget(QFrame):
         # Returning None suppresses the "paintEngine == 0" warnings.
         return None
 
+    def paintEvent(self, event):
+        # QFrame's default paintEvent would call QPainter on this widget,
+        # which has no engine (mpv owns the surface). Do nothing instead.
+        pass
+
     def _init_player(self):
         if self._player is not None:
             return
