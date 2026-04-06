@@ -1,10 +1,15 @@
+import sys
 import os
 import subprocess
-import sys
-import mpv
+from pathlib import Path
+
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QLineEdit, QFileDialog, QFrame, QStatusBar,
+)
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter, QPen
-from PyQt6.QtWidgets import QApplication, QFrame, QMainWindow, QWidget
+from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent
+import mpv
 
 
 def build_export_path(folder: str, basename: str, counter: int) -> str:
@@ -189,7 +194,177 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("8-cut")
-        self.resize(900, 650)
+        self.resize(900, 680)
+        self.setAcceptDrops(True)
+
+        # State
+        self._file_path: str = ""
+        self._cursor: float = 0.0
+        self._export_counter: int = 1
+        self._export_worker: ExportWorker | None = None
+
+        # Widgets
+        self._mpv = MpvWidget()
+        self._mpv.file_loaded.connect(self._after_load)
+        self._timeline = TimelineWidget()
+        self._timeline.cursor_changed.connect(self._on_cursor_changed)
+
+        self._lbl_file = QLabel("Drop a video file here")
+        self._lbl_file.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_file.setStyleSheet("color: #aaa; padding: 6px;")
+
+        self._btn_play = QPushButton("▶ Play 8s")
+        self._btn_play.setEnabled(False)
+        self._btn_play.clicked.connect(self._on_play)
+
+        self._btn_pause = QPushButton("⏸ Pause")
+        self._btn_pause.setEnabled(False)
+        self._btn_pause.clicked.connect(self._on_pause)
+
+        self._lbl_cursor = QLabel("cursor: --")
+        self._lbl_duration = QLabel("dur: --")
+
+        self._txt_name = QLineEdit("clip")
+        self._txt_name.setPlaceholderText("base name")
+        self._txt_name.setMaximumWidth(150)
+        self._txt_name.textChanged.connect(self._reset_counter)
+
+        self._txt_folder = QLineEdit(str(Path.home()))
+        self._btn_folder = QPushButton("Browse")
+        self._btn_folder.clicked.connect(self._pick_folder)
+
+        self._lbl_next = QLabel()
+        self._update_next_label()
+
+        self._btn_export = QPushButton("Export")
+        self._btn_export.setEnabled(False)
+        self._btn_export.clicked.connect(self._on_export)
+
+        # Layout
+        top_bar = QHBoxLayout()
+        top_bar.addWidget(self._lbl_file, stretch=1)
+
+        controls = QHBoxLayout()
+        controls.addWidget(self._btn_play)
+        controls.addWidget(self._btn_pause)
+        controls.addStretch()
+        controls.addWidget(self._lbl_cursor)
+        controls.addWidget(self._lbl_duration)
+
+        export_row = QHBoxLayout()
+        export_row.addWidget(QLabel("Name:"))
+        export_row.addWidget(self._txt_name)
+        export_row.addWidget(QLabel("Folder:"))
+        export_row.addWidget(self._txt_folder, stretch=1)
+        export_row.addWidget(self._btn_folder)
+        export_row.addWidget(self._lbl_next)
+        export_row.addWidget(self._btn_export)
+
+        root = QVBoxLayout()
+        root.addLayout(top_bar)
+        root.addWidget(self._mpv, stretch=1)
+        root.addWidget(self._timeline)
+        root.addLayout(controls)
+        root.addLayout(export_row)
+
+        container = QWidget()
+        container.setLayout(root)
+        self.setCentralWidget(container)
+        self.setStatusBar(QStatusBar())
+
+    # --- Drag & Drop ---
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent):
+        urls = event.mimeData().urls()
+        if urls:
+            path = urls[0].toLocalFile()
+            self._load_file(path)
+
+    def _load_file(self, path: str):
+        self._file_path = path
+        self._lbl_file.setText(os.path.basename(path))
+        self._mpv.load(path)
+        # _after_load is triggered by MpvWidget.file_loaded signal (connected in __init__)
+
+    def _after_load(self):
+        dur = self._mpv.get_duration()
+        self._timeline.set_duration(dur)
+        self._cursor = 0.0
+        self._lbl_duration.setText(f"dur: {format_time(dur)}")
+        self._lbl_cursor.setText(f"cursor: {format_time(0.0)}")
+        self._btn_play.setEnabled(True)
+        self._btn_pause.setEnabled(True)
+        self._btn_export.setEnabled(True)
+
+    # --- Playback ---
+
+    def _on_cursor_changed(self, t: float):
+        self._cursor = t
+        self._lbl_cursor.setText(f"cursor: {format_time(t)}")
+        self._mpv.seek(t)
+
+    def _on_play(self):
+        if not self._file_path:
+            return
+        self._mpv.play_loop(self._cursor, self._cursor + 8.0)
+
+    def _on_pause(self):
+        self._mpv.stop_loop()
+        self._mpv.seek(self._cursor)
+
+    # --- Export ---
+
+    def _pick_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select output folder")
+        if folder:
+            self._txt_folder.setText(folder)
+            self._reset_counter()
+
+    def _reset_counter(self):
+        self._export_counter = 1
+        self._update_next_label()
+
+    def _update_next_label(self):
+        path = build_export_path(
+            self._txt_folder.text(),
+            self._txt_name.text() or "clip",
+            self._export_counter,
+        )
+        self._lbl_next.setText(f"→ {os.path.basename(path)}")
+
+    def _on_export(self):
+        if not self._file_path:
+            return
+        if self._export_worker and self._export_worker.isRunning():
+            self.statusBar().showMessage("Export already running…")
+            return
+
+        output = build_export_path(
+            self._txt_folder.text(),
+            self._txt_name.text() or "clip",
+            self._export_counter,
+        )
+        self._btn_export.setEnabled(False)
+        self.statusBar().showMessage(f"Exporting {os.path.basename(output)}…")
+
+        self._export_worker = ExportWorker(self._file_path, self._cursor, output)
+        self._export_worker.finished.connect(self._on_export_done)
+        self._export_worker.error.connect(self._on_export_error)
+        self._export_worker.start()
+
+    def _on_export_done(self, path: str):
+        self._export_counter += 1
+        self._update_next_label()
+        self._btn_export.setEnabled(True)
+        self.statusBar().showMessage(f"Exported: {os.path.basename(path)}")
+
+    def _on_export_error(self, msg: str):
+        self._btn_export.setEnabled(True)
+        self.statusBar().showMessage(f"Export error: {msg}")
 
 
 if __name__ == "__main__":
