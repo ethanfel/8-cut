@@ -298,6 +298,7 @@ class TimelineWidget(QWidget):
         self._duration = 0.0
         self._cursor = 0.0
         self._markers: list[tuple[float, int, str]] = []
+        self._hover_cache: list[tuple[float, str]] = []  # (t/duration, path)
 
         # Cached paint resources — created once, reused every frame
         self._cursor_pen = QPen(QColor(255, 200, 0))
@@ -317,6 +318,7 @@ class TimelineWidget(QWidget):
     def set_duration(self, duration: float):
         self._duration = duration
         self._cursor = 0.0
+        self._rebuild_hover_cache()
         self.update()
 
     def set_cursor(self, seconds: float):
@@ -326,7 +328,18 @@ class TimelineWidget(QWidget):
     def set_markers(self, markers: list[tuple[float, int, str]]) -> None:
         """markers: list of (start_time, number, output_path)"""
         self._markers = markers
+        self._rebuild_hover_cache()
         self.update()
+
+    def _rebuild_hover_cache(self) -> None:
+        """Pre-compute (pixel_x_fraction, output_path) for hover detection."""
+        if self._duration > 0:
+            self._hover_cache = [
+                (t / self._duration, path)
+                for (t, _num, path) in self._markers
+            ]
+        else:
+            self._hover_cache: list[tuple[float, str]] = []
 
     def _pos_to_time(self, x: int) -> float:
         if self._duration <= 0 or self.width() <= 0:
@@ -370,12 +383,11 @@ class TimelineWidget(QWidget):
 
     def mouseMoveEvent(self, event):
         x = event.position().x()
-        # Check marker hover (±4px)
-        if self._duration > 0 and self._markers:
+        # Check marker hover (±4px) using pre-computed fractions.
+        if self._hover_cache:
             w = self.width()
-            for (t, _num, output_path) in self._markers:
-                mx = t / self._duration * w
-                if abs(x - mx) <= 4:
+            for (frac, output_path) in self._hover_cache:
+                if abs(x - frac * w) <= 4:
                     QToolTip.showText(QCursor.pos(), output_path, self)
                     if event.buttons():
                         self._seek(x)
@@ -491,6 +503,8 @@ class CropBarWidget(QWidget):
         self._source_ratio: float = 16 / 9   # w/h of source video
         self._portrait_ratio: tuple[int, int] | None = None  # (num, den)
         self._crop_center: float = 0.5
+        self._crop_pen = QPen(QColor(100, 160, 240))
+        self._crop_pen.setWidth(1)
 
     def set_source_ratio(self, w: int, h: int) -> None:
         self._source_ratio = w / h if h > 0 else 16 / 9
@@ -527,9 +541,7 @@ class CropBarWidget(QWidget):
             x = int(max_x * self._crop_center)
 
             p.fillRect(x, 1, win_px, h - 2, QColor(80, 140, 220, 160))
-            pen = QPen(QColor(100, 160, 240))
-            pen.setWidth(1)
-            p.setPen(pen)
+            p.setPen(self._crop_pen)
             p.drawRect(x, 1, win_px - 1, h - 2)
         finally:
             p.end()
@@ -590,15 +602,14 @@ class PlaylistWidget(QListWidget):
         return self._paths[row] if 0 <= row < len(self._paths) else None
 
     def _select(self, row: int) -> None:
+        prev = self.currentRow()
         self.setCurrentRow(row)
-        self._refresh_labels()
+        # Only update the two items that actually changed label.
+        if prev >= 0 and prev != row and self.item(prev):
+            self.item(prev).setText(os.path.basename(self._paths[prev]))
+        if self.item(row):
+            self.item(row).setText(f"▶ {os.path.basename(self._paths[row])}")
         self.file_selected.emit(self._paths[row])
-
-    def _refresh_labels(self) -> None:
-        current = self.currentRow()
-        for i in range(self.count()):
-            name = os.path.basename(self._paths[i])
-            self.item(i).setText(f"▶ {name}" if i == current else name)
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         self._select(self.row(item))
@@ -993,7 +1004,16 @@ class MainWindow(QMainWindow):
         self._timeline.set_markers(markers)
 
     def _refresh_markers(self) -> None:
-        markers = self._db.get_markers(os.path.basename(self._file_path))
+        filename = os.path.basename(self._file_path)
+        # After an export we already know the exact stored filename, so skip
+        # the expensive fuzzy match and query directly.
+        if self._db._enabled:
+            markers = self._db._get_markers_for(filename)
+            if not markers:
+                # First export for this file — fall back to fuzzy match once.
+                markers = self._db.get_markers(filename)
+        else:
+            markers = []
         self._timeline.set_markers(markers)
 
     def _on_portrait_ratio_changed(self, text: str) -> None:
@@ -1031,8 +1051,12 @@ class MainWindow(QMainWindow):
             return
         dur = self._mpv.get_duration()
         new_t = max(0.0, min(self._cursor + delta, max(0.0, dur - 8.0)))
+        # Update label and internal state immediately; route the seek through
+        # the timeline's debounce timer so rapid key repeats don't hammer mpv.
+        self._cursor = new_t
+        self._lbl_cursor.setText(f"cursor: {format_time(new_t)}")
         self._timeline.set_cursor(new_t)
-        self._on_cursor_changed(new_t)
+        self._timeline._seek_timer.start()
 
     def _jump_to_next_marker(self) -> None:
         markers = sorted(self._timeline._markers, key=lambda m: m[0])
