@@ -63,6 +63,12 @@ def build_ffmpeg_command(
     return cmd
 
 
+def build_mask_output_dir(video_path: str) -> str:
+    """Return path of mask output directory: <stem>_masks/ next to the video."""
+    p = Path(video_path)
+    return str(p.parent / f"{p.stem}_masks")
+
+
 _RATIOS: dict[str, tuple[int, int]] = {
     "9:16": (9, 16),
     "4:5":  (4, 5),
