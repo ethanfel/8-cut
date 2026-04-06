@@ -16,7 +16,9 @@ def format_time(seconds: float) -> str:
     return f"{m}:{s:04.1f}"
 
 
-def build_ffmpeg_command(input_path: str, start: float, output_path: str) -> list:
+def build_ffmpeg_command(input_path: str, start: float, output_path: str) -> list[str]:
+    # -ss before -i: fast input-seeking. Safe here because we always re-encode
+    # (libx264/aac), so there is no keyframe-alignment issue from pre-input seek.
     return [
         "ffmpeg", "-y",
         "-ss", str(start),
@@ -46,6 +48,8 @@ class ExportWorker(QThread):
                 self.finished.emit(self._output)
             else:
                 self.error.emit(result.stderr[-500:])
+        except FileNotFoundError:
+            self.error.emit("ffmpeg not found — is it installed and on PATH?")
         except Exception as e:
             self.error.emit(str(e))
 

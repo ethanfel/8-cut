@@ -26,6 +26,7 @@ def test_format_time_no_sixty_rollover():
 def test_ffmpeg_command():
     cmd = build_ffmpeg_command("/in/video.mp4", 12.5, "/out/clip_001.mp4")
     assert cmd[0] == "ffmpeg"
+    assert "-y" in cmd
     assert "-ss" in cmd
     assert str(12.5) in cmd
     assert "-t" in cmd
