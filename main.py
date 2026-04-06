@@ -334,8 +334,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("8-cut")
-        self.resize(900, 680)
-        self.setAcceptDrops(True)
+        self.resize(1100, 680)
+
+        # Services
+        self._db = ProcessedDB()
 
         # State
         self._file_path: str = ""
@@ -344,12 +346,15 @@ class MainWindow(QMainWindow):
         self._export_worker: ExportWorker | None = None
 
         # Widgets
+        self._playlist = PlaylistWidget()
+        self._playlist.file_selected.connect(self._load_file)
+
         self._mpv = MpvWidget()
         self._mpv.file_loaded.connect(self._after_load)
         self._timeline = TimelineWidget()
         self._timeline.cursor_changed.connect(self._on_cursor_changed)
 
-        self._lbl_file = QLabel("Drop a video file here")
+        self._lbl_file = QLabel("Drop files onto the queue →")
         self._lbl_file.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_file.setStyleSheet("color: #aaa; padding: 6px;")
 
@@ -381,7 +386,7 @@ class MainWindow(QMainWindow):
         self._btn_export.setEnabled(False)
         self._btn_export.clicked.connect(self._on_export)
 
-        # Layout
+        # Right-side layout (video + controls)
         top_bar = QHBoxLayout()
         top_bar.addWidget(self._lbl_file, stretch=1)
 
@@ -401,38 +406,40 @@ class MainWindow(QMainWindow):
         export_row.addWidget(self._lbl_next)
         export_row.addWidget(self._btn_export)
 
-        root = QVBoxLayout()
-        root.addLayout(top_bar)
-        root.addWidget(self._mpv, stretch=1)
-        root.addWidget(self._timeline)
-        root.addLayout(controls)
-        root.addLayout(export_row)
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addLayout(top_bar)
+        right_layout.addWidget(self._mpv, stretch=1)
+        right_layout.addWidget(self._timeline)
+        right_layout.addLayout(controls)
+        right_layout.addLayout(export_row)
 
-        container = QWidget()
-        container.setLayout(root)
-        self.setCentralWidget(container)
+        # Left: queue label + playlist
+        queue_label = QLabel("Queue")
+        queue_label.setStyleSheet("color: #aaa; padding: 4px;")
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(4, 4, 4, 4)
+        left_layout.addWidget(queue_label)
+        left_layout.addWidget(self._playlist)
+
+        # Root: horizontal splitter
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setSizes([200, 900])
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+
+        self.setCentralWidget(splitter)
         self.setStatusBar(QStatusBar())
 
-    # --- Drag & Drop ---
-
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event: QDropEvent):
-        urls = event.mimeData().urls()
-        if urls:
-            path = urls[0].toLocalFile()
-            self._load_file(path)
-
     def _load_file(self, path: str):
-        if not os.path.isfile(path):
-            self.statusBar().showMessage(f"Not a file: {os.path.basename(path)}")
-            return
         self._file_path = path
         self._lbl_file.setText(os.path.basename(path))
         self._mpv.load(path)
-        # _after_load is triggered by MpvWidget.file_loaded signal (connected in __init__)
+        # _after_load triggered by MpvWidget.file_loaded signal
 
     def _after_load(self):
         dur = self._mpv.get_duration()
@@ -443,6 +450,10 @@ class MainWindow(QMainWindow):
         self._btn_play.setEnabled(True)
         self._btn_pause.setEnabled(True)
         self._btn_export.setEnabled(True)
+
+        match = self._db.find_similar(os.path.basename(self._file_path))
+        if match:
+            self.statusBar().showMessage(f"⚠ Similar to already processed: {match}")
 
     # --- Playback ---
 
@@ -502,10 +513,12 @@ class MainWindow(QMainWindow):
         self._export_worker.start()
 
     def _on_export_done(self, path: str):
+        self._db.add(os.path.basename(self._file_path))
         self._export_counter += 1
         self._update_next_label()
         self._btn_export.setEnabled(True)
         self.statusBar().showMessage(f"Exported: {os.path.basename(path)}")
+        self._playlist.advance()
 
     def _on_export_error(self, msg: str):
         self._btn_export.setEnabled(True)
