@@ -120,18 +120,22 @@ def _portrait_crop_filter(ratio: str, crop_center: float) -> str:
     return f"crop={cw}:ih:{x}:0"
 
 
+_QUALITY_RE = re.compile(
+    r'(?<![a-z0-9])(2160p?|4k|8k|1080p?|720p?|480p?|360p?|240p?'
+    r'|hdr|sdr|x264|x265|h264|h265|hevc|avc'
+    r'|blu[-_.]?ray|webrip|web[-_.]dl|dvdrip|hdtv)(?![a-z0-9])',
+    re.IGNORECASE,
+)
+_SEP_RE = re.compile(r'[\s_\-\.]+')
+
+
 def _normalize_filename(filename: str) -> str:
     """Strip extension and common resolution/quality tags for fuzzy comparison."""
-    name = os.path.splitext(filename)[0].lower()
     # Use lookaround assertions instead of \b: \b treats '_' as a word char,
     # so 'clip_2160p' would not form a word boundary before '2160p'.
-    name = re.sub(
-        r'(?<![a-z0-9])(2160p?|4k|8k|1080p?|720p?|480p?|360p?|240p?'
-        r'|hdr|sdr|x264|x265|h264|h265|hevc|avc'
-        r'|blu[-_.]?ray|webrip|web[-_.]dl|dvdrip|hdtv)(?![a-z0-9])',
-        '', name, flags=re.IGNORECASE,
-    )
-    name = re.sub(r'[\s_\-\.]+', '_', name).strip('_')
+    name = os.path.splitext(filename)[0].lower()
+    name = _QUALITY_RE.sub('', name)
+    name = _SEP_RE.sub('_', name).strip('_')
     return name
 
 
@@ -141,8 +145,9 @@ class ProcessedDB:
     def __init__(self, db_path: str | None = None):
         if db_path is None:
             db_path = str(Path.home() / ".8cut.db")
+        self._path = db_path
         try:
-            self._con = sqlite3.connect(db_path)
+            self._con = sqlite3.connect(db_path, check_same_thread=False)
             self._migrate()
             self._enabled = True
         except Exception as e:
@@ -199,6 +204,14 @@ class ProcessedDB:
                 best_ratio, best_match = ratio, stored
         return best_match
 
+    def _get_markers_for(self, match: str) -> list[tuple[float, int, str]]:
+        rows = self._con.execute(
+            "SELECT start_time, output_path FROM processed"
+            " WHERE filename = ? ORDER BY start_time",
+            (match,),
+        ).fetchall()
+        return [(t, i + 1, p) for i, (t, p) in enumerate(rows)]
+
     def get_markers(self, filename: str) -> list[tuple[float, int, str]]:
         """Return [(start_time, marker_number, output_path), ...] for the best
         fuzzy match of filename, sorted by start_time. Empty list if no match."""
@@ -207,12 +220,25 @@ class ProcessedDB:
         match = self.find_similar(filename)
         if match is None:
             return []
-        rows = self._con.execute(
-            "SELECT start_time, output_path FROM processed"
-            " WHERE filename = ? ORDER BY start_time",
-            (match,),
-        ).fetchall()
-        return [(t, i + 1, p) for i, (t, p) in enumerate(rows)]
+        return self._get_markers_for(match)
+
+
+class _DBWorker(QThread):
+    """Runs ProcessedDB fuzzy-match lookup off the main thread."""
+    result = pyqtSignal(str, object, list)  # (queried_filename, match|None, markers)
+
+    def __init__(self, db: "ProcessedDB", filename: str):
+        super().__init__()
+        self._db = db
+        self._filename = filename
+
+    def run(self):
+        try:
+            match = self._db.find_similar(self._filename)
+            markers = self._db._get_markers_for(match) if match else []
+        except Exception:
+            match, markers = None, []
+        self.result.emit(self._filename, match, markers)
 
 
 class ExportWorker(QThread):
@@ -273,6 +299,21 @@ class TimelineWidget(QWidget):
         self._cursor = 0.0
         self._markers: list[tuple[float, int, str]] = []
 
+        # Cached paint resources — created once, reused every frame
+        self._cursor_pen = QPen(QColor(255, 200, 0))
+        self._cursor_pen.setWidth(2)
+        self._marker_pen = QPen(QColor(220, 60, 60))
+        self._marker_pen.setWidth(2)
+        self._marker_font = QFont()
+        self._marker_font.setPixelSize(9)
+
+        # Debounce timer: update visual cursor immediately but only emit
+        # cursor_changed (which triggers mpv.seek) at most once per interval.
+        self._seek_timer = QTimer()
+        self._seek_timer.setSingleShot(True)
+        self._seek_timer.setInterval(16)  # ~60 fps
+        self._seek_timer.timeout.connect(lambda: self.cursor_changed.emit(self._cursor))
+
     def set_duration(self, duration: float):
         self._duration = duration
         self._cursor = 0.0
@@ -308,22 +349,16 @@ class TimelineWidget(QWidget):
             p.fillRect(x_start, 0, x_end - x_start, h, QColor(60, 120, 200, 120))
 
             # Cursor line
-            pen = QPen(QColor(255, 200, 0))
-            pen.setWidth(2)
-            p.setPen(pen)
+            p.setPen(self._cursor_pen)
             p.drawLine(x_start, 0, x_start, h)
 
             # Markers
-            font = QFont()
-            font.setPixelSize(9)
-            p.setFont(font)
-            marker_pen = QPen(QColor(220, 60, 60))
-            marker_pen.setWidth(2)
+            p.setFont(self._marker_font)
             for (t, num, _path) in self._markers:
                 if self._duration <= 0:
                     break
                 mx = int(t / self._duration * w)
-                p.setPen(marker_pen)
+                p.setPen(self._marker_pen)
                 p.drawLine(mx, 0, mx, h)
                 p.setPen(QColor(255, 255, 255))
                 p.drawText(mx + 2, 10, str(num))
@@ -349,10 +384,15 @@ class TimelineWidget(QWidget):
         if event.buttons():
             self._seek(x)
 
+    def mouseReleaseEvent(self, event):
+        # On release, flush any pending debounced seek immediately.
+        self._seek_timer.stop()
+        self.cursor_changed.emit(self._cursor)
+
     def _seek(self, x: float):
         t = self._pos_to_time(int(x))
-        self.set_cursor(t)
-        self.cursor_changed.emit(self._cursor)
+        self.set_cursor(t)           # update visuals immediately
+        self._seek_timer.start()     # debounce the mpv seek
 
 
 class MpvWidget(QFrame):
@@ -753,6 +793,7 @@ class MainWindow(QMainWindow):
         self._export_worker: ExportWorker | None = None
         self._last_export_path: str = ""
         self._mask_worker: MaskWorker | None = None
+        self._db_worker: _DBWorker | None = None
 
         # Widgets
         self._playlist = PlaylistWidget()
@@ -890,7 +931,7 @@ class MainWindow(QMainWindow):
         mask_row.addWidget(self._cmb_mask)
         mask_row.addWidget(self._btn_masks)
         mask_row.addStretch()
-        show_masks = QSettings("8cut", "8cut").value("show_masks_row", "true") == "true"
+        show_masks = self._settings.value("show_masks_row", "true") == "true"
         self._mask_row_widget.setVisible(show_masks)
 
         right_layout.addLayout(controls)
@@ -933,15 +974,23 @@ class MainWindow(QMainWindow):
         self._btn_play.setEnabled(True)
         self._btn_pause.setEnabled(True)
         self._btn_export.setEnabled(True)
+        self._crop_bar.set_source_ratio(*self._mpv.get_video_size())
 
-        match = self._db.find_similar(os.path.basename(self._file_path))
+        # Run DB fuzzy match off the main thread — can be slow on large databases.
+        filename = os.path.basename(self._file_path)
+        self._db_worker = _DBWorker(self._db, filename)
+        self._db_worker.result.connect(self._on_db_result)
+        self._db_worker.start()
+
+    def _on_db_result(self, queried: str, match: object, markers: list) -> None:
+        # Discard stale results if the user loaded a different file already.
+        if os.path.basename(self._file_path) != queried:
+            return
         if match:
             self.statusBar().showMessage(f"⚠ Similar to already processed: {match}")
         else:
             self.statusBar().clearMessage()
-
-        self._crop_bar.set_source_ratio(*self._mpv.get_video_size())
-        self._refresh_markers()
+        self._timeline.set_markers(markers)
 
     def _refresh_markers(self) -> None:
         markers = self._db.get_markers(os.path.basename(self._file_path))
