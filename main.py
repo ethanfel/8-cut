@@ -691,6 +691,8 @@ class MainWindow(QMainWindow):
         self._cursor: float = 0.0
         self._export_counter: int = 1
         self._export_worker: ExportWorker | None = None
+        self._last_export_path: str = ""
+        self._mask_worker: MaskWorker | None = None
 
         # Widgets
         self._playlist = PlaylistWidget()
@@ -761,9 +763,24 @@ class MainWindow(QMainWindow):
         self._btn_export.setEnabled(False)
         self._btn_export.clicked.connect(self._on_export)
 
+        # Settings dialog
+        self._settings_dialog = SettingsDialog(self)
+        self._settings_dialog.venv_installed.connect(self._on_venv_installed)
+
+        self._btn_settings = QPushButton("Settings…")
+        self._btn_settings.clicked.connect(self._settings_dialog.show)
+
+        # Mask generation row
+        self._cmb_mask = QComboBox()
+        self._cmb_mask.addItems(["Depth Anything", "SAM"])
+        self._btn_masks = QPushButton("Generate Masks")
+        self._btn_masks.setEnabled(Path(_VENV_PYTHON).exists())
+        self._btn_masks.clicked.connect(self._on_generate_masks)
+
         # Right-side layout (video + controls)
         top_bar = QHBoxLayout()
         top_bar.addWidget(self._lbl_file, stretch=1)
+        top_bar.addWidget(self._btn_settings)
 
         controls = QHBoxLayout()
         controls.addWidget(self._btn_play)
@@ -792,8 +809,15 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self._mpv, stretch=1)
         right_layout.addWidget(self._timeline)
         right_layout.addWidget(self._crop_bar)
+        mask_row = QHBoxLayout()
+        mask_row.addWidget(QLabel("Masks:"))
+        mask_row.addWidget(self._cmb_mask)
+        mask_row.addWidget(self._btn_masks)
+        mask_row.addStretch()
+
         right_layout.addLayout(controls)
         right_layout.addLayout(export_row)
+        right_layout.addLayout(mask_row)
 
         # Left: queue label + playlist
         queue_label = QLabel("Queue")
@@ -935,6 +959,7 @@ class MainWindow(QMainWindow):
 
     def _on_export_done(self, path: str):
         self._db.add(os.path.basename(self._file_path), self._cursor, path)
+        self._last_export_path = path
         self._export_counter += 1
         self._update_next_label()
         self._btn_export.setEnabled(True)
@@ -945,6 +970,49 @@ class MainWindow(QMainWindow):
     def _on_export_error(self, msg: str):
         self._btn_export.setEnabled(True)
         self.statusBar().showMessage(f"Export error: {msg}")
+
+    # --- Mask generation ---
+
+    def _on_venv_installed(self) -> None:
+        self._btn_masks.setEnabled(True)
+
+    def _on_generate_masks(self) -> None:
+        if not self._last_export_path:
+            self.statusBar().showMessage("No clip exported yet — export first.")
+            return
+        if self._mask_worker and self._mask_worker.isRunning():
+            self.statusBar().showMessage("Mask generation already running…")
+            return
+
+        output_dir = build_mask_output_dir(self._last_export_path)
+        os.makedirs(output_dir, exist_ok=True)
+
+        method = self._cmb_mask.currentText()
+        script = os.path.join(
+            _TOOLS_DIR,
+            "depth_masks.py" if method == "Depth Anything" else "sam_masks.py",
+        )
+
+        self._btn_masks.setEnabled(False)
+        self.statusBar().showMessage(f"Generating masks ({method})…")
+
+        self._mask_worker = MaskWorker(script, self._last_export_path, output_dir)
+        self._mask_worker.progress.connect(self._on_masks_progress)
+        self._mask_worker.finished.connect(self._on_masks_done)
+        self._mask_worker.error.connect(self._on_masks_error)
+        self._mask_worker.start()
+
+    def _on_masks_progress(self, msg: str) -> None:
+        self.statusBar().showMessage(msg)
+
+    def _on_masks_done(self) -> None:
+        self._btn_masks.setEnabled(True)
+        output_dir = build_mask_output_dir(self._last_export_path)
+        self.statusBar().showMessage(f"Masks saved to {os.path.basename(output_dir)}/")
+
+    def _on_masks_error(self, msg: str) -> None:
+        self._btn_masks.setEnabled(True)
+        self.statusBar().showMessage(f"Mask error: {msg}")
 
 
 if __name__ == "__main__":
