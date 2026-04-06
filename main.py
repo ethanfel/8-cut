@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import locale
+locale.setlocale(locale.LC_NUMERIC, "C")  # required by libmpv before any import
+
 import sys
 import os
 import re
