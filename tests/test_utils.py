@@ -1,5 +1,5 @@
 import tempfile, os
-from main import build_export_path, format_time, build_ffmpeg_command, build_mask_output_dir, build_sequence_dir
+from main import build_export_path, format_time, build_ffmpeg_command, build_mask_output_dir, build_sequence_dir, build_audio_extract_command
 from main import _normalize_filename, ProcessedDB
 
 
@@ -182,6 +182,29 @@ def test_mask_output_dir_mkv():
 
 def test_mask_output_dir_nested():
     assert build_mask_output_dir("/a/b/c/shot_042.mp4") == "/a/b/c/shot_042_masks"
+
+
+# --- build_audio_extract_command ---
+
+def test_audio_extract_output_path():
+    cmd = build_audio_extract_command("/in/v.mp4", 0.0, "/out/clip_001")
+    assert cmd[-1] == "/out/clip_001.wav"
+
+def test_audio_extract_no_video():
+    cmd = build_audio_extract_command("/in/v.mp4", 0.0, "/out/clip_001")
+    assert "-vn" in cmd
+
+def test_audio_extract_lossless_codec():
+    cmd = build_audio_extract_command("/in/v.mp4", 0.0, "/out/clip_001")
+    assert "-c:a" in cmd
+    assert cmd[cmd.index("-c:a") + 1] == "pcm_s16le"
+
+def test_audio_extract_timing():
+    cmd = build_audio_extract_command("/in/v.mp4", 12.5, "/out/clip_001")
+    assert "-ss" in cmd
+    assert cmd[cmd.index("-ss") + 1] == "12.5"
+    assert "-t" in cmd
+    assert cmd[cmd.index("-t") + 1] == "8"
 
 
 def test_build_sequence_dir_basic():

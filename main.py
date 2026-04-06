@@ -77,6 +77,20 @@ def build_ffmpeg_command(
     return cmd
 
 
+def build_audio_extract_command(input_path: str, start: float, sequence_dir: str) -> list[str]:
+    """Return an ffmpeg command that extracts audio to <sequence_dir>.wav."""
+    audio_path = sequence_dir + ".wav"
+    return [
+        "ffmpeg", "-y",
+        "-ss", str(start),
+        "-i", input_path,
+        "-t", "8",
+        "-vn",
+        "-c:a", "pcm_s16le",
+        audio_path,
+    ]
+
+
 def build_mask_output_dir(video_path: str) -> str:
     """Return path of mask output directory: <stem>_masks/ next to the video."""
     p = Path(video_path)
@@ -232,6 +246,13 @@ class ExportWorker(QThread):
             )
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode == 0:
+                if self._image_sequence:
+                    audio_cmd = build_audio_extract_command(
+                        self._input, self._start, self._output
+                    )
+                    subprocess.run(audio_cmd, capture_output=True, text=True, timeout=60)
+                    # Audio extraction failure (e.g. no audio stream) is ignored —
+                    # the frame sequence is the primary output.
                 self.finished.emit(self._output)
             else:
                 self.error.emit(result.stderr[-500:])
