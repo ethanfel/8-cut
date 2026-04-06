@@ -1257,18 +1257,25 @@ class MainWindow(QMainWindow):
     # --- Mask generation ---
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        print("dragEnter formats:", event.mimeData().formats(), flush=True)
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def dragMoveEvent(self, event) -> None:
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:
+        print("drop urls:", event.mimeData().urls(), flush=True)
         paths = [
             u.toLocalFile() for u in event.mimeData().urls()
             if os.path.isfile(u.toLocalFile())
         ]
+        print("drop paths:", paths, flush=True)
         if paths:
             self._playlist.add_files(paths)
 
