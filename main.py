@@ -187,6 +187,15 @@ class MpvWidget(QFrame):
 
 def main():
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    app.setStyleSheet("""
+        QWidget { background: #1e1e1e; color: #ddd; }
+        QPushButton { background: #333; border: 1px solid #555; padding: 4px 10px; border-radius: 3px; }
+        QPushButton:hover { background: #444; }
+        QPushButton:disabled { color: #555; }
+        QLineEdit { background: #2a2a2a; border: 1px solid #555; padding: 3px; border-radius: 3px; }
+        QStatusBar { color: #aaa; }
+    """)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
