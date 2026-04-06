@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QFileDialog, QFrame, QStatusBar,
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
-    QComboBox, QDialog, QPlainTextEdit,
+    QComboBox, QDialog, QPlainTextEdit, QCheckBox,
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent, QCursor, QFont
@@ -21,6 +21,10 @@ import mpv
 def build_export_path(folder: str, basename: str, counter: int) -> str:
     filename = f"{basename}_{counter:03d}.mp4"
     return os.path.join(folder, filename)
+
+
+def build_sequence_dir(folder: str, basename: str, counter: int) -> str:
+    return os.path.join(folder, f"{basename}_{counter:03d}")
 
 
 def format_time(seconds: float) -> str:
@@ -36,6 +40,7 @@ def build_ffmpeg_command(
     short_side: int | None = None,
     portrait_ratio: str | None = None,
     crop_center: float = 0.5,
+    image_sequence: bool = False,
 ) -> list[str]:
     # -ss before -i: fast input-seeking. Safe here because we always re-encode
     # (libx264/aac), so there is no keyframe-alignment issue from pre-input seek.
@@ -59,7 +64,15 @@ def build_ffmpeg_command(
     if filters:
         cmd += ["-vf", ",".join(filters)]
 
-    cmd += ["-c:v", "libx264", "-c:a", "aac", output_path]
+    if image_sequence:
+        cmd += [
+            "-vcodec", "libwebp",
+            "-lossless", "1",
+            "-compression_level", "4",
+            os.path.join(output_path, "frame_%04d.webp"),
+        ]
+    else:
+        cmd += ["-c:v", "libx264", "-c:a", "aac", output_path]
     return cmd
 
 
@@ -605,6 +618,7 @@ class SettingsDialog(QDialog):
     """Settings dialog: shows ML venv status and Install/Reinstall button."""
 
     venv_installed = pyqtSignal()  # emitted when install completes successfully
+    masks_visibility_changed = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -613,6 +627,7 @@ class SettingsDialog(QDialog):
         self.setMinimumHeight(300)
 
         self._worker: SetupWorker | None = None
+        self._qsettings = QSettings("8cut", "8cut")
 
         status_text = "Installed" if Path(_VENV_PYTHON).exists() else "Not installed"
         self._lbl_status = QLabel(f"ML Tools: {status_text}")
@@ -620,6 +635,11 @@ class SettingsDialog(QDialog):
         btn_label = "Reinstall" if Path(_VENV_PYTHON).exists() else "Install"
         self._btn_install = QPushButton(btn_label)
         self._btn_install.clicked.connect(self._on_install)
+
+        self._chk_masks = QCheckBox("Show mask generation row")
+        show_masks = self._qsettings.value("show_masks_row", "true") == "true"
+        self._chk_masks.setChecked(show_masks)
+        self._chk_masks.toggled.connect(self._on_masks_toggled)
 
         self._log = QPlainTextEdit()
         self._log.setReadOnly(True)
@@ -632,7 +652,12 @@ class SettingsDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addLayout(top)
+        layout.addWidget(self._chk_masks)
         layout.addWidget(self._log)
+
+    def _on_masks_toggled(self, checked: bool) -> None:
+        self._qsettings.setValue("show_masks_row", "true" if checked else "false")
+        self.masks_visibility_changed.emit(checked)
 
     def _on_install(self):
         self._btn_install.setEnabled(False)
@@ -766,6 +791,7 @@ class MainWindow(QMainWindow):
         # Settings dialog
         self._settings_dialog = SettingsDialog(self)
         self._settings_dialog.venv_installed.connect(self._on_venv_installed)
+        self._settings_dialog.masks_visibility_changed.connect(self._on_masks_visibility_changed)
 
         self._btn_settings = QPushButton("Settings…")
         self._btn_settings.clicked.connect(self._settings_dialog.show)
@@ -809,15 +835,20 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self._mpv, stretch=1)
         right_layout.addWidget(self._timeline)
         right_layout.addWidget(self._crop_bar)
-        mask_row = QHBoxLayout()
+
+        self._mask_row_widget = QWidget()
+        mask_row = QHBoxLayout(self._mask_row_widget)
+        mask_row.setContentsMargins(0, 0, 0, 0)
         mask_row.addWidget(QLabel("Masks:"))
         mask_row.addWidget(self._cmb_mask)
         mask_row.addWidget(self._btn_masks)
         mask_row.addStretch()
+        show_masks = QSettings("8cut", "8cut").value("show_masks_row", "true") == "true"
+        self._mask_row_widget.setVisible(show_masks)
 
         right_layout.addLayout(controls)
         right_layout.addLayout(export_row)
-        right_layout.addLayout(mask_row)
+        right_layout.addWidget(self._mask_row_widget)
 
         # Left: queue label + playlist
         queue_label = QLabel("Queue")
@@ -975,6 +1006,9 @@ class MainWindow(QMainWindow):
 
     def _on_venv_installed(self) -> None:
         self._btn_masks.setEnabled(True)
+
+    def _on_masks_visibility_changed(self, visible: bool) -> None:
+        self._mask_row_widget.setVisible(visible)
 
     def _on_generate_masks(self) -> None:
         if not self._last_export_path:

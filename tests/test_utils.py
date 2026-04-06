@@ -1,5 +1,5 @@
 import tempfile, os
-from main import build_export_path, format_time, build_ffmpeg_command, build_mask_output_dir
+from main import build_export_path, format_time, build_ffmpeg_command, build_mask_output_dir, build_sequence_dir
 from main import _normalize_filename, ProcessedDB
 
 
@@ -182,3 +182,32 @@ def test_mask_output_dir_mkv():
 
 def test_mask_output_dir_nested():
     assert build_mask_output_dir("/a/b/c/shot_042.mp4") == "/a/b/c/shot_042_masks"
+
+
+def test_build_sequence_dir_basic():
+    assert build_sequence_dir("/out", "clip", 1) == "/out/clip_001"
+
+def test_build_sequence_dir_counter():
+    assert build_sequence_dir("/out", "clip", 42) == "/out/clip_042"
+
+def test_ffmpeg_command_image_sequence():
+    cmd = build_ffmpeg_command("/in/v.mp4", 0.0, "/out/seq_001", image_sequence=True)
+    assert "-vcodec" in cmd
+    assert cmd[cmd.index("-vcodec") + 1] == "libwebp"
+    assert "-lossless" in cmd
+    assert cmd[cmd.index("-lossless") + 1] == "1"
+    assert "-compression_level" in cmd
+    assert cmd[cmd.index("-compression_level") + 1] == "4"
+    assert cmd[-1] == "/out/seq_001/frame_%04d.webp"
+
+def test_ffmpeg_command_image_sequence_with_resize():
+    cmd = build_ffmpeg_command("/in/v.mp4", 0.0, "/out/seq_001", image_sequence=True, short_side=256)
+    assert "-vf" in cmd
+    vf = cmd[cmd.index("-vf") + 1]
+    assert "scale" in vf
+    assert cmd[-1] == "/out/seq_001/frame_%04d.webp"
+
+def test_ffmpeg_command_image_sequence_no_audio():
+    cmd = build_ffmpeg_command("/in/v.mp4", 0.0, "/out/seq_001", image_sequence=True)
+    assert "-c:a" not in cmd
+    assert "aac" not in cmd
