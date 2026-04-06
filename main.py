@@ -163,7 +163,8 @@ class MpvWidget(QFrame):
     def play_loop(self, a: float, b: float):
         if self._player:
             self._player["ab-loop-a"] = a
-            self._player["ab-loop-b"] = b
+            # Clamp b to duration so AB loop fires even on clips shorter than 8s.
+            self._player["ab-loop-b"] = min(b, self._player.duration or b)
             self._player.pause = False
 
     def stop_loop(self):
@@ -186,6 +187,9 @@ class MpvWidget(QFrame):
 
 
 def main():
+    # Force X11/XCB mode so mpv can embed via wid — Wayland uses a different
+    # surface handle that mpv's wid parameter cannot accept.
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet("""
@@ -241,6 +245,7 @@ class MainWindow(QMainWindow):
         self._txt_name.textChanged.connect(self._reset_counter)
 
         self._txt_folder = QLineEdit(str(Path.home()))
+        self._txt_folder.textChanged.connect(self._reset_counter)
         self._btn_folder = QPushButton("Browse")
         self._btn_folder.clicked.connect(self._pick_folder)
 
@@ -296,6 +301,9 @@ class MainWindow(QMainWindow):
             self._load_file(path)
 
     def _load_file(self, path: str):
+        if not os.path.isfile(path):
+            self.statusBar().showMessage(f"Not a file: {os.path.basename(path)}")
+            return
         self._file_path = path
         self._lbl_file.setText(os.path.basename(path))
         self._mpv.load(path)
