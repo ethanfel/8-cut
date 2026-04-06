@@ -322,7 +322,10 @@ class TimelineWidget(QWidget):
         self.update()
 
     def set_cursor(self, seconds: float):
-        self._cursor = max(0.0, min(seconds, max(0.0, self._duration - 8.0)))
+        clamped = max(0.0, min(seconds, max(0.0, self._duration - 8.0)))
+        if clamped == self._cursor:
+            return
+        self._cursor = clamped
         self.update()
 
     def set_markers(self, markers: list[tuple[float, int, str]]) -> None:
@@ -579,14 +582,16 @@ class PlaylistWidget(QListWidget):
         self.setMinimumWidth(200)
         self.setWordWrap(True)
         self._paths: list[str] = []
+        self._path_set: set[str] = set()  # O(1) duplicate check
         self.itemClicked.connect(self._on_item_clicked)
 
     def add_files(self, paths: list[str]) -> None:
         """Append paths not already in queue; auto-select first if queue was empty."""
         was_empty = len(self._paths) == 0
         for path in paths:
-            if path not in self._paths and os.path.isfile(path):
+            if path not in self._path_set and os.path.isfile(path):
                 self._paths.append(path)
+                self._path_set.add(path)
                 self.addItem(os.path.basename(path))
         if was_empty and self._paths:
             self._select(0)
@@ -746,6 +751,11 @@ class SettingsDialog(QDialog):
         self.masks_visibility_changed.emit(checked)
 
     def _on_install(self):
+        if self._worker and self._worker.isRunning():
+            return
+        if self._worker:
+            self._worker.quit()
+            self._worker.wait()
         self._btn_install.setEnabled(False)
         self._log.clear()
         self._worker = SetupWorker()
@@ -805,6 +815,7 @@ class MainWindow(QMainWindow):
         self._last_export_path: str = ""
         self._mask_worker: MaskWorker | None = None
         self._db_worker: _DBWorker | None = None
+        self._fps: float = 25.0  # cached on file load via get_fps()
 
         # Widgets
         self._playlist = PlaylistWidget()
@@ -985,6 +996,7 @@ class MainWindow(QMainWindow):
         self._btn_play.setEnabled(True)
         self._btn_pause.setEnabled(True)
         self._btn_export.setEnabled(True)
+        self._fps = self._mpv.get_fps()
         self._crop_bar.set_source_ratio(*self._mpv.get_video_size())
 
         # Run DB fuzzy match off the main thread — can be slow on large databases.
@@ -1076,7 +1088,7 @@ class MainWindow(QMainWindow):
 
         key = event.key()
         shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-        frame = 1.0 / self._mpv.get_fps()
+        frame = 1.0 / self._fps
         step = 1.0 if shift else frame
 
         if key in (Qt.Key.Key_Left, Qt.Key.Key_J):
