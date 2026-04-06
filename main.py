@@ -19,7 +19,9 @@ def build_export_path(folder: str, basename: str, counter: int) -> str:
 
 def format_time(seconds: float) -> str:
     m = int(seconds // 60)
-    s = int(seconds % 60 * 10) / 10  # floor-truncate to 1dp, prevents "X:60.0" rollover
+    # Floor-truncate to 1 dp (not round) — prevents "X:60.0" rollover when
+    # seconds is e.g. 59.95. This means display may lag true position by up to 0.1s.
+    s = int(seconds % 60 * 10) / 10
     return f"{m}:{s:04.1f}"
 
 
@@ -325,6 +327,8 @@ class MainWindow(QMainWindow):
             self._reset_counter()
 
     def _reset_counter(self):
+        # Counter resets to 1 when name or folder changes. ffmpeg's -y flag
+        # will silently overwrite if the same name+folder is reused later.
         self._export_counter = 1
         self._update_next_label()
 
