@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QFileDialog, QFrame, QStatusBar,
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
 )
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent, QCursor, QFont
 import mpv
 
@@ -151,14 +151,17 @@ class ExportWorker(QThread):
     finished = pyqtSignal(str)   # output path
     error = pyqtSignal(str)      # error message
 
-    def __init__(self, input_path: str, start: float, output_path: str):
+    def __init__(self, input_path: str, start: float, output_path: str,
+                 short_side: int | None = None):
         super().__init__()
         self._input = input_path
         self._start = start
         self._output = output_path
+        self._short_side = short_side
 
     def run(self):
-        cmd = build_ffmpeg_command(self._input, self._start, self._output)
+        cmd = build_ffmpeg_command(self._input, self._start, self._output,
+                                   self._short_side)
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode == 0:
@@ -455,6 +458,15 @@ class MainWindow(QMainWindow):
         self._btn_folder = QPushButton("Browse")
         self._btn_folder.clicked.connect(self._pick_folder)
 
+        self._settings = QSettings("8cut", "8cut")
+        self._txt_resize = QLineEdit()
+        self._txt_resize.setPlaceholderText("px (opt.)")
+        self._txt_resize.setMaximumWidth(70)
+        self._txt_resize.setText(self._settings.value("resize_short_side", ""))
+        self._txt_resize.textChanged.connect(
+            lambda v: self._settings.setValue("resize_short_side", v)
+        )
+
         self._lbl_next = QLabel()
         self._update_next_label()
 
@@ -479,6 +491,8 @@ class MainWindow(QMainWindow):
         export_row.addWidget(QLabel("Folder:"))
         export_row.addWidget(self._txt_folder, stretch=1)
         export_row.addWidget(self._btn_folder)
+        export_row.addWidget(QLabel("Short side:"))
+        export_row.addWidget(self._txt_resize)
         export_row.addWidget(self._lbl_next)
         export_row.addWidget(self._btn_export)
 
@@ -588,10 +602,20 @@ class MainWindow(QMainWindow):
             self._txt_name.text() or "clip",
             self._export_counter,
         )
+
+        raw = self._txt_resize.text().strip()
+        try:
+            short_side = int(raw) if raw else None
+            if short_side is not None and short_side <= 0:
+                short_side = None
+        except ValueError:
+            short_side = None
+
         self._btn_export.setEnabled(False)
         self.statusBar().showMessage(f"Exporting {os.path.basename(output)}…")
 
-        self._export_worker = ExportWorker(self._file_path, self._cursor, output)
+        self._export_worker = ExportWorker(self._file_path, self._cursor, output,
+                                           short_side)
         self._export_worker.finished.connect(self._on_export_done)
         self._export_worker.error.connect(self._on_export_error)
         self._export_worker.start()
