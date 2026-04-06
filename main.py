@@ -10,10 +10,10 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QFileDialog, QFrame, QStatusBar,
-    QListWidget, QListWidgetItem, QAbstractItemView, QSplitter,
+    QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent
+from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent, QCursor, QFont
 import mpv
 
 
@@ -172,6 +172,7 @@ class TimelineWidget(QWidget):
         self.setMouseTracking(True)
         self._duration = 0.0
         self._cursor = 0.0
+        self._markers: list[tuple[float, int, str]] = []
 
     def set_duration(self, duration: float):
         self._duration = duration
@@ -180,6 +181,11 @@ class TimelineWidget(QWidget):
 
     def set_cursor(self, seconds: float):
         self._cursor = max(0.0, min(seconds, max(0.0, self._duration - 8.0)))
+        self.update()
+
+    def set_markers(self, markers: list[tuple[float, int, str]]) -> None:
+        """markers: list of (start_time, number, output_path)"""
+        self._markers = markers
         self.update()
 
     def _pos_to_time(self, x: int) -> float:
@@ -192,8 +198,6 @@ class TimelineWidget(QWidget):
         p = QPainter(self)
         try:
             w, h = self.width(), self.height()
-
-            # Background
             p.fillRect(0, 0, w, h, QColor(30, 30, 30))
 
             if self._duration <= 0:
@@ -209,6 +213,21 @@ class TimelineWidget(QWidget):
             pen.setWidth(2)
             p.setPen(pen)
             p.drawLine(x_start, 0, x_start, h)
+
+            # Markers
+            font = QFont()
+            font.setPixelSize(9)
+            p.setFont(font)
+            marker_pen = QPen(QColor(220, 60, 60))
+            marker_pen.setWidth(2)
+            for (t, num, _path) in self._markers:
+                if self._duration <= 0:
+                    break
+                mx = int(t / self._duration * w)
+                p.setPen(marker_pen)
+                p.drawLine(mx, 0, mx, h)
+                p.setPen(QColor(255, 255, 255))
+                p.drawText(mx + 2, 10, str(num))
         finally:
             p.end()
 
@@ -216,8 +235,20 @@ class TimelineWidget(QWidget):
         self._seek(event.position().x())
 
     def mouseMoveEvent(self, event):
+        x = event.position().x()
+        # Check marker hover (±4px)
+        if self._duration > 0 and self._markers:
+            w = self.width()
+            for (t, _num, output_path) in self._markers:
+                mx = t / self._duration * w
+                if abs(x - mx) <= 4:
+                    QToolTip.showText(QCursor.pos(), output_path, self)
+                    if event.buttons():
+                        self._seek(x)
+                    return
+        QToolTip.hideText()
         if event.buttons():
-            self._seek(event.position().x())
+            self._seek(x)
 
     def _seek(self, x: float):
         t = self._pos_to_time(int(x))
