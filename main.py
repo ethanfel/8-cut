@@ -962,11 +962,12 @@ class MainWindow(QMainWindow):
         self._update_next_label()
 
     def _update_next_label(self):
-        path = build_export_path(
-            self._txt_folder.text(),
-            self._txt_name.text() or "clip",
-            self._export_counter,
-        )
+        folder = self._txt_folder.text()
+        name = self._txt_name.text() or "clip"
+        if self._cmb_format.currentText() == "WebP sequence":
+            path = build_sequence_dir(folder, name, self._export_counter)
+        else:
+            path = build_export_path(folder, name, self._export_counter)
         self._lbl_next.setText(f"→ {os.path.basename(path)}")
 
     def _on_export(self):
@@ -976,11 +977,14 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Export already running…")
             return
 
-        output = build_export_path(
-            self._txt_folder.text(),
-            self._txt_name.text() or "clip",
-            self._export_counter,
-        )
+        fmt = self._cmb_format.currentText()
+        image_sequence = fmt == "WebP sequence"
+        folder = self._txt_folder.text()
+        name = self._txt_name.text() or "clip"
+        if image_sequence:
+            output = build_sequence_dir(folder, name, self._export_counter)
+        else:
+            output = build_export_path(folder, name, self._export_counter)
 
         raw = self._txt_resize.text().strip()
         try:
@@ -1001,6 +1005,7 @@ class MainWindow(QMainWindow):
             short_side=short_side,
             portrait_ratio=portrait_ratio,
             crop_center=self._crop_center,
+            image_sequence=image_sequence,
         )
         self._export_worker.finished.connect(self._on_export_done)
         self._export_worker.error.connect(self._on_export_error)
