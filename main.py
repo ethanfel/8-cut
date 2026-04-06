@@ -615,8 +615,11 @@ class PlaylistWidget(QListWidget):
 
     def __init__(self):
         super().__init__()
+        # Disable built-in drag-drop mode so Qt doesn't intercept drops
+        # through the viewport (which breaks on Wayland/KDE).
+        self.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         self.setAcceptDrops(True)
-        self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
+        self.viewport().setAcceptDrops(True)
         self.setMinimumWidth(200)
         self.setWordWrap(True)
         self._paths: list[str] = []
