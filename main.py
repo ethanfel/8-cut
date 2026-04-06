@@ -259,7 +259,7 @@ class PlaylistWidget(QListWidget):
         super().__init__()
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
-        self.setFixedWidth(200)
+        self.setMinimumWidth(200)
         self.setWordWrap(True)
         self._paths: list[str] = []
         self.itemClicked.connect(self._on_item_clicked)
@@ -454,6 +454,8 @@ class MainWindow(QMainWindow):
         match = self._db.find_similar(os.path.basename(self._file_path))
         if match:
             self.statusBar().showMessage(f"⚠ Similar to already processed: {match}")
+        else:
+            self.statusBar().clearMessage()
 
     # --- Playback ---
 
