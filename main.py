@@ -468,13 +468,12 @@ class MpvWidget(QFrame):
     def _init_player(self):
         if self._player is not None:
             return
-        # Temporarily hide WAYLAND_DISPLAY so mpv picks X11 output and
-        # respects the wid parameter (X11 window ID). Without this, mpv
-        # detects Wayland via the environment and opens its own window.
         _wd = os.environ.pop("WAYLAND_DISPLAY", None)
+        wid = int(self.winId())
+        print(f"[mpv] platform={QApplication.platformName()} wid={wid} WAYLAND_DISPLAY was={_wd}", flush=True)
         try:
             self._player = mpv.MPV(
-                wid=str(int(self.winId())),
+                wid=str(wid),
                 keep_open=True,
                 pause=True,
             )
