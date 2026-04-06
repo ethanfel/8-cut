@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QFileDialog, QFrame, QStatusBar,
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
-    QComboBox,
+    QComboBox, QDialog, QPlainTextEdit,
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent, QCursor, QFont
@@ -74,6 +74,9 @@ _RATIOS: dict[str, tuple[int, int]] = {
     "4:5":  (4, 5),
     "1:1":  (1, 1),
 }
+
+_VENV_PYTHON = str(Path.home() / ".8cut" / "venv" / "bin" / "python")
+_TOOLS_DIR = str(Path(__file__).parent / "tools")
 
 
 def _portrait_crop_filter(ratio: str, crop_center: float) -> str:
@@ -523,6 +526,133 @@ class PlaylistWidget(QListWidget):
         ]
         if paths:
             self.add_files(paths)
+
+
+class SetupWorker(QThread):
+    """Installs the ML venv. Streams output line-by-line via `line` signal."""
+    line = pyqtSignal(str)
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def run(self):
+        venv_dir = str(Path.home() / ".8cut" / "venv")
+        steps = [
+            [sys.executable, "-m", "venv", venv_dir],
+            [_VENV_PYTHON, "-m", "pip", "install", "--upgrade", "pip"],
+            [
+                _VENV_PYTHON, "-m", "pip", "install",
+                "torch", "torchvision",
+                "transformers",
+                "opencv-python",
+                "Pillow",
+                "segment-anything-2",
+            ],
+        ]
+        try:
+            for cmd in steps:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                for output_line in proc.stdout:
+                    self.line.emit(output_line.rstrip())
+                proc.wait()
+                if proc.returncode != 0:
+                    self.error.emit(f"Step failed: {' '.join(cmd[:3])}")
+                    return
+            self.finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class MaskWorker(QThread):
+    """Runs a mask generation script as a subprocess inside the ML venv."""
+    progress = pyqtSignal(str)
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, script: str, input_path: str, output_dir: str):
+        super().__init__()
+        self._script = script
+        self._input = input_path
+        self._output = output_dir
+
+    def run(self):
+        cmd = [_VENV_PYTHON, self._script, "--input", self._input, "--output", self._output]
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            for line in proc.stdout:
+                self.progress.emit(line.rstrip())
+            proc.wait()
+            if proc.returncode == 0:
+                self.finished.emit()
+            else:
+                self.error.emit(f"Script exited with code {proc.returncode}")
+        except FileNotFoundError:
+            self.error.emit("venv not found — install ML tools via Settings")
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class SettingsDialog(QDialog):
+    """Settings dialog: shows ML venv status and Install/Reinstall button."""
+
+    venv_installed = pyqtSignal()  # emitted when install completes successfully
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(500)
+        self.setMinimumHeight(300)
+
+        self._worker: SetupWorker | None = None
+
+        status_text = "Installed" if Path(_VENV_PYTHON).exists() else "Not installed"
+        self._lbl_status = QLabel(f"ML Tools: {status_text}")
+
+        btn_label = "Reinstall" if Path(_VENV_PYTHON).exists() else "Install"
+        self._btn_install = QPushButton(btn_label)
+        self._btn_install.clicked.connect(self._on_install)
+
+        self._log = QPlainTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setPlaceholderText("Install output will appear here…")
+
+        top = QHBoxLayout()
+        top.addWidget(self._lbl_status)
+        top.addStretch()
+        top.addWidget(self._btn_install)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(top)
+        layout.addWidget(self._log)
+
+    def _on_install(self):
+        self._btn_install.setEnabled(False)
+        self._log.clear()
+        self._worker = SetupWorker()
+        self._worker.line.connect(self._log.appendPlainText)
+        self._worker.finished.connect(self._on_install_done)
+        self._worker.error.connect(self._on_install_error)
+        self._worker.start()
+
+    def _on_install_done(self):
+        self._lbl_status.setText("ML Tools: Installed")
+        self._btn_install.setText("Reinstall")
+        self._btn_install.setEnabled(True)
+        self._log.appendPlainText("✓ Installation complete.")
+        self.venv_installed.emit()
+
+    def _on_install_error(self, msg: str):
+        self._btn_install.setEnabled(True)
+        self._log.appendPlainText(f"ERROR: {msg}")
 
 
 def main():
