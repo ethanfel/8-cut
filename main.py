@@ -220,16 +220,16 @@ class ExportWorker(QThread):
         self._image_sequence = image_sequence
 
     def run(self):
-        if self._image_sequence:
-            os.makedirs(self._output, exist_ok=True)
-        cmd = build_ffmpeg_command(
-            self._input, self._start, self._output,
-            short_side=self._short_side,
-            portrait_ratio=self._portrait_ratio,
-            crop_center=self._crop_center,
-            image_sequence=self._image_sequence,
-        )
         try:
+            if self._image_sequence:
+                os.makedirs(self._output, exist_ok=True)
+            cmd = build_ffmpeg_command(
+                self._input, self._start, self._output,
+                short_side=self._short_side,
+                portrait_ratio=self._portrait_ratio,
+                crop_center=self._crop_center,
+                image_sequence=self._image_sequence,
+            )
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode == 0:
                 self.finished.emit(self._output)
