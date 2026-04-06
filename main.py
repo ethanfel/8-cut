@@ -2,7 +2,8 @@ import os
 import subprocess
 import sys
 from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtWidgets import QApplication, QMainWindow
+from PyQt6.QtGui import QColor, QPainter, QPen
+from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget
 
 
 def build_export_path(folder: str, basename: str, counter: int) -> str:
@@ -52,6 +53,65 @@ class ExportWorker(QThread):
             self.error.emit("ffmpeg not found — is it installed and on PATH?")
         except Exception as e:
             self.error.emit(str(e))
+
+
+class TimelineWidget(QWidget):
+    cursor_changed = pyqtSignal(float)  # emits position in seconds
+
+    def __init__(self):
+        super().__init__()
+        self.setMinimumHeight(40)
+        self.setMouseTracking(True)
+        self._duration = 0.0
+        self._cursor = 0.0
+
+    def set_duration(self, duration: float):
+        self._duration = duration
+        self._cursor = 0.0
+        self.update()
+
+    def set_cursor(self, seconds: float):
+        self._cursor = max(0.0, min(seconds, max(0.0, self._duration - 8.0)))
+        self.update()
+
+    def _pos_to_time(self, x: int) -> float:
+        if self._duration <= 0 or self.width() <= 0:
+            return 0.0
+        ratio = max(0.0, min(1.0, x / self.width()))
+        return ratio * self._duration
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        w, h = self.width(), self.height()
+
+        # Background
+        p.fillRect(0, 0, w, h, QColor(30, 30, 30))
+
+        if self._duration <= 0:
+            return
+
+        # 8s selection highlight
+        x_start = int(self._cursor / self._duration * w)
+        x_end = int(min(self._cursor + 8.0, self._duration) / self._duration * w)
+        p.fillRect(x_start, 0, x_end - x_start, h, QColor(60, 120, 200, 120))
+
+        # Cursor line
+        pen = QPen(QColor(255, 200, 0))
+        pen.setWidth(2)
+        p.setPen(pen)
+        p.drawLine(x_start, 0, x_start, h)
+
+    def mousePressEvent(self, event):
+        self._seek(event.position().x())
+
+    def mouseMoveEvent(self, event):
+        if event.buttons():
+            self._seek(event.position().x())
+
+    def _seek(self, x: float):
+        t = self._pos_to_time(int(x))
+        self.set_cursor(t)
+        self.cursor_changed.emit(self._cursor)
 
 
 def main():
