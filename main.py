@@ -442,17 +442,23 @@ class TimelineWidget(QWidget):
         self._seek_timer.start()     # debounce the mpv seek
 
 
-def _mpv_get_proc_address(_, name):
-    """Resolve OpenGL/EGL function pointers for mpv's render context."""
-    import ctypes, ctypes.util
+import ctypes, ctypes.util
+
+def _make_get_proc_address():
+    """Return a ctypes C-callable for mpv's OpenGL get_proc_address."""
+    _libs = []
     for lib_name in ("EGL", "GL"):
-        lib_path = ctypes.util.find_library(lib_name)
-        if not lib_path:
-            continue
-        try:
-            lib = ctypes.CDLL(lib_path)
-            for fn_name in ("eglGetProcAddress", "glXGetProcAddressARB", "glXGetProcAddress"):
-                fn = getattr(lib, fn_name, None)
+        path = ctypes.util.find_library(lib_name)
+        if path:
+            try:
+                _libs.append(ctypes.CDLL(path))
+            except Exception:
+                pass
+
+    def _lookup(_, name):
+        for lib in _libs:
+            for fn_name in (b"eglGetProcAddress", b"glXGetProcAddressARB", b"glXGetProcAddress"):
+                fn = getattr(lib, fn_name.decode(), None)
                 if fn is None:
                     continue
                 fn.restype = ctypes.c_void_p
@@ -460,9 +466,13 @@ def _mpv_get_proc_address(_, name):
                 addr = fn(name)
                 if addr:
                     return addr
-        except Exception:
-            continue
-    return None
+        return None
+
+    # mpv requires a real C function pointer, not a Python callable.
+    _PROC_ADDR_TYPE = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)
+    return _PROC_ADDR_TYPE(_lookup)
+
+_mpv_get_proc_address = _make_get_proc_address()
 
 
 class MpvWidget(QOpenGLWidget):
