@@ -3,7 +3,7 @@ import os
 import re
 import sqlite3
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -46,6 +46,8 @@ def build_ffmpeg_command(input_path: str, start: float, output_path: str) -> lis
 def _normalize_filename(filename: str) -> str:
     """Strip extension and common resolution/quality tags for fuzzy comparison."""
     name = os.path.splitext(filename)[0].lower()
+    # Use lookaround assertions instead of \b: \b treats '_' as a word char,
+    # so 'clip_2160p' would not form a word boundary before '2160p'.
     name = re.sub(
         r'(?<![a-z0-9])(2160p?|4k|8k|1080p?|720p?|480p?|360p?|240p?'
         r'|hdr|sdr|x264|x265|h264|h265|hevc|avc'
@@ -64,7 +66,10 @@ class ProcessedDB:
             self._con = sqlite3.connect(db_path)
             self._con.execute(
                 "CREATE TABLE IF NOT EXISTS processed "
-                "(filename TEXT NOT NULL, processed_at TEXT NOT NULL)"
+                "(filename TEXT NOT NULL UNIQUE, processed_at TEXT NOT NULL)"
+            )
+            self._con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_filename ON processed(filename)"
             )
             self._con.commit()
             self._enabled = True
@@ -77,8 +82,8 @@ class ProcessedDB:
         if not self._enabled:
             return
         self._con.execute(
-            "INSERT INTO processed (filename, processed_at) VALUES (?, ?)",
-            (filename, datetime.utcnow().isoformat()),
+            "INSERT OR REPLACE INTO processed (filename, processed_at) VALUES (?, ?)",
+            (filename, datetime.now(timezone.utc).isoformat()),
         )
         self._con.commit()
 
