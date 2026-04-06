@@ -829,6 +829,7 @@ def main():
     # surface handle that mpv's wid parameter cannot accept.
     os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
     app = QApplication(sys.argv)
+    locale.setlocale(locale.LC_NUMERIC, "C")  # QApplication resets locale; re-apply for libmpv
     app.setStyle("Fusion")
     app.setStyleSheet("""
         QWidget { background: #1e1e1e; color: #ddd; }
