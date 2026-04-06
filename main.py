@@ -1,9 +1,10 @@
 import os
 import subprocess
 import sys
-from PyQt6.QtCore import QThread, pyqtSignal
+import mpv
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter, QPen
-from PyQt6.QtWidgets import QApplication, QMainWindow, QWidget
+from PyQt6.QtWidgets import QApplication, QFrame, QMainWindow, QWidget
 
 
 def build_export_path(folder: str, basename: str, counter: int) -> str:
@@ -115,6 +116,66 @@ class TimelineWidget(QWidget):
         t = self._pos_to_time(int(x))
         self.set_cursor(t)
         self.cursor_changed.emit(self._cursor)
+
+
+class MpvWidget(QFrame):
+    file_loaded = pyqtSignal()  # emitted (on Qt thread) when a file is ready
+
+    def __init__(self):
+        super().__init__()
+        self.setMinimumSize(640, 360)
+        self.setStyleSheet("background: black;")
+        # Required so Qt creates a real native window handle for mpv to embed into.
+        # Without these, mpv opens a separate window instead of embedding.
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_PaintOnScreen, True)
+        self._player = None
+
+    def _init_player(self):
+        if self._player is not None:
+            return
+        self._player = mpv.MPV(
+            wid=str(int(self.winId())),
+            keep_open=True,
+            pause=True,
+        )
+        # mpv fires events on its own thread; bounce to Qt thread via QTimer.
+        @self._player.event_callback("file-loaded")
+        def _on_file_loaded(event):
+            QTimer.singleShot(0, self.file_loaded.emit)
+
+    def load(self, path: str):
+        self._init_player()
+        self._player.play(path)
+
+    def seek(self, t: float):
+        if self._player:
+            self._player.pause = True
+            self._player.seek(t, "absolute")
+
+    def play_loop(self, a: float, b: float):
+        if self._player:
+            self._player["ab-loop-a"] = a
+            self._player["ab-loop-b"] = b
+            self._player.pause = False
+
+    def stop_loop(self):
+        if self._player:
+            # ab-loop-a/b are numeric properties — setting to "no" via dict
+            # accessor throws TypeError. Disable loop via ab_loop_count instead.
+            self._player.ab_loop_count = 0
+            self._player.pause = True
+
+    def get_duration(self) -> float:
+        if self._player:
+            d = self._player.duration
+            return d if d else 0.0
+        return 0.0
+
+    def closeEvent(self, event):
+        if self._player:
+            self._player.terminate()
+        super().closeEvent(event)
 
 
 def main():
