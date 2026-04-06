@@ -482,18 +482,24 @@ class MpvWidget(QOpenGLWidget):
     def __init__(self):
         super().__init__()
         self.setMinimumSize(640, 360)
-        self._player = mpv.MPV(keep_open=True, pause=True)
+        self._player = mpv.MPV(keep_open=True, pause=True, log_handler=self._log, loglevel="debug")
         self._render_ctx = None
 
         @self._player.event_callback("file-loaded")
         def _on_file_loaded(event):
             QTimer.singleShot(0, self.file_loaded.emit)
 
+    @staticmethod
+    def _log(level, component, message):
+        print(f"[mpv/{component}] {level}: {message}", flush=True)
+
     def initializeGL(self):
+        print(f"[8-cut] initializeGL called, platform={QApplication.platformName()}", flush=True)
         self._render_ctx = mpv.MpvRenderContext(
             self._player, "opengl",
             opengl_init_params={"get_proc_address": _mpv_get_proc_address},
         )
+        print(f"[8-cut] MpvRenderContext created: {self._render_ctx}", flush=True)
         self._render_ctx.update_cb = self._on_mpv_update
 
     def _on_mpv_update(self):
