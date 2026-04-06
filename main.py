@@ -33,6 +33,8 @@ def format_time(seconds: float) -> str:
 def build_ffmpeg_command(
     input_path: str, start: float, output_path: str,
     short_side: int | None = None,
+    portrait_ratio: str | None = None,
+    crop_center: float = 0.5,
 ) -> list[str]:
     # -ss before -i: fast input-seeking. Safe here because we always re-encode
     # (libx264/aac), so there is no keyframe-alignment issue from pre-input seek.
@@ -42,14 +44,42 @@ def build_ffmpeg_command(
         "-i", input_path,
         "-t", "8",
     ]
+
+    filters: list[str] = []
+    if portrait_ratio is not None:
+        filters.append(_portrait_crop_filter(portrait_ratio, crop_center))
     if short_side is not None:
         # Scale so the shorter dimension equals short_side.
-        # if(lt(iw,ih),...) → portrait: fix width; landscape: fix height.
+        # if(lt(iw,ih),...) → portrait output: fix width; landscape: fix height.
         # -2 keeps aspect ratio with even-pixel rounding (libx264 requirement).
-        scale = f"scale='if(lt(iw,ih),{short_side},-2)':'if(lt(iw,ih),-2,{short_side})'"
-        cmd += ["-vf", scale]
+        filters.append(
+            f"scale='if(lt(iw,ih),{short_side},-2)':'if(lt(iw,ih),-2,{short_side})'"
+        )
+    if filters:
+        cmd += ["-vf", ",".join(filters)]
+
     cmd += ["-c:v", "libx264", "-c:a", "aac", output_path]
     return cmd
+
+
+_RATIOS: dict[str, tuple[int, int]] = {
+    "9:16": (9, 16),
+    "4:5":  (4, 5),
+    "1:1":  (1, 1),
+}
+
+
+def _portrait_crop_filter(ratio: str, crop_center: float) -> str:
+    """Return an ffmpeg crop= filter expression for the given portrait ratio.
+
+    Uses ffmpeg expression syntax so source dimensions are resolved at runtime.
+    Commas inside min()/max() are escaped with \\, to prevent ffmpeg's
+    filtergraph parser from treating them as filter-chain separators.
+    """
+    num, den = _RATIOS[ratio]
+    cw = f"ih*{num}/{den}"
+    x = f"max(0\\,min((iw-{cw})*{crop_center}\\,iw-{cw}))"
+    return f"crop={cw}:ih:{x}:0"
 
 
 def _normalize_filename(filename: str) -> str:

@@ -145,3 +145,31 @@ def test_db_get_markers_no_match():
 def test_db_get_markers_disabled():
     db = ProcessedDB("/no/such/directory/8cut.db")
     assert db.get_markers("x.mp4") == []
+
+def test_ffmpeg_command_portrait_only():
+    cmd = build_ffmpeg_command(
+        "/in/video.mp4", 0.0, "/out/clip.mp4",
+        portrait_ratio="9:16", crop_center=0.5,
+    )
+    assert "-vf" in cmd
+    vf = cmd[cmd.index("-vf") + 1]
+    assert "crop" in vf
+    assert "9" in vf
+    assert "scale" not in vf
+    assert cmd[-1] == "/out/clip.mp4"
+
+def test_ffmpeg_command_portrait_and_resize():
+    cmd = build_ffmpeg_command(
+        "/in/video.mp4", 0.0, "/out/clip.mp4",
+        short_side=256, portrait_ratio="9:16", crop_center=0.5,
+    )
+    assert "-vf" in cmd
+    vf = cmd[cmd.index("-vf") + 1]
+    assert "crop" in vf
+    assert "scale" in vf
+    assert vf.index("crop") < vf.index("scale")
+    assert cmd[-1] == "/out/clip.mp4"
+
+def test_ffmpeg_command_portrait_off():
+    cmd = build_ffmpeg_command("/in/video.mp4", 0.0, "/out/clip.mp4")
+    assert "-vf" not in cmd
