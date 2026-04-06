@@ -340,8 +340,7 @@ class MainWindow(QMainWindow):
     def _pick_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select output folder")
         if folder:
-            self._txt_folder.setText(folder)
-            self._reset_counter()
+            self._txt_folder.setText(folder)  # textChanged fires _reset_counter
 
     def _reset_counter(self):
         # Counter resets to 1 when name or folder changes. ffmpeg's -y flag
