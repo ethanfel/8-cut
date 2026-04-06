@@ -805,9 +805,11 @@ class SettingsDialog(QDialog):
 
 
 def main():
-    # Force X11/XCB mode so mpv can embed via wid — Wayland uses a different
-    # surface handle that mpv's wid parameter cannot accept.
-    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+    # Force X11/XCB (XWayland) so mpv can embed via wid.
+    # mpv's wid parameter requires an X11 window ID; it does not work with
+    # Wayland surface handles. Override rather than setdefault so this takes
+    # effect even when QT_QPA_PLATFORM=wayland is already set by the session.
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
     app = QApplication(sys.argv)
     locale.setlocale(locale.LC_NUMERIC, "C")  # QApplication resets locale; re-apply for libmpv
     app.setStyle("Fusion")
@@ -1257,7 +1259,6 @@ class MainWindow(QMainWindow):
     # --- Mask generation ---
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
-        print("dragEnter formats:", event.mimeData().formats(), flush=True)
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
@@ -1270,12 +1271,10 @@ class MainWindow(QMainWindow):
             event.ignore()
 
     def dropEvent(self, event: QDropEvent) -> None:
-        print("drop urls:", event.mimeData().urls(), flush=True)
         paths = [
             u.toLocalFile() for u in event.mimeData().urls()
             if os.path.isfile(u.toLocalFile())
         ]
-        print("drop paths:", paths, flush=True)
         if paths:
             self._playlist.add_files(paths)
 
