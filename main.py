@@ -779,6 +779,16 @@ class MainWindow(QMainWindow):
         self._cmb_portrait.setCurrentIndex(idx if idx >= 0 else 0)
         self._cmb_portrait.currentTextChanged.connect(self._on_portrait_ratio_changed)
 
+        self._cmb_format = QComboBox()
+        self._cmb_format.addItems(["MP4", "WebP sequence"])
+        saved_fmt = self._settings.value("export_format", "MP4")
+        fmt_idx = self._cmb_format.findText(saved_fmt)
+        self._cmb_format.setCurrentIndex(fmt_idx if fmt_idx >= 0 else 0)
+        self._cmb_format.currentTextChanged.connect(
+            lambda v: self._settings.setValue("export_format", v)
+        )
+        self._cmb_format.currentTextChanged.connect(self._update_next_label)
+
         self._crop_bar = CropBarWidget()
         self._crop_bar.set_crop_center(self._crop_center)
         self._crop_bar.set_portrait_ratio(
@@ -831,6 +841,8 @@ class MainWindow(QMainWindow):
         export_row.addWidget(self._txt_resize)
         export_row.addWidget(QLabel("Portrait:"))
         export_row.addWidget(self._cmb_portrait)
+        export_row.addWidget(QLabel("Format:"))
+        export_row.addWidget(self._cmb_format)
         export_row.addWidget(self._lbl_next)
         export_row.addWidget(self._btn_export)
 
