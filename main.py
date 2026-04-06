@@ -10,6 +10,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QFileDialog, QFrame, QStatusBar,
+    QListWidget, QListWidgetItem, QAbstractItemView, QSplitter,
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent
@@ -249,6 +250,65 @@ class MpvWidget(QFrame):
         if self._player:
             self._player.terminate()
         super().closeEvent(event)
+
+
+class PlaylistWidget(QListWidget):
+    file_selected = pyqtSignal(str)  # emits full path of selected file
+
+    def __init__(self):
+        super().__init__()
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
+        self.setFixedWidth(200)
+        self.setWordWrap(True)
+        self._paths: list[str] = []
+        self.itemClicked.connect(self._on_item_clicked)
+
+    def add_files(self, paths: list[str]) -> None:
+        """Append paths not already in queue; auto-select first if queue was empty."""
+        was_empty = len(self._paths) == 0
+        for path in paths:
+            if path not in self._paths and os.path.isfile(path):
+                self._paths.append(path)
+                self.addItem(os.path.basename(path))
+        if was_empty and self._paths:
+            self._select(0)
+
+    def advance(self) -> None:
+        """Move to next item in queue. Does nothing if at end."""
+        row = self.currentRow()
+        if row < self.count() - 1:
+            self._select(row + 1)
+
+    def current_path(self) -> str | None:
+        row = self.currentRow()
+        return self._paths[row] if 0 <= row < len(self._paths) else None
+
+    def _select(self, row: int) -> None:
+        self.setCurrentRow(row)
+        self._refresh_labels()
+        self.file_selected.emit(self._paths[row])
+
+    def _refresh_labels(self) -> None:
+        current = self.currentRow()
+        for i in range(self.count()):
+            name = os.path.basename(self._paths[i])
+            self.item(i).setText(f"▶ {name}" if i == current else name)
+
+    def _on_item_clicked(self, item: QListWidgetItem) -> None:
+        self._select(self.row(item))
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        paths = [
+            u.toLocalFile() for u in event.mimeData().urls()
+            if os.path.isfile(u.toLocalFile())
+        ]
+        if paths:
+            self.add_files(paths)
 
 
 def main():
