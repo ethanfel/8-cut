@@ -82,24 +82,27 @@ class TimelineWidget(QWidget):
 
     def paintEvent(self, event):
         p = QPainter(self)
-        w, h = self.width(), self.height()
+        try:
+            w, h = self.width(), self.height()
 
-        # Background
-        p.fillRect(0, 0, w, h, QColor(30, 30, 30))
+            # Background
+            p.fillRect(0, 0, w, h, QColor(30, 30, 30))
 
-        if self._duration <= 0:
-            return
+            if self._duration <= 0:
+                return
 
-        # 8s selection highlight
-        x_start = int(self._cursor / self._duration * w)
-        x_end = int(min(self._cursor + 8.0, self._duration) / self._duration * w)
-        p.fillRect(x_start, 0, x_end - x_start, h, QColor(60, 120, 200, 120))
+            # 8s selection highlight
+            x_start = int(self._cursor / self._duration * w)
+            x_end = int(min(self._cursor + 8.0, self._duration) / self._duration * w)
+            p.fillRect(x_start, 0, x_end - x_start, h, QColor(60, 120, 200, 120))
 
-        # Cursor line
-        pen = QPen(QColor(255, 200, 0))
-        pen.setWidth(2)
-        p.setPen(pen)
-        p.drawLine(x_start, 0, x_start, h)
+            # Cursor line
+            pen = QPen(QColor(255, 200, 0))
+            pen.setWidth(2)
+            p.setPen(pen)
+            p.drawLine(x_start, 0, x_start, h)
+        finally:
+            p.end()
 
     def mousePressEvent(self, event):
         self._seek(event.position().x())
