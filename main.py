@@ -1013,6 +1013,8 @@ class MainWindow(QMainWindow):
 
     def _on_export_done(self, path: str):
         self._db.add(os.path.basename(self._file_path), self._cursor, path)
+        # For MP4 exports path is a file; for WebP sequence it is a directory.
+        # build_mask_output_dir handles both correctly via Path.stem.
         self._last_export_path = path
         self._export_counter += 1
         self._update_next_label()
