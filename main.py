@@ -208,7 +208,8 @@ class ExportWorker(QThread):
     def __init__(self, input_path: str, start: float, output_path: str,
                  short_side: int | None = None,
                  portrait_ratio: str | None = None,
-                 crop_center: float = 0.5):
+                 crop_center: float = 0.5,
+                 image_sequence: bool = False):
         super().__init__()
         self._input = input_path
         self._start = start
@@ -216,13 +217,17 @@ class ExportWorker(QThread):
         self._short_side = short_side
         self._portrait_ratio = portrait_ratio
         self._crop_center = crop_center
+        self._image_sequence = image_sequence
 
     def run(self):
+        if self._image_sequence:
+            os.makedirs(self._output, exist_ok=True)
         cmd = build_ffmpeg_command(
             self._input, self._start, self._output,
             short_side=self._short_side,
             portrait_ratio=self._portrait_ratio,
             crop_center=self._crop_center,
+            image_sequence=self._image_sequence,
         )
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
