@@ -468,11 +468,19 @@ class MpvWidget(QFrame):
     def _init_player(self):
         if self._player is not None:
             return
-        self._player = mpv.MPV(
-            wid=str(int(self.winId())),
-            keep_open=True,
-            pause=True,
-        )
+        # Temporarily hide WAYLAND_DISPLAY so mpv picks X11 output and
+        # respects the wid parameter (X11 window ID). Without this, mpv
+        # detects Wayland via the environment and opens its own window.
+        _wd = os.environ.pop("WAYLAND_DISPLAY", None)
+        try:
+            self._player = mpv.MPV(
+                wid=str(int(self.winId())),
+                keep_open=True,
+                pause=True,
+            )
+        finally:
+            if _wd is not None:
+                os.environ["WAYLAND_DISPLAY"] = _wd
         # mpv fires events on its own thread; bounce to Qt thread via QTimer.
         @self._player.event_callback("file-loaded")
         def _on_file_loaded(event):
