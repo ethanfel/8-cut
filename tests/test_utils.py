@@ -64,7 +64,7 @@ def test_db_add_and_find_exact():
         path = f.name
     try:
         db = ProcessedDB(path)
-        db.add("video.mp4")
+        db.add("video.mp4", 12.5, "/out/clip_001.mp4")
         assert db.find_similar("video.mp4") == "video.mp4"
     finally:
         os.unlink(path)
@@ -74,7 +74,7 @@ def test_db_find_similar_resolution_variant():
         path = f.name
     try:
         db = ProcessedDB(path)
-        db.add("episode_s01e01_2160p.mkv")
+        db.add("episode_s01e01_2160p.mkv", 0.0, "/out/ep_001.mp4")
         assert db.find_similar("episode_s01e01_1080p.mkv") == "episode_s01e01_2160p.mkv"
     finally:
         os.unlink(path)
@@ -84,12 +84,55 @@ def test_db_find_similar_no_match():
         path = f.name
     try:
         db = ProcessedDB(path)
-        db.add("alpha.mp4")
+        db.add("alpha.mp4", 0.0, "/out/alpha_001.mp4")
         assert db.find_similar("completely_different_zzzz.mp4") is None
     finally:
         os.unlink(path)
 
 def test_db_disabled_survives_bad_path():
     db = ProcessedDB("/no/such/directory/8cut.db")
-    db.add("x.mp4")           # must not raise
-    assert db.find_similar("x.mp4") is None   # gracefully returns None
+    db.add("x.mp4", 0.0, "/out/x_001.mp4")   # must not raise
+    assert db.find_similar("x.mp4") is None
+
+def test_db_get_markers_returns_sorted():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    try:
+        db = ProcessedDB(path)
+        db.add("video.mp4", 30.0, "/out/clip_002.mp4")
+        db.add("video.mp4", 10.0, "/out/clip_001.mp4")
+        db.add("video.mp4", 50.0, "/out/clip_003.mp4")
+        markers = db.get_markers("video.mp4")
+        assert len(markers) == 3
+        assert markers[0] == (10.0, 1, "/out/clip_001.mp4")
+        assert markers[1] == (30.0, 2, "/out/clip_002.mp4")
+        assert markers[2] == (50.0, 3, "/out/clip_003.mp4")
+    finally:
+        os.unlink(path)
+
+def test_db_get_markers_fuzzy_match():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    try:
+        db = ProcessedDB(path)
+        db.add("show_2160p.mkv", 5.0, "/out/s_001.mp4")
+        markers = db.get_markers("show_1080p.mkv")
+        assert len(markers) == 1
+        assert markers[0][0] == 5.0
+        assert markers[0][2] == "/out/s_001.mp4"
+    finally:
+        os.unlink(path)
+
+def test_db_get_markers_no_match():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    try:
+        db = ProcessedDB(path)
+        markers = db.get_markers("nothing.mp4")
+        assert markers == []
+    finally:
+        os.unlink(path)
+
+def test_db_get_markers_disabled():
+    db = ProcessedDB("/no/such/directory/8cut.db")
+    assert db.get_markers("x.mp4") == []

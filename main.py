@@ -60,31 +60,50 @@ def _normalize_filename(filename: str) -> str:
 
 
 class ProcessedDB:
+    _SCHEMA_VERSION = 2  # bump when schema changes
+
     def __init__(self, db_path: str | None = None):
         if db_path is None:
             db_path = str(Path.home() / ".8cut.db")
         try:
             self._con = sqlite3.connect(db_path)
-            self._con.execute(
-                "CREATE TABLE IF NOT EXISTS processed "
-                "(filename TEXT NOT NULL UNIQUE, processed_at TEXT NOT NULL)"
-            )
-            self._con.execute(
-                "CREATE INDEX IF NOT EXISTS idx_filename ON processed(filename)"
-            )
-            self._con.commit()
+            self._migrate()
             self._enabled = True
         except Exception as e:
             print(f"8-cut: DB unavailable: {e}", file=sys.stderr)
             self._con = None
             self._enabled = False
 
-    def add(self, filename: str) -> None:
+    def _migrate(self) -> None:
+        """Create or recreate table if schema is outdated."""
+        cols = {
+            row[1]
+            for row in self._con.execute("PRAGMA table_info(processed)").fetchall()
+        }
+        needs_recreate = "start_time" not in cols or "output_path" not in cols
+        if needs_recreate:
+            self._con.execute("DROP TABLE IF EXISTS processed")
+        self._con.execute(
+            "CREATE TABLE IF NOT EXISTS processed ("
+            "  id           INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  filename     TEXT    NOT NULL,"
+            "  start_time   REAL    NOT NULL,"
+            "  output_path  TEXT    NOT NULL,"
+            "  processed_at TEXT    NOT NULL"
+            ")"
+        )
+        self._con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_filename ON processed(filename)"
+        )
+        self._con.commit()
+
+    def add(self, filename: str, start_time: float, output_path: str) -> None:
         if not self._enabled:
             return
         self._con.execute(
-            "INSERT OR REPLACE INTO processed (filename, processed_at) VALUES (?, ?)",
-            (filename, datetime.now(timezone.utc).isoformat()),
+            "INSERT INTO processed (filename, start_time, output_path, processed_at)"
+            " VALUES (?, ?, ?, ?)",
+            (filename, start_time, output_path, datetime.now(timezone.utc).isoformat()),
         )
         self._con.commit()
 
@@ -103,6 +122,21 @@ class ProcessedDB:
             if ratio >= 0.75 and ratio > best_ratio:
                 best_ratio, best_match = ratio, stored
         return best_match
+
+    def get_markers(self, filename: str) -> list[tuple[float, int, str]]:
+        """Return [(start_time, marker_number, output_path), ...] for the best
+        fuzzy match of filename, sorted by start_time. Empty list if no match."""
+        if not self._enabled:
+            return []
+        match = self.find_similar(filename)
+        if match is None:
+            return []
+        rows = self._con.execute(
+            "SELECT start_time, output_path FROM processed"
+            " WHERE filename = ? ORDER BY start_time",
+            (match,),
+        ).fetchall()
+        return [(t, i + 1, p) for i, (t, p) in enumerate(rows)]
 
 
 class ExportWorker(QThread):
@@ -518,7 +552,7 @@ class MainWindow(QMainWindow):
         self._export_worker.start()
 
     def _on_export_done(self, path: str):
-        self._db.add(os.path.basename(self._file_path))
+        self._db.add(os.path.basename(self._file_path), self._cursor, path)
         self._export_counter += 1
         self._update_next_label()
         self._btn_export.setEnabled(True)
