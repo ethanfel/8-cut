@@ -91,6 +91,19 @@ def build_audio_extract_command(input_path: str, start: float, sequence_dir: str
     ]
 
 
+def build_annotation_tsv_path(folder: str) -> str:
+    return os.path.join(folder, "dataset.tsv")
+
+
+def append_to_tsv(folder: str, clip_stem: str, label: str) -> None:
+    """Append one line to <folder>/dataset.tsv (creates file if absent)."""
+    if not label:
+        return
+    tsv_path = build_annotation_tsv_path(folder)
+    with open(tsv_path, "a", encoding="utf-8") as f:
+        f.write(f"{clip_stem}\t{label}\n")
+
+
 def build_mask_output_dir(video_path: str) -> str:
     """Return path of mask output directory: <stem>_masks/ next to the video."""
     p = Path(video_path)
@@ -144,7 +157,7 @@ def _normalize_filename(filename: str) -> str:
 
 
 class ProcessedDB:
-    _SCHEMA_VERSION = 2  # bump when schema changes
+    _SCHEMA_VERSION = 3  # bump when schema changes
 
     def __init__(self, db_path: str | None = None):
         if db_path is None:
@@ -165,7 +178,7 @@ class ProcessedDB:
             row[1]
             for row in self._con.execute("PRAGMA table_info(processed)").fetchall()
         }
-        needs_recreate = "start_time" not in cols or "output_path" not in cols
+        needs_recreate = not {"start_time", "output_path", "label", "category"}.issubset(cols)
         if needs_recreate:
             self._con.execute("DROP TABLE IF EXISTS processed")
         self._con.execute(
@@ -174,6 +187,8 @@ class ProcessedDB:
             "  filename     TEXT    NOT NULL,"
             "  start_time   REAL    NOT NULL,"
             "  output_path  TEXT    NOT NULL,"
+            "  label        TEXT    NOT NULL DEFAULT '',"
+            "  category     TEXT    NOT NULL DEFAULT '',"
             "  processed_at TEXT    NOT NULL"
             ")"
         )
@@ -182,13 +197,15 @@ class ProcessedDB:
         )
         self._con.commit()
 
-    def add(self, filename: str, start_time: float, output_path: str) -> None:
+    def add(self, filename: str, start_time: float, output_path: str,
+            label: str = "", category: str = "") -> None:
         if not self._enabled:
             return
         self._con.execute(
-            "INSERT INTO processed (filename, start_time, output_path, processed_at)"
-            " VALUES (?, ?, ?, ?)",
-            (filename, start_time, output_path, datetime.now(timezone.utc).isoformat()),
+            "INSERT INTO processed (filename, start_time, output_path, label, category, processed_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (filename, start_time, output_path, label, category,
+             datetime.now(timezone.utc).isoformat()),
         )
         self._con.commit()
 
@@ -885,6 +902,25 @@ class MainWindow(QMainWindow):
         )
         self._cmb_format.currentTextChanged.connect(self._update_next_label)
 
+        self._txt_label = QLineEdit()
+        self._txt_label.setPlaceholderText("Sound label (e.g. dog barking)")
+        self._txt_label.setFixedWidth(200)
+        saved_label = self._settings.value("sound_label", "")
+        self._txt_label.setText(saved_label)
+        self._txt_label.textChanged.connect(
+            lambda v: self._settings.setValue("sound_label", v)
+        )
+
+        self._cmb_category = QComboBox()
+        _SELVA_CATEGORIES = ["", "Human", "Animal", "Vehicle", "Tool", "Music", "Nature", "Sport", "Other"]
+        self._cmb_category.addItems(_SELVA_CATEGORIES)
+        saved_cat = self._settings.value("sound_category", "")
+        cat_idx = self._cmb_category.findText(saved_cat)
+        self._cmb_category.setCurrentIndex(max(cat_idx, 0))
+        self._cmb_category.currentTextChanged.connect(
+            lambda v: self._settings.setValue("sound_category", v)
+        )
+
         self._crop_bar = CropBarWidget()
         self._crop_bar.set_crop_center(self._crop_center)
         self._crop_bar.set_portrait_ratio(
@@ -960,8 +996,16 @@ class MainWindow(QMainWindow):
         show_masks = self._settings.value("show_masks_row", "true") == "true"
         self._mask_row_widget.setVisible(show_masks)
 
+        annotation_row = QHBoxLayout()
+        annotation_row.addWidget(QLabel("Label:"))
+        annotation_row.addWidget(self._txt_label)
+        annotation_row.addWidget(QLabel("Cat:"))
+        annotation_row.addWidget(self._cmb_category)
+        annotation_row.addStretch()
+
         right_layout.addLayout(controls)
         right_layout.addLayout(export_row)
+        right_layout.addLayout(annotation_row)
         right_layout.addWidget(self._mask_row_widget)
 
         # Left: queue label + playlist
@@ -1177,7 +1221,17 @@ class MainWindow(QMainWindow):
         self._export_worker.start()
 
     def _on_export_done(self, path: str):
-        self._db.add(os.path.basename(self._file_path), self._cursor, path)
+        label = self._txt_label.text().strip()
+        category = self._cmb_category.currentText()
+        self._db.add(
+            os.path.basename(self._file_path),
+            self._cursor,
+            path,
+            label=label,
+            category=category,
+        )
+        clip_stem = os.path.splitext(os.path.basename(path))[0]
+        append_to_tsv(self._txt_folder.text(), clip_stem, label)
         # For MP4 exports path is a file; for WebP sequence it is a directory.
         # build_mask_output_dir handles both correctly via Path.stem.
         self._last_export_path = path

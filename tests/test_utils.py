@@ -1,5 +1,5 @@
 import tempfile, os
-from main import build_export_path, format_time, build_ffmpeg_command, build_mask_output_dir, build_sequence_dir, build_audio_extract_command
+from main import build_export_path, format_time, build_ffmpeg_command, build_mask_output_dir, build_sequence_dir, build_audio_extract_command, build_annotation_tsv_path, append_to_tsv
 from main import _normalize_filename, ProcessedDB
 
 
@@ -235,3 +235,39 @@ def test_ffmpeg_command_image_sequence_no_audio():
     assert "-an" in cmd
     assert "-c:a" not in cmd
     assert "aac" not in cmd
+
+
+def test_annotation_tsv_path():
+    assert build_annotation_tsv_path("/out") == "/out/dataset.tsv"
+
+def test_append_to_tsv_creates_file():
+    with tempfile.TemporaryDirectory() as d:
+        append_to_tsv(d, "clip_001", "dog barking")
+        with open(os.path.join(d, "dataset.tsv")) as f:
+            lines = f.readlines()
+        assert lines == ["clip_001\tdog barking\n"]
+
+def test_append_to_tsv_appends():
+    with tempfile.TemporaryDirectory() as d:
+        append_to_tsv(d, "clip_001", "dog barking")
+        append_to_tsv(d, "clip_002", "cat meowing")
+        with open(os.path.join(d, "dataset.tsv")) as f:
+            lines = f.readlines()
+        assert len(lines) == 2
+
+def test_append_to_tsv_empty_label_skips():
+    with tempfile.TemporaryDirectory() as d:
+        append_to_tsv(d, "clip_001", "")
+        assert not os.path.exists(os.path.join(d, "dataset.tsv"))
+
+def test_db_stores_label_and_category():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    try:
+        db = ProcessedDB(path)
+        db.add("video.mp4", 0.0, "/out/clip_001.mp4", label="dog barking", category="Animal")
+        markers = db.get_markers("video.mp4")
+        assert len(markers) == 1
+        assert markers[0][0] == 0.0
+    finally:
+        os.unlink(path)
