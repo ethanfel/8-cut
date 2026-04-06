@@ -32,6 +32,14 @@ pip install -r requirements.txt
 
 For mask generation tools, additional dependencies (PyTorch, transformers, segment-anything-2, opencv) are installed into `~/.8cut/venv/` via the Settings dialog.
 
+### Platform notes
+
+**Linux** — install libmpv via your package manager (`apt install libmpv-dev` / `pacman -S mpv`).
+
+**macOS** — install libmpv via Homebrew: `brew install mpv`.
+
+**Windows** — `python-mpv` requires `mpv-2.dll` in `PATH` or in the same directory as `main.py`. Download it from the [mpv Windows builds](https://sourceforge.net/projects/mpv-player-windows/files/libmpv/) page (pick the latest `mpv-dev-x86_64-*.7z`, extract `mpv-2.dll`). Also ensure `ffmpeg.exe` is in `PATH` (e.g. via [winget](https://winget.run/): `winget install ffmpeg`).
+
 ## Usage
 
 ```

@@ -103,7 +103,11 @@ _RATIOS: dict[str, tuple[int, int]] = {
     "1:1":  (1, 1),
 }
 
-_VENV_PYTHON = str(Path.home() / ".8cut" / "venv" / "bin" / "python")
+_VENV_PYTHON = str(
+    Path.home() / ".8cut" / "venv"
+    / ("Scripts" if sys.platform == "win32" else "bin")
+    / ("python.exe" if sys.platform == "win32" else "python")
+)
 _TOOLS_DIR = str(Path(__file__).parent / "tools")
 
 
