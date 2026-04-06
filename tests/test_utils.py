@@ -1,4 +1,4 @@
-from main import build_export_path, format_time
+from main import build_export_path, format_time, build_ffmpeg_command
 
 
 def test_build_export_path_first():
@@ -21,3 +21,13 @@ def test_format_time_rounding():
 
 def test_format_time_no_sixty_rollover():
     assert format_time(59.95) == "0:59.9"
+
+
+def test_ffmpeg_command():
+    cmd = build_ffmpeg_command("/in/video.mp4", 12.5, "/out/clip_001.mp4")
+    assert cmd[0] == "ffmpeg"
+    assert "-ss" in cmd
+    assert str(12.5) in cmd
+    assert "-t" in cmd
+    assert "8" in cmd
+    assert cmd[-1] == "/out/clip_001.mp4"

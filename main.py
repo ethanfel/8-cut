@@ -1,5 +1,7 @@
 import os
+import subprocess
 import sys
+from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtWidgets import QApplication, QMainWindow
 
 
@@ -12,6 +14,40 @@ def format_time(seconds: float) -> str:
     m = int(seconds // 60)
     s = int(seconds % 60 * 10) / 10  # floor-truncate to 1dp, prevents "X:60.0" rollover
     return f"{m}:{s:04.1f}"
+
+
+def build_ffmpeg_command(input_path: str, start: float, output_path: str) -> list:
+    return [
+        "ffmpeg", "-y",
+        "-ss", str(start),
+        "-i", input_path,
+        "-t", "8",
+        "-c:v", "libx264",
+        "-c:a", "aac",
+        output_path,
+    ]
+
+
+class ExportWorker(QThread):
+    finished = pyqtSignal(str)   # output path
+    error = pyqtSignal(str)      # error message
+
+    def __init__(self, input_path: str, start: float, output_path: str):
+        super().__init__()
+        self._input = input_path
+        self._start = start
+        self._output = output_path
+
+    def run(self):
+        cmd = build_ffmpeg_command(self._input, self._start, self._output)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode == 0:
+                self.finished.emit(self._output)
+            else:
+                self.error.emit(result.stderr[-500:])
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 def main():
