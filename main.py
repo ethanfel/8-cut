@@ -358,6 +358,88 @@ class MpvWidget(QFrame):
         super().closeEvent(event)
 
 
+class CropBarWidget(QWidget):
+    """Thin bar showing the portrait crop window position within the frame width.
+
+    Full bar width = source frame width (100%).
+    Highlighted region = selected crop window proportion.
+    Click to reposition crop center.
+    """
+    crop_changed = pyqtSignal(float)  # emits clamped crop center 0.0–1.0
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(16)
+        self.setMouseTracking(True)
+        self._source_ratio: float = 16 / 9   # w/h of source video
+        self._portrait_ratio: tuple[int, int] | None = None  # (num, den)
+        self._crop_center: float = 0.5
+
+    def set_source_ratio(self, w: int, h: int) -> None:
+        self._source_ratio = w / h if h > 0 else 16 / 9
+        self.update()
+
+    def set_portrait_ratio(self, ratio: str | None) -> None:
+        self._portrait_ratio = _RATIOS[ratio] if ratio else None
+        self.update()
+
+    def set_crop_center(self, frac: float) -> None:
+        self._crop_center = max(0.0, min(1.0, frac))
+        self.update()
+
+    def _crop_window_frac(self) -> float:
+        """Crop window width as a fraction of the bar (0–1)."""
+        if self._portrait_ratio is None:
+            return 1.0
+        num, den = self._portrait_ratio
+        portrait_ar = num / den
+        return portrait_ar / self._source_ratio
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        try:
+            w, h = self.width(), self.height()
+            p.fillRect(0, 0, w, h, QColor(40, 40, 40))
+
+            if self._portrait_ratio is None:
+                return
+
+            win_frac = self._crop_window_frac()
+            win_px = int(w * win_frac)
+            max_x = w - win_px
+            x = int(max_x * self._crop_center)
+
+            p.fillRect(x, 1, win_px, h - 2, QColor(80, 140, 220, 160))
+            pen = QPen(QColor(100, 160, 240))
+            pen.setWidth(1)
+            p.setPen(pen)
+            p.drawRect(x, 1, win_px - 1, h - 2)
+        finally:
+            p.end()
+
+    def mousePressEvent(self, event):
+        self._update_from_x(event.position().x())
+
+    def mouseMoveEvent(self, event):
+        if event.buttons():
+            self._update_from_x(event.position().x())
+
+    def _update_from_x(self, x: float) -> None:
+        if self._portrait_ratio is None:
+            return
+        w = self.width()
+        win_frac = self._crop_window_frac()
+        win_px = w * win_frac
+        max_x = w - win_px
+        if max_x <= 0:
+            frac = 0.5
+        else:
+            frac = (x - win_px / 2) / max_x
+            frac = max(0.0, min(1.0, frac))
+        self.set_crop_center(frac)
+        self.crop_changed.emit(self._crop_center)
+
+
 class PlaylistWidget(QListWidget):
     file_selected = pyqtSignal(str)  # emits full path of selected file
 
