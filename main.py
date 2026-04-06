@@ -782,8 +782,8 @@ class MainWindow(QMainWindow):
         self._cmb_format = QComboBox()
         self._cmb_format.addItems(["MP4", "WebP sequence"])
         saved_fmt = self._settings.value("export_format", "MP4")
-        fmt_idx = self._cmb_format.findText(saved_fmt)
-        self._cmb_format.setCurrentIndex(fmt_idx if fmt_idx >= 0 else 0)
+        idx = self._cmb_format.findText(saved_fmt)
+        self._cmb_format.setCurrentIndex(idx if idx >= 0 else 0)
         self._cmb_format.currentTextChanged.connect(
             lambda v: self._settings.setValue("export_format", v)
         )
