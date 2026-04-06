@@ -661,6 +661,10 @@ class PlaylistWidget(QListWidget):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
 
+    def dragMoveEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
     def dropEvent(self, event: QDropEvent) -> None:
         paths = [
             u.toLocalFile() for u in event.mimeData().urls()
