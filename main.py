@@ -120,10 +120,10 @@ def upsert_clip_annotation(folder: str, clip_path: str, label: str) -> None:
                 entries = json.load(f)
             except (json.JSONDecodeError, ValueError):
                 entries = []
-    rel_path = os.path.relpath(clip_path, folder)
-    entry: dict = {"path": rel_path, "label": label}
+    abs_path = os.path.abspath(clip_path)
+    entry: dict = {"path": abs_path, "label": label}
     for i, e in enumerate(entries):
-        if e.get("path") == rel_path:
+        if e.get("path") == abs_path:
             entries[i] = entry
             break
     else:

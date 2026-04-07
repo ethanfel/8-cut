@@ -30,7 +30,7 @@ def load_db_records(db_path: Path) -> list[dict]:
 
 def build_entries_for_folder(folder: str, records: list[dict]) -> list[dict]:
     return [
-        {"path": os.path.relpath(rec["output_path"], folder), "label": rec["label"]}
+        {"path": os.path.abspath(rec["output_path"]), "label": rec["label"]}
         for rec in records
     ]
 

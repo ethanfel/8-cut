@@ -245,7 +245,7 @@ def test_upsert_creates_file():
             entries = json.load(f)
         assert len(entries) == 1
         assert entries[0]["label"] == "dog barking"
-        assert entries[0]["path"] == "clip_001.mp4"
+        assert entries[0]["path"] == clip
 
 def test_upsert_appends_new_clips():
     with tempfile.TemporaryDirectory() as d:
