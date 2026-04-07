@@ -339,6 +339,11 @@ class ExportWorker(QThread):
                         self._input, self._start, self._output
                     )
                     subprocess.run(audio_cmd, capture_output=True, text=True, timeout=60)
+                    # Write fps.txt alongside the .wav file.
+                    if self._fps is not None:
+                        fps_path = self._output + ".fps.txt"
+                        with open(fps_path, "w") as f:
+                            f.write(f"{self._fps}\n")
                     # Audio extraction failure (e.g. no audio stream) is ignored —
                     # the frame sequence is the primary output.
                 self.finished.emit(self._output)
