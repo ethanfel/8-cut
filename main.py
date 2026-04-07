@@ -1290,6 +1290,9 @@ class MainWindow(QMainWindow):
         mask_row.addWidget(QLabel("Masks:"))
         mask_row.addWidget(self._cmb_mask)
         mask_row.addWidget(self._btn_masks)
+        _lbl_mask_warn = QLabel("⚠ Untested — use ComfyUI instead")
+        _lbl_mask_warn.setStyleSheet("color: #e0a030; font-style: italic;")
+        mask_row.addWidget(_lbl_mask_warn)
         mask_row.addStretch()
         show_masks = self._settings.value("show_masks_row", "true") == "true"
         self._mask_row_widget.setVisible(show_masks)
