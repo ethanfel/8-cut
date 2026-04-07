@@ -6,6 +6,7 @@ import sys
 import os
 import re
 import json
+import shutil
 import sqlite3
 import subprocess
 from datetime import datetime, timezone
@@ -99,6 +100,23 @@ def build_audio_extract_command(input_path: str, start: float, sequence_dir: str
 
 def build_annotation_json_path(folder: str) -> str:
     return os.path.join(folder, "dataset.json")
+
+
+def remove_clip_annotation(folder: str, clip_path: str) -> None:
+    """Remove the entry for *clip_path* from <folder>/dataset.json if present."""
+    json_path = build_annotation_json_path(folder)
+    if not os.path.exists(json_path):
+        return
+    abs_path = os.path.abspath(clip_path)
+    with open(json_path, "r", encoding="utf-8") as f:
+        try:
+            entries = json.load(f)
+        except (json.JSONDecodeError, ValueError):
+            return
+    entries = [e for e in entries if e.get("path") != abs_path]
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(entries, f, indent=2, ensure_ascii=False)
+        f.write("\n")
 
 
 def upsert_clip_annotation(folder: str, clip_path: str, label: str) -> None:
@@ -1244,6 +1262,11 @@ class MainWindow(QMainWindow):
         self._btn_export.setEnabled(False)
         self._btn_export.clicked.connect(self._on_export)
 
+        self._btn_delete = QPushButton("Delete")
+        self._btn_delete.setEnabled(False)
+        self._btn_delete.setToolTip("Delete last export (or selected marker) from disk, DB, and dataset.json")
+        self._btn_delete.clicked.connect(self._on_delete_export)
+
         # Settings dialog
         self._settings_dialog = SettingsDialog(self)
         self._settings_dialog.venv_installed.connect(self._on_venv_installed)
@@ -1277,6 +1300,7 @@ class MainWindow(QMainWindow):
         transport_row.addWidget(self._cmb_category)
         transport_row.addWidget(self._lbl_next)
         transport_row.addWidget(self._btn_export)
+        transport_row.addWidget(self._btn_delete)
 
         # Row 2 — output path + encoding settings (bottom)
         settings_row = QHBoxLayout()
@@ -1424,9 +1448,40 @@ class MainWindow(QMainWindow):
     def _on_marker_clicked(self, start_time: float, output_path: str) -> None:
         self._overwrite_path = output_path
         self._lbl_next.setText(f"↺ {os.path.basename(output_path)}")
+        self._btn_delete.setEnabled(True)
+        self._btn_delete.setText(f"Delete {os.path.basename(output_path)}")
         self.statusBar().showMessage(
             f"Overwrite mode: {os.path.basename(output_path)} — export to replace", 5000
         )
+
+    def _on_delete_export(self) -> None:
+        target = self._overwrite_path or self._last_export_path
+        if not target:
+            return
+        name = os.path.basename(target)
+        # Delete from disk
+        if os.path.isdir(target):
+            shutil.rmtree(target, ignore_errors=True)
+            wav = target + ".wav"
+            if os.path.exists(wav):
+                os.remove(wav)
+        elif os.path.exists(target):
+            os.remove(target)
+        # Remove from DB and dataset.json
+        self._db.delete_by_output_path(target)
+        folder = self._txt_folder.text()
+        remove_clip_annotation(folder, target)
+        # Reset state
+        if self._overwrite_path:
+            self._overwrite_path = ""
+        if self._last_export_path == target:
+            self._last_export_path = ""
+            self._export_counter = max(1, self._export_counter - 1)
+        self._btn_delete.setEnabled(False)
+        self._btn_delete.setText("Delete")
+        self._update_next_label()
+        self._refresh_markers()
+        self.statusBar().showMessage(f"Deleted: {name}")
 
     def _on_portrait_ratio_changed(self, text: str) -> None:
         ratio = None if text == "Off" else text
@@ -1454,6 +1509,9 @@ class MainWindow(QMainWindow):
         if self._overwrite_path:
             self._overwrite_path = ""
             self._update_next_label()
+            if not self._last_export_path:
+                self._btn_delete.setEnabled(False)
+            self._btn_delete.setText("Delete")
         if self._mpv.is_playing():
             self._mpv.play_loop(t, t + 8.0)
         else:
@@ -1594,6 +1652,8 @@ class MainWindow(QMainWindow):
         self._export_counter += 1
         self._update_next_label()
         self._btn_export.setEnabled(True)
+        self._btn_delete.setEnabled(True)
+        self._btn_delete.setText("Delete")
         self.statusBar().showMessage(f"Exported: {os.path.basename(path)}")
         self._refresh_markers()
         self._playlist.mark_done(self._file_path)
