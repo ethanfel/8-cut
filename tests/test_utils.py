@@ -1,5 +1,5 @@
-import tempfile, os
-from main import build_export_path, format_time, build_ffmpeg_command, build_mask_output_dir, build_sequence_dir, build_audio_extract_command, build_annotation_tsv_path, append_to_tsv
+import tempfile, os, json
+from main import build_export_path, format_time, build_ffmpeg_command, build_mask_output_dir, build_sequence_dir, build_audio_extract_command, build_annotation_json_path, upsert_clip_annotation
 from main import _normalize_filename, ProcessedDB
 
 
@@ -217,10 +217,7 @@ def test_ffmpeg_command_image_sequence():
     cmd = build_ffmpeg_command("/in/v.mp4", 0.0, "/out/seq_001", image_sequence=True)
     assert "-c:v" in cmd
     assert cmd[cmd.index("-c:v") + 1] == "libwebp"
-    assert "-lossless" in cmd
-    assert cmd[cmd.index("-lossless") + 1] == "1"
-    assert "-compression_level" in cmd
-    assert cmd[cmd.index("-compression_level") + 1] == "4"
+    assert "-quality" in cmd
     assert cmd[-1] == "/out/seq_001/frame_%04d.webp"
 
 def test_ffmpeg_command_image_sequence_with_resize():
@@ -237,28 +234,56 @@ def test_ffmpeg_command_image_sequence_no_audio():
     assert "aac" not in cmd
 
 
-def test_annotation_tsv_path():
-    assert build_annotation_tsv_path("/out") == "/out/dataset.tsv"
+def test_annotation_json_path():
+    assert build_annotation_json_path("/out") == "/out/dataset.json"
 
-def test_append_to_tsv_creates_file():
+def test_upsert_creates_file():
     with tempfile.TemporaryDirectory() as d:
-        append_to_tsv(d, "clip_001", "dog barking")
-        with open(os.path.join(d, "dataset.tsv")) as f:
-            lines = f.readlines()
-        assert lines == ["clip_001\tdog barking\n"]
+        clip = os.path.join(d, "clip_001.mp4")
+        upsert_clip_annotation(d, clip, "dog barking", 25.0)
+        with open(os.path.join(d, "dataset.json")) as f:
+            entries = json.load(f)
+        assert len(entries) == 1
+        assert entries[0]["label"] == "dog barking"
+        assert entries[0]["fps"] == 25.0
+        assert entries[0]["path"] == "clip_001.mp4"
 
-def test_append_to_tsv_appends():
+def test_upsert_appends_new_clips():
     with tempfile.TemporaryDirectory() as d:
-        append_to_tsv(d, "clip_001", "dog barking")
-        append_to_tsv(d, "clip_002", "cat meowing")
-        with open(os.path.join(d, "dataset.tsv")) as f:
-            lines = f.readlines()
-        assert len(lines) == 2
+        upsert_clip_annotation(d, os.path.join(d, "clip_001.mp4"), "dog barking", 25.0)
+        upsert_clip_annotation(d, os.path.join(d, "clip_002.mp4"), "cat meowing", 30.0)
+        with open(os.path.join(d, "dataset.json")) as f:
+            entries = json.load(f)
+        assert len(entries) == 2
 
-def test_append_to_tsv_empty_label_skips():
+def test_upsert_replaces_existing():
     with tempfile.TemporaryDirectory() as d:
-        append_to_tsv(d, "clip_001", "")
-        assert not os.path.exists(os.path.join(d, "dataset.tsv"))
+        clip = os.path.join(d, "clip_001.mp4")
+        upsert_clip_annotation(d, clip, "dog barking", 25.0)
+        upsert_clip_annotation(d, clip, "cat meowing", 25.0)
+        with open(os.path.join(d, "dataset.json")) as f:
+            entries = json.load(f)
+        assert len(entries) == 1
+        assert entries[0]["label"] == "cat meowing"
+
+def test_upsert_empty_label_skips():
+    with tempfile.TemporaryDirectory() as d:
+        upsert_clip_annotation(d, os.path.join(d, "clip_001.mp4"), "", 25.0)
+        assert not os.path.exists(os.path.join(d, "dataset.json"))
+
+def test_upsert_no_fps():
+    with tempfile.TemporaryDirectory() as d:
+        clip = os.path.join(d, "clip_001.mp4")
+        upsert_clip_annotation(d, clip, "dog barking", None)
+        with open(os.path.join(d, "dataset.json")) as f:
+            entries = json.load(f)
+        assert "fps" not in entries[0]
+
+def test_upsert_missing_folder_creates_it():
+    with tempfile.TemporaryDirectory() as d:
+        nested = os.path.join(d, "subdir", "deep")
+        upsert_clip_annotation(nested, os.path.join(nested, "clip_001.mp4"), "dog barking", 25.0)
+        assert os.path.exists(os.path.join(nested, "dataset.json"))
 
 def test_db_stores_label_and_category():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
@@ -272,9 +297,3 @@ def test_db_stores_label_and_category():
         assert row == ("dog barking", "Animal")
     finally:
         os.unlink(path)
-
-def test_append_to_tsv_missing_folder_creates_it():
-    with tempfile.TemporaryDirectory() as d:
-        nested = os.path.join(d, "subdir", "deep")
-        append_to_tsv(nested, "clip_001", "dog barking")
-        assert os.path.exists(os.path.join(nested, "dataset.tsv"))

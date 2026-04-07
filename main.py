@@ -5,6 +5,7 @@ locale.setlocale(locale.LC_NUMERIC, "C")  # required by libmpv before any import
 import sys
 import os
 import re
+import json
 import sqlite3
 import subprocess
 from datetime import datetime, timezone
@@ -99,22 +100,44 @@ def build_audio_extract_command(input_path: str, start: float, sequence_dir: str
     ]
 
 
-def build_annotation_tsv_path(folder: str) -> str:
-    return os.path.join(folder, "dataset.tsv")
+def build_annotation_json_path(folder: str) -> str:
+    return os.path.join(folder, "dataset.json")
 
 
-def append_to_tsv(folder: str, clip_stem: str, label: str) -> None:
-    """Append one line to <folder>/dataset.tsv (creates file if absent).
+def upsert_clip_annotation(
+    folder: str, clip_path: str, label: str, fps: float | None
+) -> None:
+    """Insert or update one entry in <folder>/dataset.json.
 
-    Format: ``{clip_stem}\\t{label}`` — matches VGGSound training TSV (2 columns).
-    Category is stored in the database only, not in the TSV.
+    Each entry stores a path relative to *folder*, the sound label, and fps.
+    Matches on ``path``; if an entry for the same clip already exists it is
+    replaced (overwrite-export case).  Nothing is written when *label* is
+    empty.
     """
     if not label.strip():
         return
-    tsv_path = build_annotation_tsv_path(folder)
     os.makedirs(folder, exist_ok=True)
-    with open(tsv_path, "a", encoding="utf-8") as f:
-        f.write(f"{clip_stem}\t{label}\n")
+    json_path = build_annotation_json_path(folder)
+    entries: list[dict] = []
+    if os.path.exists(json_path):
+        with open(json_path, "r", encoding="utf-8") as f:
+            try:
+                entries = json.load(f)
+            except (json.JSONDecodeError, ValueError):
+                entries = []
+    rel_path = os.path.relpath(clip_path, folder)
+    entry: dict = {"path": rel_path, "label": label}
+    if fps is not None:
+        entry["fps"] = fps
+    for i, e in enumerate(entries):
+        if e.get("path") == rel_path:
+            entries[i] = entry
+            break
+    else:
+        entries.append(entry)
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(entries, f, indent=2, ensure_ascii=False)
+        f.write("\n")
 
 
 def build_mask_output_dir(video_path: str) -> str:
@@ -1579,8 +1602,8 @@ class MainWindow(QMainWindow):
             label=label,
             category=category,
         )
-        clip_stem = os.path.splitext(os.path.basename(path))[0]
-        append_to_tsv(self._txt_folder.text(), clip_stem, label)
+        folder = self._txt_folder.text()
+        upsert_clip_annotation(folder, path, label, self._fps)
         # For MP4 exports path is a file; for WebP sequence it is a directory.
         # build_mask_output_dir handles both correctly via Path.stem.
         self._last_export_path = path
