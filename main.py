@@ -220,6 +220,24 @@ class ProcessedDB:
         )
         self._con.commit()
 
+    def get_labels(self) -> list[str]:
+        """Return distinct non-empty labels ordered by most recently used."""
+        if not self._enabled:
+            return []
+        rows = self._con.execute(
+            "SELECT DISTINCT label FROM processed"
+            " WHERE label != '' ORDER BY processed_at DESC"
+        ).fetchall()
+        # Deduplicate while preserving order (DISTINCT on processed_at DESC
+        # may return duplicates if the same label was used multiple times).
+        seen: set[str] = set()
+        result = []
+        for (lbl,) in rows:
+            if lbl not in seen:
+                seen.add(lbl)
+                result.append(lbl)
+        return result
+
     def delete_by_output_path(self, output_path: str) -> None:
         if not self._enabled:
             return
@@ -327,8 +345,9 @@ class ExportWorker(QThread):
 
 
 class TimelineWidget(QWidget):
-    cursor_changed = pyqtSignal(float)        # emits position in seconds
-    marker_delete_requested = pyqtSignal(str) # emits output_path
+    cursor_changed = pyqtSignal(float)              # emits position in seconds
+    marker_delete_requested = pyqtSignal(str)       # emits output_path
+    marker_clicked = pyqtSignal(float, str)         # emits (start_time, output_path)
 
     _RULER_H = 22   # pixels reserved for the time ruler
     _HANDLE_H = 8   # height of the playhead triangle
@@ -497,6 +516,16 @@ class TimelineWidget(QWidget):
             p.end()
 
     def mousePressEvent(self, event):
+        from PyQt6.QtCore import Qt as _Qt
+        if event.button() == _Qt.MouseButton.LeftButton and self._hover_cache:
+            x = event.position().x()
+            w = self.width()
+            for (frac, output_path) in self._hover_cache:
+                if abs(x - frac * w) <= 6:
+                    t = frac * self._duration
+                    self._seek(x)
+                    self.marker_clicked.emit(t, output_path)
+                    return
         self._seek(event.position().x())
 
     def mouseMoveEvent(self, event):
@@ -566,6 +595,8 @@ class MpvWidget(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._frame: "QImage | None" = None
         self._render_ctx = None
+        self._video_w: int = 0
+        self._video_h: int = 0
         self._fbo = None
         self._needs_render = False  # set True by mpv update_cb (any thread)
 
@@ -610,11 +641,26 @@ class MpvWidget(QWidget):
         self._render_timer.timeout.connect(self._poll_render)
         self._render_timer.start()
 
-        self._do_file_loaded.connect(self.file_loaded)
+        self._do_file_loaded.connect(self._on_file_loaded_qt)
+        self._overlay_ratio: tuple[int, int] | None = None  # (num, den) or None
+        self._overlay_crop_center: float = 0.5
+        self._overlay_fracs: "tuple[float, float] | None" = None  # (left_frac, right_frac)
 
         @self._player.event_callback("file-loaded")
         def _on_file_loaded(event):
             self._do_file_loaded.emit()
+
+    def _on_file_loaded_qt(self) -> None:
+        self._video_w = self._player.width or 0
+        self._video_h = self._player.height or 0
+        self._overlay_fracs = None  # recompute with new dimensions
+        self.file_loaded.emit()
+
+    def set_crop_overlay(self, ratio: "tuple[int,int] | None", crop_center: float) -> None:
+        self._overlay_ratio = ratio
+        self._overlay_crop_center = crop_center
+        self._overlay_fracs: "tuple[float,float] | None" = None  # invalidate cache
+        self.update()
 
     def _on_mpv_update(self):
         # Called from mpv's C thread — only set a flag, no Qt calls here.
@@ -652,6 +698,30 @@ class MpvWidget(QWidget):
             p.drawImage(self.rect(), self._frame)
         else:
             p.fillRect(self.rect(), QColor(0, 0, 0))
+
+        if self._overlay_ratio is not None and self._player.pause:
+            if self._overlay_fracs is None:
+                vw, vh = self._video_w, self._video_h
+                if vw > 0 and vh > 0:
+                    num, den = self._overlay_ratio
+                    crop_w_frac = min((vh * num / den) / vw, 1.0)
+                    half = crop_w_frac / 2.0
+                    center = self._overlay_crop_center
+                    self._overlay_fracs = (
+                        max(0.0, center - half),
+                        min(1.0, center + half),
+                    )
+            if self._overlay_fracs is not None:
+                left_frac, right_frac = self._overlay_fracs
+                ww, wh = self.width(), self.height()
+                left_px  = int(left_frac  * ww)
+                right_px = int(right_frac * ww)
+                cut_color = QColor(180, 0, 0, 140)
+                if left_px > 0:
+                    p.fillRect(0, 0, left_px, wh, cut_color)
+                if right_px < ww:
+                    p.fillRect(right_px, 0, ww - right_px, wh, cut_color)
+
         p.end()
 
     def mousePressEvent(self, event):
@@ -685,7 +755,7 @@ class MpvWidget(QWidget):
         return d if d else 0.0
 
     def get_video_size(self) -> tuple[int, int]:
-        return (self._player.width or 0, self._player.height or 0)
+        return (self._video_w, self._video_h)
 
     def get_fps(self) -> float:
         return self._player.container_fps or 25.0
@@ -808,6 +878,18 @@ class PlaylistWidget(QListWidget):
         if was_empty and self._paths:
             self._select(0)
 
+    def mark_done(self, path: str) -> None:
+        """Gray out and prefix ✓ on the queue item for path."""
+        if path not in self._path_set:
+            return
+        row = self._paths.index(path)
+        item = self.item(row)
+        if item is None:
+            return
+        name = os.path.basename(path)
+        item.setText(f"✓ {name}")
+        item.setForeground(QColor(100, 180, 100))
+
     def advance(self) -> None:
         """Move to next item in queue. Does nothing if at end or nothing selected."""
         row = self.currentRow()
@@ -817,16 +899,6 @@ class PlaylistWidget(QListWidget):
     def current_path(self) -> str | None:
         row = self.currentRow()
         return self._paths[row] if 0 <= row < len(self._paths) else None
-
-    def mark_done(self, path: str) -> None:
-        if path not in self._path_set:
-            return
-        row = self._paths.index(path)
-        item = self.item(row)
-        if item is None:
-            return
-        item.setText(f"✓ {os.path.basename(path)}")
-        item.setForeground(QColor(100, 180, 100))
 
     def _select(self, row: int) -> None:
         prev = self.currentRow()
@@ -1042,6 +1114,7 @@ class MainWindow(QMainWindow):
         self._export_counter: int = 1
         self._export_worker: ExportWorker | None = None
         self._last_export_path: str = ""
+        self._overwrite_path: str = ""   # set when a marker is selected for re-export
         self._mask_worker: MaskWorker | None = None
         self._db_worker: _DBWorker | None = None
         self._fps: float = 25.0  # cached on file load via get_fps()
@@ -1056,6 +1129,7 @@ class MainWindow(QMainWindow):
         self._timeline.setFixedHeight(160)
         self._timeline.cursor_changed.connect(self._on_cursor_changed)
         self._timeline.marker_delete_requested.connect(self._on_delete_marker)
+        self._timeline.marker_clicked.connect(self._on_marker_clicked)
 
         self._lbl_file = QLabel("Drop files onto the queue →")
         self._lbl_file.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1115,12 +1189,15 @@ class MainWindow(QMainWindow):
         )
         self._cmb_format.currentTextChanged.connect(self._update_next_label)
 
-        self._txt_label = QLineEdit()
-        self._txt_label.setPlaceholderText("Sound label (e.g. dog barking)")
-        self._txt_label.setFixedWidth(200)
+        self._txt_label = QComboBox()
+        self._txt_label.setEditable(True)
+        self._txt_label.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._txt_label.lineEdit().setPlaceholderText("Sound label (e.g. dog barking)")
+        self._txt_label.setFixedWidth(220)
+        self._txt_label.addItems(self._db.get_labels())
         saved_label = self._settings.value("sound_label", "")
-        self._txt_label.setText(saved_label)
-        self._txt_label.textChanged.connect(
+        self._txt_label.setCurrentText(saved_label)
+        self._txt_label.currentTextChanged.connect(
             lambda v: self._settings.setValue("sound_label", v)
         )
 
@@ -1239,6 +1316,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(splitter)
         self.setStatusBar(QStatusBar())
         self._crop_bar.setVisible(saved_ratio != "Off")
+        if saved_ratio != "Off":
+            self._mpv.set_crop_overlay(_RATIOS[saved_ratio], self._crop_center)
 
         # Application-wide shortcuts — fire regardless of which widget has focus.
         ctx = Qt.ShortcutContext.ApplicationShortcut
@@ -1320,11 +1399,21 @@ class MainWindow(QMainWindow):
             f"Deleted marker: {os.path.basename(output_path)}", 4000
         )
 
+    def _on_marker_clicked(self, start_time: float, output_path: str) -> None:
+        self._overwrite_path = output_path
+        self._lbl_next.setText(f"↺ {os.path.basename(output_path)}")
+        self.statusBar().showMessage(
+            f"Overwrite mode: {os.path.basename(output_path)} — export to replace", 5000
+        )
+
     def _on_portrait_ratio_changed(self, text: str) -> None:
         ratio = None if text == "Off" else text
         self._crop_bar.set_portrait_ratio(ratio)
         self._crop_bar.setVisible(ratio is not None)
         self._settings.setValue("portrait_ratio", text)
+        self._mpv.set_crop_overlay(
+            _RATIOS[ratio] if ratio else None, self._crop_center
+        )
 
     def _on_crop_click(self, frac: float) -> None:
         ratio = self._cmb_portrait.currentText()
@@ -1333,12 +1422,16 @@ class MainWindow(QMainWindow):
         self._crop_center = max(0.0, min(1.0, frac))
         self._settings.setValue("crop_center", str(self._crop_center))
         self._crop_bar.set_crop_center(self._crop_center)
+        self._mpv.set_crop_overlay(_RATIOS[ratio], self._crop_center)
 
     # --- Playback ---
 
     def _on_cursor_changed(self, t: float):
         self._cursor = t
         self._lbl_cursor.setText(f"cursor: {format_time(t)}")
+        if self._overwrite_path:
+            self._overwrite_path = ""
+            self._update_next_label()
         if self._mpv.is_playing():
             self._mpv.play_loop(t, t + 8.0)
         else:
@@ -1400,9 +1493,12 @@ class MainWindow(QMainWindow):
         folder = self._txt_folder.text()
         name = self._txt_name.text() or "clip"
         is_seq = self._cmb_format.currentText() == "WebP sequence"
+        # Advance past any files/dirs that already exist on disk.
         while True:
-            path = build_sequence_dir(folder, name, self._export_counter) if is_seq \
-                else build_export_path(folder, name, self._export_counter)
+            if is_seq:
+                path = build_sequence_dir(folder, name, self._export_counter)
+            else:
+                path = build_export_path(folder, name, self._export_counter)
             if not os.path.exists(path):
                 break
             self._export_counter += 1
@@ -1419,11 +1515,15 @@ class MainWindow(QMainWindow):
         image_sequence = fmt == "WebP sequence"
         folder = self._txt_folder.text()
         os.makedirs(folder, exist_ok=True)
-        name = self._txt_name.text() or "clip"
-        if image_sequence:
-            output = build_sequence_dir(folder, name, self._export_counter)
+        if self._overwrite_path:
+            output = self._overwrite_path
+            self._overwrite_path = ""
         else:
-            output = build_export_path(folder, name, self._export_counter)
+            name = self._txt_name.text() or "clip"
+            if image_sequence:
+                output = build_sequence_dir(folder, name, self._export_counter)
+            else:
+                output = build_export_path(folder, name, self._export_counter)
 
         raw = self._txt_resize.text().strip()
         try:
@@ -1455,7 +1555,7 @@ class MainWindow(QMainWindow):
         self._export_worker.start()
 
     def _on_export_done(self, path: str):
-        label = self._txt_label.text().strip()
+        label = self._txt_label.currentText().strip()
         category = self._cmb_category.currentText()
         self._db.add(
             os.path.basename(self._file_path),
@@ -1475,6 +1575,13 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Exported: {os.path.basename(path)}")
         self._refresh_markers()
         self._playlist.mark_done(self._file_path)
+        # Refresh label history so the new label is immediately selectable.
+        current = self._txt_label.currentText()
+        self._txt_label.blockSignals(True)
+        self._txt_label.clear()
+        self._txt_label.addItems(self._db.get_labels())
+        self._txt_label.setCurrentText(current)
+        self._txt_label.blockSignals(False)
         self._playlist.advance()
 
     def _on_export_error(self, msg: str):
