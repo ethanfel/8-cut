@@ -64,7 +64,7 @@ def build_ffmpeg_command(
         # if(lt(iw,ih),...) → portrait output: fix width; landscape: fix height.
         # -2 keeps aspect ratio with even-pixel rounding (libx264 requirement).
         filters.append(
-            f"scale='if(lt(iw,ih),{short_side},-2)':'if(lt(iw,ih),-2,{short_side})'"
+            f"scale='if(lt(iw,ih),{short_side},-2)':'if(lt(iw,ih),-2,{short_side})':flags=lanczos"
         )
     if filters:
         cmd += ["-vf", ",".join(filters)]
@@ -73,7 +73,7 @@ def build_ffmpeg_command(
         cmd += [
             "-an",
             "-c:v", "libwebp",
-            "-quality", "85",
+            "-quality", "92",
             "-compression_level", "1",
             os.path.join(output_path, "frame_%04d.webp"),
         ]
@@ -662,12 +662,17 @@ class MpvWidget(QWidget):
     def load(self, path: str): self._player.play(path)
 
     def seek(self, t: float):
-        self._player.pause = True
-        self._player.seek(t, "absolute")
+        if self._player.duration is None:
+            return
+        try:
+            self._player.seek(t, "absolute")
+        except SystemError:
+            pass
 
     def play_loop(self, a: float, b: float):
         self._player["ab-loop-a"] = a
         self._player["ab-loop-b"] = min(b, self._player.duration or b)
+        self._player.seek(a, "absolute")
         self._player.pause = False
 
     def stop_loop(self):
@@ -813,15 +818,36 @@ class PlaylistWidget(QListWidget):
         row = self.currentRow()
         return self._paths[row] if 0 <= row < len(self._paths) else None
 
+    def mark_done(self, path: str) -> None:
+        if path not in self._path_set:
+            return
+        row = self._paths.index(path)
+        item = self.item(row)
+        if item is None:
+            return
+        item.setText(f"✓ {os.path.basename(path)}")
+        item.setForeground(QColor(100, 180, 100))
+
     def _select(self, row: int) -> None:
         prev = self.currentRow()
         self.setCurrentRow(row)
-        # Only update the two items that actually changed label.
         if prev >= 0 and prev != row and self.item(prev):
-            self.item(prev).setText(os.path.basename(self._paths[prev]))
+            self._refresh_item_text(prev)
         if self.item(row):
-            self.item(row).setText(f"▶ {os.path.basename(self._paths[row])}")
+            item = self.item(row)
+            prefix = "✓ " if item.foreground().color() == QColor(100, 180, 100) else ""
+            item.setText(f"▶ {prefix}{os.path.basename(self._paths[row])}")
         self.file_selected.emit(self._paths[row])
+
+    def _refresh_item_text(self, row: int) -> None:
+        item = self.item(row)
+        if item is None:
+            return
+        name = os.path.basename(self._paths[row])
+        if item.foreground().color() == QColor(100, 180, 100):
+            item.setText(f"✓ {name}")
+        else:
+            item.setText(name)
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         self._select(self.row(item))
@@ -1313,7 +1339,10 @@ class MainWindow(QMainWindow):
     def _on_cursor_changed(self, t: float):
         self._cursor = t
         self._lbl_cursor.setText(f"cursor: {format_time(t)}")
-        self._mpv.seek(t)
+        if self._mpv.is_playing():
+            self._mpv.play_loop(t, t + 8.0)
+        else:
+            self._mpv.seek(t)
 
     def _toggle_play(self):
         if not self._file_path:
@@ -1370,10 +1399,13 @@ class MainWindow(QMainWindow):
     def _update_next_label(self):
         folder = self._txt_folder.text()
         name = self._txt_name.text() or "clip"
-        if self._cmb_format.currentText() == "WebP sequence":
-            path = build_sequence_dir(folder, name, self._export_counter)
-        else:
-            path = build_export_path(folder, name, self._export_counter)
+        is_seq = self._cmb_format.currentText() == "WebP sequence"
+        while True:
+            path = build_sequence_dir(folder, name, self._export_counter) if is_seq \
+                else build_export_path(folder, name, self._export_counter)
+            if not os.path.exists(path):
+                break
+            self._export_counter += 1
         self._lbl_next.setText(f"→ {os.path.basename(path)}")
 
     def _on_export(self):
@@ -1386,6 +1418,7 @@ class MainWindow(QMainWindow):
         fmt = self._cmb_format.currentText()
         image_sequence = fmt == "WebP sequence"
         folder = self._txt_folder.text()
+        os.makedirs(folder, exist_ok=True)
         name = self._txt_name.text() or "clip"
         if image_sequence:
             output = build_sequence_dir(folder, name, self._export_counter)
@@ -1441,6 +1474,7 @@ class MainWindow(QMainWindow):
         self._btn_export.setEnabled(True)
         self.statusBar().showMessage(f"Exported: {os.path.basename(path)}")
         self._refresh_markers()
+        self._playlist.mark_done(self._file_path)
         self._playlist.advance()
 
     def _on_export_error(self, msg: str):
@@ -1468,6 +1502,9 @@ class MainWindow(QMainWindow):
         ]
         if paths:
             self._playlist.add_files(paths)
+            for p in paths:
+                if self._db.get_markers(os.path.basename(p)):
+                    self._playlist.mark_done(p)
 
     def _on_venv_installed(self) -> None:
         self._btn_masks.setEnabled(True)
