@@ -1,5 +1,9 @@
 # 8-cut
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://github.com/ethanfel/8-cut/blob/master/LICENSE)
+
+**Source:** https://github.com/ethanfel/8-cut
+
 A desktop tool for cutting 8-second clips from video files, designed for building [SELVA](https://github.com/google-deepmind/selva) datasets.
 
 ## Overview
@@ -95,3 +99,7 @@ pytest tests/ -v
 ```
 
 38 unit tests covering path builders, ffmpeg command generation, time formatting, and the processed-clips database.
+
+## License
+
+[GNU General Public License v3.0](https://github.com/ethanfel/8-cut/blob/master/LICENSE)
