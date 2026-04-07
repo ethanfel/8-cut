@@ -76,6 +76,8 @@ Arrow keys and J/K/L are ignored when a text field has focus.
 
 ### Mask generation tools
 
+> **Warning:** The mask generation feature is untested and may not work reliably. For production use, consider [ComfyUI](https://github.com/comfyanonymous/ComfyUI) instead.
+
 Two standalone scripts live in `tools/`. They are run by the app via a managed venv but can also be called directly:
 
 ```
