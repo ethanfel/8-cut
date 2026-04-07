@@ -46,7 +46,6 @@ def build_ffmpeg_command(
     portrait_ratio: str | None = None,
     crop_center: float = 0.5,
     image_sequence: bool = False,
-    fps: float | None = None,
 ) -> list[str]:
     # -ss before -i: fast input-seeking. Safe here because we always re-encode
     # (libx264/aac), so there is no keyframe-alignment issue from pre-input seek.
@@ -68,8 +67,6 @@ def build_ffmpeg_command(
         filters.append(
             f"scale='if(lt(iw,ih),{short_side},-2)':'if(lt(iw,ih),-2,{short_side})':flags=lanczos"
         )
-    if fps is not None:
-        filters.append(f"fps={fps}")
     if filters:
         cmd += ["-vf", ",".join(filters)]
 
@@ -331,8 +328,7 @@ class ExportWorker(QThread):
                  short_side: int | None = None,
                  portrait_ratio: str | None = None,
                  crop_center: float = 0.5,
-                 image_sequence: bool = False,
-                 fps: float | None = None):
+                 image_sequence: bool = False):
         super().__init__()
         self._input = input_path
         self._start = start
@@ -341,7 +337,6 @@ class ExportWorker(QThread):
         self._portrait_ratio = portrait_ratio
         self._crop_center = crop_center
         self._image_sequence = image_sequence
-        self._fps = fps
 
     def run(self):
         try:
@@ -353,7 +348,6 @@ class ExportWorker(QThread):
                 portrait_ratio=self._portrait_ratio,
                 crop_center=self._crop_center,
                 image_sequence=self._image_sequence,
-                fps=self._fps,
             )
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode == 0:
@@ -1581,7 +1575,6 @@ class MainWindow(QMainWindow):
             portrait_ratio=portrait_ratio,
             crop_center=self._crop_center,
             image_sequence=image_sequence,
-            fps=self._fps,
         )
         self._export_worker.finished.connect(self._on_export_done)
         self._export_worker.error.connect(self._on_export_error)
