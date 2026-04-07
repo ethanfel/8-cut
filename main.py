@@ -101,12 +101,10 @@ def build_annotation_json_path(folder: str) -> str:
     return os.path.join(folder, "dataset.json")
 
 
-def upsert_clip_annotation(
-    folder: str, clip_path: str, label: str, fps: float | None
-) -> None:
+def upsert_clip_annotation(folder: str, clip_path: str, label: str) -> None:
     """Insert or update one entry in <folder>/dataset.json.
 
-    Each entry stores a path relative to *folder*, the sound label, and fps.
+    Each entry stores a path relative to *folder* and the sound label.
     Matches on ``path``; if an entry for the same clip already exists it is
     replaced (overwrite-export case).  Nothing is written when *label* is
     empty.
@@ -124,8 +122,6 @@ def upsert_clip_annotation(
                 entries = []
     rel_path = os.path.relpath(clip_path, folder)
     entry: dict = {"path": rel_path, "label": label}
-    if fps is not None:
-        entry["fps"] = fps
     for i, e in enumerate(entries):
         if e.get("path") == rel_path:
             entries[i] = entry
@@ -1591,7 +1587,7 @@ class MainWindow(QMainWindow):
             category=category,
         )
         folder = self._txt_folder.text()
-        upsert_clip_annotation(folder, path, label, self._fps)
+        upsert_clip_annotation(folder, path, label)
         # For MP4 exports path is a file; for WebP sequence it is a directory.
         # build_mask_output_dir handles both correctly via Path.stem.
         self._last_export_path = path

@@ -240,18 +240,17 @@ def test_annotation_json_path():
 def test_upsert_creates_file():
     with tempfile.TemporaryDirectory() as d:
         clip = os.path.join(d, "clip_001.mp4")
-        upsert_clip_annotation(d, clip, "dog barking", 25.0)
+        upsert_clip_annotation(d, clip, "dog barking")
         with open(os.path.join(d, "dataset.json")) as f:
             entries = json.load(f)
         assert len(entries) == 1
         assert entries[0]["label"] == "dog barking"
-        assert entries[0]["fps"] == 25.0
         assert entries[0]["path"] == "clip_001.mp4"
 
 def test_upsert_appends_new_clips():
     with tempfile.TemporaryDirectory() as d:
-        upsert_clip_annotation(d, os.path.join(d, "clip_001.mp4"), "dog barking", 25.0)
-        upsert_clip_annotation(d, os.path.join(d, "clip_002.mp4"), "cat meowing", 30.0)
+        upsert_clip_annotation(d, os.path.join(d, "clip_001.mp4"), "dog barking")
+        upsert_clip_annotation(d, os.path.join(d, "clip_002.mp4"), "cat meowing")
         with open(os.path.join(d, "dataset.json")) as f:
             entries = json.load(f)
         assert len(entries) == 2
@@ -259,8 +258,8 @@ def test_upsert_appends_new_clips():
 def test_upsert_replaces_existing():
     with tempfile.TemporaryDirectory() as d:
         clip = os.path.join(d, "clip_001.mp4")
-        upsert_clip_annotation(d, clip, "dog barking", 25.0)
-        upsert_clip_annotation(d, clip, "cat meowing", 25.0)
+        upsert_clip_annotation(d, clip, "dog barking")
+        upsert_clip_annotation(d, clip, "cat meowing")
         with open(os.path.join(d, "dataset.json")) as f:
             entries = json.load(f)
         assert len(entries) == 1
@@ -268,21 +267,13 @@ def test_upsert_replaces_existing():
 
 def test_upsert_empty_label_skips():
     with tempfile.TemporaryDirectory() as d:
-        upsert_clip_annotation(d, os.path.join(d, "clip_001.mp4"), "", 25.0)
+        upsert_clip_annotation(d, os.path.join(d, "clip_001.mp4"), "")
         assert not os.path.exists(os.path.join(d, "dataset.json"))
-
-def test_upsert_no_fps():
-    with tempfile.TemporaryDirectory() as d:
-        clip = os.path.join(d, "clip_001.mp4")
-        upsert_clip_annotation(d, clip, "dog barking", None)
-        with open(os.path.join(d, "dataset.json")) as f:
-            entries = json.load(f)
-        assert "fps" not in entries[0]
 
 def test_upsert_missing_folder_creates_it():
     with tempfile.TemporaryDirectory() as d:
         nested = os.path.join(d, "subdir", "deep")
-        upsert_clip_annotation(nested, os.path.join(nested, "clip_001.mp4"), "dog barking", 25.0)
+        upsert_clip_annotation(nested, os.path.join(nested, "clip_001.mp4"), "dog barking")
         assert os.path.exists(os.path.join(nested, "dataset.json"))
 
 def test_db_stores_label_and_category():

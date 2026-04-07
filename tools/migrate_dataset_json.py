@@ -2,8 +2,7 @@
 """One-shot migration: generate dataset.json files from ~/.8cut.db history.
 
 For each export folder that has records in the database, writes (or merges
-into) a dataset.json with path (relative to the folder), label, and fps when
-a <clip>.fps.txt sidecar exists alongside the WAV file.
+into) a dataset.json with path (relative to the folder) and label per clip.
 
 Usage:
     python tools/migrate_dataset_json.py [--dry-run]
@@ -29,30 +28,11 @@ def load_db_records(db_path: Path) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def read_fps_sidecar(output_path: str) -> float | None:
-    """Read fps from <output_path>.fps.txt if it exists."""
-    sidecar = output_path + ".fps.txt"
-    if os.path.exists(sidecar):
-        try:
-            return float(Path(sidecar).read_text().strip())
-        except ValueError:
-            pass
-    return None
-
-
-def build_entries_for_folder(
-    folder: str, records: list[dict]
-) -> list[dict]:
-    entries = []
-    for rec in records:
-        output_path = rec["output_path"]
-        rel = os.path.relpath(output_path, folder)
-        entry: dict = {"path": rel, "label": rec["label"]}
-        fps = read_fps_sidecar(output_path)
-        if fps is not None:
-            entry["fps"] = fps
-        entries.append(entry)
-    return entries
+def build_entries_for_folder(folder: str, records: list[dict]) -> list[dict]:
+    return [
+        {"path": os.path.relpath(rec["output_path"], folder), "label": rec["label"]}
+        for rec in records
+    ]
 
 
 def merge_into_json(json_path: str, new_entries: list[dict], dry_run: bool) -> int:
