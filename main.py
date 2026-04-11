@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QDialog, QPlainTextEdit, QCheckBox, QSpinBox, QDoubleSpinBox,
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSettings
-from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
+from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
 import mpv
 
 
@@ -385,6 +385,31 @@ class ExportWorker(QThread):
                 self.error.emit(str(e))
                 return
         self.all_done.emit()
+
+
+class FrameGrabber(QThread):
+    """Grab a single frame via ffmpeg and emit it as raw PNG bytes."""
+    frame_ready = pyqtSignal(bytes)
+
+    def __init__(self, input_path: str, time: float):
+        super().__init__()
+        self._input = input_path
+        self._time = time
+
+    def run(self):
+        try:
+            cmd = [
+                "ffmpeg", "-ss", str(self._time),
+                "-i", self._input,
+                "-frames:v", "1",
+                "-f", "image2pipe", "-vcodec", "png",
+                "pipe:1",
+            ]
+            result = subprocess.run(cmd, capture_output=True, timeout=10)
+            if result.returncode == 0 and result.stdout:
+                self.frame_ready.emit(result.stdout)
+        except Exception:
+            pass
 
 
 class TimelineWidget(QWidget):
@@ -1166,6 +1191,7 @@ class MainWindow(QMainWindow):
         self._overwrite_path: str = ""   # set when a marker is selected for re-export
         self._mask_worker: MaskWorker | None = None
         self._db_worker: _DBWorker | None = None
+        self._frame_grabber: FrameGrabber | None = None
         self._fps: float = 25.0  # cached on file load via get_fps()
 
         # Widgets
@@ -1174,6 +1200,19 @@ class MainWindow(QMainWindow):
 
         self._mpv = MpvWidget()
         self._mpv.file_loaded.connect(self._after_load)
+
+        self._end_preview = QLabel()
+        self._end_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._end_preview.setMinimumWidth(160)
+        self._end_preview.setMaximumWidth(320)
+        self._end_preview.setStyleSheet("background: #1a1a1a; border: 1px solid #333;")
+        self._end_preview.setScaledContents(True)
+
+        self._preview_timer = QTimer()
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(300)
+        self._preview_timer.timeout.connect(self._grab_end_frame)
+
         self._timeline = TimelineWidget()
         self._timeline.setFixedHeight(160)
         _init_clips = int(self._settings.value("clip_count", "3"))
@@ -1251,6 +1290,7 @@ class MainWindow(QMainWindow):
             lambda: self._timeline.set_clip_span(self._clip_span)
         )
         self._spn_clips.valueChanged.connect(lambda: self._update_next_label())
+        self._spn_clips.valueChanged.connect(lambda: self._preview_timer.start())
 
         self._spn_spread = QDoubleSpinBox()
         self._spn_spread.setRange(2.0, 8.0)
@@ -1265,6 +1305,7 @@ class MainWindow(QMainWindow):
         self._spn_spread.valueChanged.connect(
             lambda: self._timeline.set_clip_span(self._clip_span)
         )
+        self._spn_spread.valueChanged.connect(lambda: self._preview_timer.start())
 
         self._chk_rand_portrait = QCheckBox("1 random portrait")
         self._chk_rand_portrait.setToolTip(
@@ -1377,7 +1418,10 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(4)
         right_layout.addLayout(top_bar)
-        right_layout.addWidget(self._mpv, stretch=1)
+        video_row = QHBoxLayout()
+        video_row.addWidget(self._mpv, stretch=1)
+        video_row.addWidget(self._end_preview)
+        right_layout.addLayout(video_row, stretch=1)
         right_layout.addWidget(self._timeline)
         right_layout.addWidget(self._crop_bar)
         right_layout.addLayout(transport_row)
@@ -1464,6 +1508,7 @@ class MainWindow(QMainWindow):
         self._btn_export.setEnabled(True)
         self._fps = self._mpv.get_fps()
         self._crop_bar.set_source_ratio(*self._mpv.get_video_size())
+        self._preview_timer.start()
 
         # Run DB fuzzy match off the main thread — can be slow on large databases.
         filename = os.path.basename(self._file_path)
@@ -1557,11 +1602,33 @@ class MainWindow(QMainWindow):
         self._crop_bar.set_crop_center(self._crop_center)
         self._mpv.set_crop_overlay(_RATIOS[ratio], self._crop_center)
 
+    # --- End-frame preview ---
+
+    def _grab_end_frame(self):
+        if not self._file_path:
+            return
+        if self._frame_grabber and self._frame_grabber.isRunning():
+            return
+        end_t = self._cursor + self._clip_span
+        dur = self._mpv.get_duration()
+        if dur:
+            end_t = min(end_t, dur)
+        self._frame_grabber = FrameGrabber(self._file_path, end_t)
+        self._frame_grabber.frame_ready.connect(self._show_end_frame)
+        self._frame_grabber.start()
+
+    def _show_end_frame(self, png_data: bytes):
+        px = QPixmap()
+        px.loadFromData(png_data)
+        if not px.isNull():
+            self._end_preview.setPixmap(px)
+
     # --- Playback ---
 
     def _on_cursor_changed(self, t: float):
         self._cursor = t
         self._lbl_cursor.setText(f"cursor: {format_time(t)}")
+        self._preview_timer.start()
         if self._overwrite_path:
             self._overwrite_path = ""
             self._update_next_label()
