@@ -1689,7 +1689,7 @@ class MainWindow(QMainWindow):
                 n_portrait = max(1, n_clips // 3)
                 indices = random.sample(range(n_clips), n_portrait)
                 for idx in indices:
-                    rand_ratio = random.choice(list(_RATIOS.keys()))
+                    rand_ratio = "9:16"
                     rand_center = random.random()
                     s, o, _, _ = jobs[idx]
                     jobs[idx] = (s, o, rand_ratio, rand_center)
