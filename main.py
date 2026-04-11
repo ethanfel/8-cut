@@ -6,6 +6,7 @@ import sys
 import os
 import re
 import json
+import random
 import shutil
 import sqlite3
 import subprocess
@@ -345,29 +346,25 @@ class ExportWorker(QThread):
     all_done = pyqtSignal()      # emitted after all jobs complete
 
     def __init__(self, input_path: str,
-                 jobs: list[tuple[float, str]],
+                 jobs: list[tuple[float, str, str | None, float]],
                  short_side: int | None = None,
-                 portrait_ratio: str | None = None,
-                 crop_center: float = 0.5,
                  image_sequence: bool = False):
         super().__init__()
         self._input = input_path
-        self._jobs = jobs  # [(start_time, output_path), ...]
+        self._jobs = jobs  # [(start, output, portrait_ratio, crop_center), ...]
         self._short_side = short_side
-        self._portrait_ratio = portrait_ratio
-        self._crop_center = crop_center
         self._image_sequence = image_sequence
 
     def run(self):
-        for start, output in self._jobs:
+        for start, output, portrait_ratio, crop_center in self._jobs:
             try:
                 if self._image_sequence:
                     os.makedirs(output, exist_ok=True)
                 cmd = build_ffmpeg_command(
                     self._input, start, output,
                     short_side=self._short_side,
-                    portrait_ratio=self._portrait_ratio,
-                    crop_center=self._crop_center,
+                    portrait_ratio=portrait_ratio,
+                    crop_center=crop_center,
                     image_sequence=self._image_sequence,
                 )
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -1270,6 +1267,17 @@ class MainWindow(QMainWindow):
             lambda: self._timeline.set_clip_span(self._clip_span)
         )
 
+        self._chk_rand_portrait = QCheckBox("1 random portrait")
+        self._chk_rand_portrait.setToolTip(
+            "One random clip per batch gets a random portrait crop (ratio + position)"
+        )
+        self._chk_rand_portrait.setChecked(
+            self._settings.value("rand_portrait", "false") == "true"
+        )
+        self._chk_rand_portrait.toggled.connect(
+            lambda v: self._settings.setValue("rand_portrait", "true" if v else "false")
+        )
+
         self._txt_label = QComboBox()
         self._txt_label.setEditable(True)
         self._txt_label.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
@@ -1363,6 +1371,7 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(self._spn_clips)
         settings_row.addWidget(QLabel("Spread:"))
         settings_row.addWidget(self._spn_spread)
+        settings_row.addWidget(self._chk_rand_portrait)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -1655,20 +1664,33 @@ class MainWindow(QMainWindow):
         os.makedirs(folder, exist_ok=True)
         spread = self._spn_spread.value()
 
+        ratio_text = self._cmb_portrait.currentText()
+        base_ratio = None if ratio_text == "Off" else ratio_text
+        base_center = self._crop_center
+
         if self._overwrite_path:
             # Single-clip overwrite mode
-            jobs = [(self._cursor, self._overwrite_path)]
+            jobs = [(self._cursor, self._overwrite_path, base_ratio, base_center)]
             self._overwrite_path = ""
         else:
             name = self._txt_name.text() or "clip"
+            n_clips = self._spn_clips.value()
             jobs = []
-            for sub in range(self._spn_clips.value()):
+            for sub in range(n_clips):
                 start = self._cursor + sub * spread
                 if image_sequence:
                     out = build_sequence_dir(folder, name, self._export_counter, sub=sub)
                 else:
                     out = build_export_path(folder, name, self._export_counter, sub=sub)
-                jobs.append((start, out))
+                jobs.append((start, out, base_ratio, base_center))
+
+            # Random portrait: pick one clip, give it a random ratio + position
+            if self._chk_rand_portrait.isChecked() and n_clips > 1:
+                idx = random.randrange(n_clips)
+                rand_ratio = random.choice(list(_RATIOS.keys()))
+                rand_center = random.random()
+                s, o, _, _ = jobs[idx]
+                jobs[idx] = (s, o, rand_ratio, rand_center)
 
         raw = self._txt_resize.text().strip()
         try:
@@ -1683,18 +1705,13 @@ class MainWindow(QMainWindow):
 
         # Show pending markers immediately.
         pending = list(self._timeline._markers)
-        for start, out in jobs:
+        for start, out, _, _ in jobs:
             pending.append((start, self._export_counter, out))
         self._timeline.set_markers(pending)
-
-        ratio_text = self._cmb_portrait.currentText()
-        portrait_ratio = None if ratio_text == "Off" else ratio_text
 
         self._export_worker = ExportWorker(
             self._file_path, jobs,
             short_side=short_side,
-            portrait_ratio=portrait_ratio,
-            crop_center=self._crop_center,
             image_sequence=image_sequence,
         )
         self._export_worker.finished.connect(self._on_clip_done)
