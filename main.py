@@ -1155,6 +1155,7 @@ class MainWindow(QMainWindow):
 
         # Services
         self._db = ProcessedDB()
+        self._settings = QSettings("8cut", "8cut")
 
         # State
         self._file_path: str = ""
@@ -1196,8 +1197,6 @@ class MainWindow(QMainWindow):
 
         self._lbl_cursor = QLabel("cursor: --")
         self._lbl_duration = QLabel("dur: --")
-
-        self._settings = QSettings("8cut", "8cut")
 
         self._txt_name = QLineEdit("clip")
         self._txt_name.setPlaceholderText("base name")
