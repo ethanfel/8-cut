@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QFileDialog, QFrame, QStatusBar,
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
-    QComboBox, QDialog, QPlainTextEdit, QCheckBox, QDoubleSpinBox,
+    QComboBox, QDialog, QPlainTextEdit, QCheckBox, QSpinBox, QDoubleSpinBox,
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
@@ -1178,7 +1178,7 @@ class MainWindow(QMainWindow):
         self._mpv.file_loaded.connect(self._after_load)
         self._timeline = TimelineWidget()
         self._timeline.setFixedHeight(160)
-        self._timeline.set_clip_span(8.0 + 2 * saved_spread)
+        self._timeline.set_clip_span(8.0 + (saved_clips - 1) * saved_spread)
         self._timeline.cursor_changed.connect(self._on_cursor_changed)
         self._timeline.marker_delete_requested.connect(self._on_delete_marker)
         self._timeline.marker_clicked.connect(self._on_marker_clicked)
@@ -1241,11 +1241,24 @@ class MainWindow(QMainWindow):
         )
         self._cmb_format.currentTextChanged.connect(self._update_next_label)
 
+        self._spn_clips = QSpinBox()
+        self._spn_clips.setRange(1, 10)
+        self._spn_clips.setToolTip("Number of overlapping 8s clips per export")
+        saved_clips = int(self._settings.value("clip_count", "3"))
+        self._spn_clips.setValue(saved_clips)
+        self._spn_clips.valueChanged.connect(
+            lambda v: self._settings.setValue("clip_count", str(v))
+        )
+        self._spn_clips.valueChanged.connect(
+            lambda: self._timeline.set_clip_span(self._clip_span)
+        )
+        self._spn_clips.valueChanged.connect(lambda: self._update_next_label())
+
         self._spn_spread = QDoubleSpinBox()
         self._spn_spread.setRange(2.0, 8.0)
         self._spn_spread.setSingleStep(0.5)
         self._spn_spread.setSuffix("s")
-        self._spn_spread.setToolTip("Offset between the 3 overlapping 8s clips")
+        self._spn_spread.setToolTip("Offset between overlapping 8s clips")
         saved_spread = float(self._settings.value("spread", "3.0"))
         self._spn_spread.setValue(saved_spread)
         self._spn_spread.valueChanged.connect(
@@ -1344,6 +1357,8 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(self._cmb_portrait)
         settings_row.addWidget(QLabel("Format:"))
         settings_row.addWidget(self._cmb_format)
+        settings_row.addWidget(QLabel("Clips:"))
+        settings_row.addWidget(self._spn_clips)
         settings_row.addWidget(QLabel("Spread:"))
         settings_row.addWidget(self._spn_spread)
 
@@ -1558,8 +1573,8 @@ class MainWindow(QMainWindow):
 
     @property
     def _clip_span(self) -> float:
-        """Total time covered by the 3 overlapping clips."""
-        return 8.0 + 2 * self._spn_spread.value()
+        """Total time covered by the overlapping clips."""
+        return 8.0 + (self._spn_clips.value() - 1) * self._spn_spread.value()
 
     def _on_play(self):
         if not self._file_path:
@@ -1618,8 +1633,12 @@ class MainWindow(QMainWindow):
             if not os.path.exists(path):
                 break
             self._export_counter += 1
+        n = self._spn_clips.value()
         base = f"{name}_{self._export_counter:03d}"
-        self._lbl_next.setText(f"→ {base}_0/1/2")
+        if n == 1:
+            self._lbl_next.setText(f"→ {base}_0")
+        else:
+            self._lbl_next.setText(f"→ {base}_0..{n - 1}")
 
     def _on_export(self):
         if not self._file_path:
@@ -1641,7 +1660,7 @@ class MainWindow(QMainWindow):
         else:
             name = self._txt_name.text() or "clip"
             jobs = []
-            for sub in range(3):
+            for sub in range(self._spn_clips.value()):
                 start = self._cursor + sub * spread
                 if image_sequence:
                     out = build_sequence_dir(folder, name, self._export_counter, sub=sub)
