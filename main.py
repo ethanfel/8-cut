@@ -1203,10 +1203,15 @@ class MainWindow(QMainWindow):
 
         self._end_preview = QLabel()
         self._end_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._end_preview.setMinimumWidth(160)
-        self._end_preview.setMaximumWidth(320)
-        self._end_preview.setStyleSheet("background: #1a1a1a; border: 1px solid #333;")
+        self._end_preview.setStyleSheet("background: #1a1a1a;")
         self._end_preview.setScaledContents(True)
+
+        self._preview_win = QWidget(None, Qt.WindowType.Tool)
+        self._preview_win.setWindowTitle("End frame")
+        self._preview_win.resize(320, 240)
+        _pw_layout = QVBoxLayout(self._preview_win)
+        _pw_layout.setContentsMargins(0, 0, 0, 0)
+        _pw_layout.addWidget(self._end_preview)
 
         self._preview_timer = QTimer()
         self._preview_timer.setSingleShot(True)
@@ -1418,10 +1423,7 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(4)
         right_layout.addLayout(top_bar)
-        video_row = QHBoxLayout()
-        video_row.addWidget(self._mpv, stretch=1)
-        video_row.addWidget(self._end_preview)
-        right_layout.addLayout(video_row, stretch=1)
+        right_layout.addWidget(self._mpv, stretch=1)
         right_layout.addWidget(self._timeline)
         right_layout.addWidget(self._crop_bar)
         right_layout.addLayout(transport_row)
@@ -1508,6 +1510,7 @@ class MainWindow(QMainWindow):
         self._btn_export.setEnabled(True)
         self._fps = self._mpv.get_fps()
         self._crop_bar.set_source_ratio(*self._mpv.get_video_size())
+        self._preview_win.show()
         self._preview_timer.start()
 
         # Run DB fuzzy match off the main thread — can be slow on large databases.
