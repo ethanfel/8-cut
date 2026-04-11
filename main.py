@@ -1684,13 +1684,15 @@ class MainWindow(QMainWindow):
                     out = build_export_path(folder, name, self._export_counter, sub=sub)
                 jobs.append((start, out, base_ratio, base_center))
 
-            # Random portrait: pick one clip, give it a random ratio + position
+            # Random portrait: ~1 per 3 clips gets a random ratio + position
             if self._chk_rand_portrait.isChecked() and n_clips > 1:
-                idx = random.randrange(n_clips)
-                rand_ratio = random.choice(list(_RATIOS.keys()))
-                rand_center = random.random()
-                s, o, _, _ = jobs[idx]
-                jobs[idx] = (s, o, rand_ratio, rand_center)
+                n_portrait = max(1, n_clips // 3)
+                indices = random.sample(range(n_clips), n_portrait)
+                for idx in indices:
+                    rand_ratio = random.choice(list(_RATIOS.keys()))
+                    rand_center = random.random()
+                    s, o, _, _ = jobs[idx]
+                    jobs[idx] = (s, o, rand_ratio, rand_center)
 
         raw = self._txt_resize.text().strip()
         try:
