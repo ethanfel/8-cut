@@ -1294,7 +1294,7 @@ class MainWindow(QMainWindow):
         self._cmb_format.currentTextChanged.connect(self._update_next_label)
 
         self._spn_clips = QSpinBox()
-        self._spn_clips.setRange(1, 10)
+        self._spn_clips.setRange(1, 99)
         self._spn_clips.setToolTip("Number of overlapping 8s clips per export")
         saved_clips = int(self._settings.value("clip_count", "3"))
         self._spn_clips.setValue(saved_clips)
