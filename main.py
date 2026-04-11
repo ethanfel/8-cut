@@ -717,6 +717,7 @@ class MpvWidget(QWidget):
         self._do_file_loaded.connect(self._on_file_loaded_qt)
         self._overlay_ratio: tuple[int, int] | None = None  # (num, den) or None
         self._overlay_crop_center: float = 0.5
+        self._overlay_lines_only: bool = False
         self._overlay_fracs: "tuple[float, float] | None" = None  # (left_frac, right_frac)
 
         @self._player.event_callback("file-loaded")
@@ -729,9 +730,11 @@ class MpvWidget(QWidget):
         self._overlay_fracs = None  # recompute with new dimensions
         self.file_loaded.emit()
 
-    def set_crop_overlay(self, ratio: "tuple[int,int] | None", crop_center: float) -> None:
+    def set_crop_overlay(self, ratio: "tuple[int,int] | None", crop_center: float,
+                         lines_only: bool = False) -> None:
         self._overlay_ratio = ratio
         self._overlay_crop_center = crop_center
+        self._overlay_lines_only = lines_only
         self._overlay_fracs: "tuple[float,float] | None" = None  # invalidate cache
         self.update()
 
@@ -789,11 +792,18 @@ class MpvWidget(QWidget):
                 ww, wh = self.width(), self.height()
                 left_px  = int(left_frac  * ww)
                 right_px = int(right_frac * ww)
-                cut_color = QColor(180, 0, 0, 140)
-                if left_px > 0:
-                    p.fillRect(0, 0, left_px, wh, cut_color)
-                if right_px < ww:
-                    p.fillRect(right_px, 0, ww - right_px, wh, cut_color)
+                if self._overlay_lines_only:
+                    line_pen = QPen(QColor(220, 60, 60, 200))
+                    line_pen.setWidth(2)
+                    p.setPen(line_pen)
+                    p.drawLine(left_px, 0, left_px, wh)
+                    p.drawLine(right_px, 0, right_px, wh)
+                else:
+                    cut_color = QColor(180, 0, 0, 140)
+                    if left_px > 0:
+                        p.fillRect(0, 0, left_px, wh, cut_color)
+                    if right_px < ww:
+                        p.fillRect(right_px, 0, ww - right_px, wh, cut_color)
 
         p.end()
 
@@ -1322,6 +1332,7 @@ class MainWindow(QMainWindow):
         self._chk_rand_portrait.toggled.connect(
             lambda v: self._settings.setValue("rand_portrait", "true" if v else "false")
         )
+        self._chk_rand_portrait.toggled.connect(self._on_rand_portrait_toggled)
 
         self._txt_label = QComboBox()
         self._txt_label.setEditable(True)
@@ -1463,9 +1474,16 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(splitter)
         self.setStatusBar(QStatusBar())
-        self._crop_bar.setVisible(saved_ratio != "Off")
+        _rand_portrait_on = self._settings.value("rand_portrait", "false") == "true"
         if saved_ratio != "Off":
+            self._crop_bar.setVisible(True)
             self._mpv.set_crop_overlay(_RATIOS[saved_ratio], self._crop_center)
+        elif _rand_portrait_on:
+            self._crop_bar.set_portrait_ratio("9:16")
+            self._crop_bar.setVisible(True)
+            self._mpv.set_crop_overlay(_RATIOS["9:16"], self._crop_center, lines_only=True)
+        else:
+            self._crop_bar.setVisible(False)
 
         # Application-wide shortcuts — fire regardless of which widget has focus.
         ctx = Qt.ShortcutContext.ApplicationShortcut
@@ -1590,20 +1608,44 @@ class MainWindow(QMainWindow):
     def _on_portrait_ratio_changed(self, text: str) -> None:
         ratio = None if text == "Off" else text
         self._crop_bar.set_portrait_ratio(ratio)
-        self._crop_bar.setVisible(ratio is not None)
+        rand_on = self._chk_rand_portrait.isChecked()
+        # Show crop bar if portrait is set OR random portrait is on
+        if ratio is not None:
+            self._crop_bar.setVisible(True)
+            self._mpv.set_crop_overlay(_RATIOS[ratio], self._crop_center)
+        elif rand_on:
+            self._crop_bar.set_portrait_ratio("9:16")
+            self._crop_bar.setVisible(True)
+            self._mpv.set_crop_overlay(_RATIOS["9:16"], self._crop_center, lines_only=True)
+        else:
+            self._crop_bar.setVisible(False)
+            self._mpv.set_crop_overlay(None, self._crop_center)
         self._settings.setValue("portrait_ratio", text)
-        self._mpv.set_crop_overlay(
-            _RATIOS[ratio] if ratio else None, self._crop_center
-        )
+
+    def _on_rand_portrait_toggled(self, checked: bool) -> None:
+        ratio_text = self._cmb_portrait.currentText()
+        if ratio_text != "Off":
+            return  # manual portrait already controls the overlay
+        if checked:
+            self._crop_bar.set_portrait_ratio("9:16")
+            self._crop_bar.setVisible(True)
+            self._mpv.set_crop_overlay(_RATIOS["9:16"], self._crop_center, lines_only=True)
+        else:
+            self._crop_bar.setVisible(False)
+            self._mpv.set_crop_overlay(None, self._crop_center)
 
     def _on_crop_click(self, frac: float) -> None:
         ratio = self._cmb_portrait.currentText()
-        if ratio == "Off":
+        rand_on = self._chk_rand_portrait.isChecked()
+        if ratio == "Off" and not rand_on:
             return
         self._crop_center = max(0.0, min(1.0, frac))
         self._settings.setValue("crop_center", str(self._crop_center))
         self._crop_bar.set_crop_center(self._crop_center)
-        self._mpv.set_crop_overlay(_RATIOS[ratio], self._crop_center)
+        if ratio != "Off":
+            self._mpv.set_crop_overlay(_RATIOS[ratio], self._crop_center)
+        else:
+            self._mpv.set_crop_overlay(_RATIOS["9:16"], self._crop_center, lines_only=True)
 
     # --- End-frame preview ---
 
