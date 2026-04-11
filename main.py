@@ -309,7 +309,14 @@ class ProcessedDB:
             " WHERE filename = ? ORDER BY start_time",
             (match,),
         ).fetchall()
-        return [(t, i + 1, p) for i, (t, p) in enumerate(rows)]
+        # Deduplicate by start_time — batch exports share the same cursor.
+        seen_times: dict[float, tuple[float, int, str]] = {}
+        n = 0
+        for t, p in rows:
+            if t not in seen_times:
+                n += 1
+                seen_times[t] = (t, n, p)
+        return list(seen_times.values())
 
     def get_markers(self, filename: str) -> list[tuple[float, int, str]]:
         """Return [(start_time, marker_number, output_path), ...] for the best
@@ -1820,10 +1827,10 @@ class MainWindow(QMainWindow):
         self._btn_export.setEnabled(False)
         self.statusBar().showMessage(f"Exporting {len(jobs)} clip(s)…")
 
-        # Show pending markers immediately.
+        # Show one pending marker at the cursor position for the whole batch.
+        first_out = jobs[0][1]
         pending = list(self._timeline._markers)
-        for start, out, _, _ in jobs:
-            pending.append((start, self._export_counter, out))
+        pending.append((self._cursor, self._export_counter, first_out))
         self._timeline.set_markers(pending)
 
         self._export_worker = ExportWorker(
