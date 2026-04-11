@@ -1204,7 +1204,7 @@ class MainWindow(QMainWindow):
         self._end_preview = QLabel()
         self._end_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._end_preview.setStyleSheet("background: #1a1a1a;")
-        self._end_preview.setScaledContents(True)
+        self._end_preview.setScaledContents(False)
 
         self._preview_win = QWidget(None, Qt.WindowType.Tool)
         self._preview_win.setWindowTitle("End frame")
@@ -1624,7 +1624,13 @@ class MainWindow(QMainWindow):
         px = QPixmap()
         px.loadFromData(png_data)
         if not px.isNull():
-            self._end_preview.setPixmap(px)
+            scaled = px.scaled(
+                320, 240,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._end_preview.setPixmap(scaled)
+            self._preview_win.adjustSize()
 
     # --- Playback ---
 
