@@ -17,20 +17,25 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QFileDialog, QFrame, QStatusBar,
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
-    QComboBox, QDialog, QPlainTextEdit, QCheckBox,
+    QComboBox, QDialog, QPlainTextEdit, QCheckBox, QDoubleSpinBox,
 )
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
 import mpv
 
 
-def build_export_path(folder: str, basename: str, counter: int) -> str:
-    filename = f"{basename}_{counter:03d}.mp4"
-    return os.path.join(folder, filename)
+def build_export_path(folder: str, basename: str, counter: int, sub: int | None = None) -> str:
+    name = f"{basename}_{counter:03d}"
+    if sub is not None:
+        name += f"_{sub}"
+    return os.path.join(folder, name + ".mp4")
 
 
-def build_sequence_dir(folder: str, basename: str, counter: int) -> str:
-    return os.path.join(folder, f"{basename}_{counter:03d}")
+def build_sequence_dir(folder: str, basename: str, counter: int, sub: int | None = None) -> str:
+    name = f"{basename}_{counter:03d}"
+    if sub is not None:
+        name += f"_{sub}"
+    return os.path.join(folder, name)
 
 
 def format_time(seconds: float) -> str:
@@ -335,50 +340,54 @@ class _DBWorker(QThread):
 
 
 class ExportWorker(QThread):
-    finished = pyqtSignal(str)   # output path
+    finished = pyqtSignal(str)   # emitted per completed clip
     error = pyqtSignal(str)      # error message
+    all_done = pyqtSignal()      # emitted after all jobs complete
 
-    def __init__(self, input_path: str, start: float, output_path: str,
+    def __init__(self, input_path: str,
+                 jobs: list[tuple[float, str]],
                  short_side: int | None = None,
                  portrait_ratio: str | None = None,
                  crop_center: float = 0.5,
                  image_sequence: bool = False):
         super().__init__()
         self._input = input_path
-        self._start = start
-        self._output = output_path
+        self._jobs = jobs  # [(start_time, output_path), ...]
         self._short_side = short_side
         self._portrait_ratio = portrait_ratio
         self._crop_center = crop_center
         self._image_sequence = image_sequence
 
     def run(self):
-        try:
-            if self._image_sequence:
-                os.makedirs(self._output, exist_ok=True)
-            cmd = build_ffmpeg_command(
-                self._input, self._start, self._output,
-                short_side=self._short_side,
-                portrait_ratio=self._portrait_ratio,
-                crop_center=self._crop_center,
-                image_sequence=self._image_sequence,
-            )
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            if result.returncode == 0:
+        for start, output in self._jobs:
+            try:
                 if self._image_sequence:
-                    audio_cmd = build_audio_extract_command(
-                        self._input, self._start, self._output
-                    )
-                    subprocess.run(audio_cmd, capture_output=True, text=True, timeout=60)
-                    # Audio extraction failure (e.g. no audio stream) is ignored —
-                    # the frame sequence is the primary output.
-                self.finished.emit(self._output)
-            else:
-                self.error.emit(result.stderr[-500:])
-        except FileNotFoundError:
-            self.error.emit("ffmpeg not found — is it installed and on PATH?")
-        except Exception as e:
-            self.error.emit(str(e))
+                    os.makedirs(output, exist_ok=True)
+                cmd = build_ffmpeg_command(
+                    self._input, start, output,
+                    short_side=self._short_side,
+                    portrait_ratio=self._portrait_ratio,
+                    crop_center=self._crop_center,
+                    image_sequence=self._image_sequence,
+                )
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if result.returncode == 0:
+                    if self._image_sequence:
+                        audio_cmd = build_audio_extract_command(
+                            self._input, start, output
+                        )
+                        subprocess.run(audio_cmd, capture_output=True, text=True, timeout=60)
+                    self.finished.emit(output)
+                else:
+                    self.error.emit(result.stderr[-500:])
+                    return
+            except FileNotFoundError:
+                self.error.emit("ffmpeg not found — is it installed and on PATH?")
+                return
+            except Exception as e:
+                self.error.emit(str(e))
+                return
+        self.all_done.emit()
 
 
 class TimelineWidget(QWidget):
@@ -395,6 +404,7 @@ class TimelineWidget(QWidget):
         self.setMouseTracking(True)
         self._duration = 0.0
         self._cursor = 0.0
+        self._clip_span = 14.0  # 8 + 2*spread, updated from MainWindow
         self._markers: list[tuple[float, int, str]] = []
         self._hover_cache: list[tuple[float, str]] = []  # (t/duration, path)
 
@@ -423,8 +433,12 @@ class TimelineWidget(QWidget):
         self._rebuild_hover_cache()
         self.update()
 
+    def set_clip_span(self, span: float):
+        self._clip_span = span
+        self.update()
+
     def set_cursor(self, seconds: float):
-        clamped = max(0.0, min(seconds, max(0.0, self._duration - 8.0)))
+        clamped = max(0.0, min(seconds, max(0.0, self._duration - self._clip_span)))
         if clamped == self._cursor:
             return
         self._cursor = clamped
@@ -513,9 +527,9 @@ class TimelineWidget(QWidget):
             p.setPen(QPen(QColor(55, 55, 55)))
             p.drawLine(0, rh, w, rh)
 
-            # ── 8-second selection region ─────────────────────────────────
+            # ── selection region (full clip span) ─────────────────────────
             x_start = int(self._cursor / self._duration * w)
-            x_end   = int(min(self._cursor + 8.0, self._duration) / self._duration * w)
+            x_end   = int(min(self._cursor + self._clip_span, self._duration) / self._duration * w)
             sel_w   = max(x_end - x_start, 1)
             p.fillRect(x_start, rh, sel_w, th, QColor(60, 130, 220, 90))
             # left/right edges of selection
@@ -1164,6 +1178,7 @@ class MainWindow(QMainWindow):
         self._mpv.file_loaded.connect(self._after_load)
         self._timeline = TimelineWidget()
         self._timeline.setFixedHeight(160)
+        self._timeline.set_clip_span(8.0 + 2 * saved_spread)
         self._timeline.cursor_changed.connect(self._on_cursor_changed)
         self._timeline.marker_delete_requested.connect(self._on_delete_marker)
         self._timeline.marker_clicked.connect(self._on_marker_clicked)
@@ -1172,7 +1187,7 @@ class MainWindow(QMainWindow):
         self._lbl_file.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_file.setStyleSheet("color: #aaa; padding: 6px;")
 
-        self._btn_play = QPushButton("▶ Play 8s")
+        self._btn_play = QPushButton("▶ Play")
         self._btn_play.setEnabled(False)
         self._btn_play.clicked.connect(self._on_play)
 
@@ -1225,6 +1240,20 @@ class MainWindow(QMainWindow):
             lambda v: self._settings.setValue("export_format", v)
         )
         self._cmb_format.currentTextChanged.connect(self._update_next_label)
+
+        self._spn_spread = QDoubleSpinBox()
+        self._spn_spread.setRange(2.0, 8.0)
+        self._spn_spread.setSingleStep(0.5)
+        self._spn_spread.setSuffix("s")
+        self._spn_spread.setToolTip("Offset between the 3 overlapping 8s clips")
+        saved_spread = float(self._settings.value("spread", "3.0"))
+        self._spn_spread.setValue(saved_spread)
+        self._spn_spread.valueChanged.connect(
+            lambda v: self._settings.setValue("spread", str(v))
+        )
+        self._spn_spread.valueChanged.connect(
+            lambda: self._timeline.set_clip_span(self._clip_span)
+        )
 
         self._txt_label = QComboBox()
         self._txt_label.setEditable(True)
@@ -1315,6 +1344,8 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(self._cmb_portrait)
         settings_row.addWidget(QLabel("Format:"))
         settings_row.addWidget(self._cmb_format)
+        settings_row.addWidget(QLabel("Spread:"))
+        settings_row.addWidget(self._spn_spread)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -1513,7 +1544,7 @@ class MainWindow(QMainWindow):
                 self._btn_delete.setEnabled(False)
             self._btn_delete.setText("Delete")
         if self._mpv.is_playing():
-            self._mpv.play_loop(t, t + 8.0)
+            self._mpv.play_loop(t, t + self._clip_span)
         else:
             self._mpv.seek(t)
 
@@ -1525,10 +1556,15 @@ class MainWindow(QMainWindow):
         else:
             self._on_play()
 
+    @property
+    def _clip_span(self) -> float:
+        """Total time covered by the 3 overlapping clips."""
+        return 8.0 + 2 * self._spn_spread.value()
+
     def _on_play(self):
         if not self._file_path:
             return
-        self._mpv.play_loop(self._cursor, self._cursor + 8.0)
+        self._mpv.play_loop(self._cursor, self._cursor + self._clip_span)
 
     def _on_pause(self):
         self._mpv.stop_loop()
@@ -1538,7 +1574,7 @@ class MainWindow(QMainWindow):
         if not self._file_path:
             return
         dur = self._mpv.get_duration()
-        new_t = max(0.0, min(self._cursor + delta, max(0.0, dur - 8.0)))
+        new_t = max(0.0, min(self._cursor + delta, max(0.0, dur - self._clip_span)))
         # Update label and internal state immediately; route the seek through
         # the timeline's debounce timer so rapid key repeats don't hammer mpv.
         self._cursor = new_t
@@ -1573,16 +1609,17 @@ class MainWindow(QMainWindow):
         folder = self._txt_folder.text()
         name = self._txt_name.text() or "clip"
         is_seq = self._cmb_format.currentText() == "WebP sequence"
-        # Advance past any files/dirs that already exist on disk.
+        # Advance past any counter whose sub-clip _0 already exists on disk.
         while True:
             if is_seq:
-                path = build_sequence_dir(folder, name, self._export_counter)
+                path = build_sequence_dir(folder, name, self._export_counter, sub=0)
             else:
-                path = build_export_path(folder, name, self._export_counter)
+                path = build_export_path(folder, name, self._export_counter, sub=0)
             if not os.path.exists(path):
                 break
             self._export_counter += 1
-        self._lbl_next.setText(f"→ {os.path.basename(path)}")
+        base = f"{name}_{self._export_counter:03d}"
+        self._lbl_next.setText(f"→ {base}_0/1/2")
 
     def _on_export(self):
         if not self._file_path:
@@ -1595,15 +1632,22 @@ class MainWindow(QMainWindow):
         image_sequence = fmt == "WebP sequence"
         folder = self._txt_folder.text()
         os.makedirs(folder, exist_ok=True)
+        spread = self._spn_spread.value()
+
         if self._overwrite_path:
-            output = self._overwrite_path
+            # Single-clip overwrite mode
+            jobs = [(self._cursor, self._overwrite_path)]
             self._overwrite_path = ""
         else:
             name = self._txt_name.text() or "clip"
-            if image_sequence:
-                output = build_sequence_dir(folder, name, self._export_counter)
-            else:
-                output = build_export_path(folder, name, self._export_counter)
+            jobs = []
+            for sub in range(3):
+                start = self._cursor + sub * spread
+                if image_sequence:
+                    out = build_sequence_dir(folder, name, self._export_counter, sub=sub)
+                else:
+                    out = build_export_path(folder, name, self._export_counter, sub=sub)
+                jobs.append((start, out))
 
         raw = self._txt_resize.text().strip()
         try:
@@ -1614,27 +1658,31 @@ class MainWindow(QMainWindow):
             short_side = None
 
         self._btn_export.setEnabled(False)
-        self.statusBar().showMessage(f"Exporting {os.path.basename(output)}…")
+        self.statusBar().showMessage(f"Exporting {len(jobs)} clip(s)…")
 
-        # Show marker immediately — don't wait for ffmpeg to finish.
-        pending = self._timeline._markers + [(self._cursor, self._export_counter, output)]
+        # Show pending markers immediately.
+        pending = list(self._timeline._markers)
+        for start, out in jobs:
+            pending.append((start, self._export_counter, out))
         self._timeline.set_markers(pending)
 
         ratio_text = self._cmb_portrait.currentText()
         portrait_ratio = None if ratio_text == "Off" else ratio_text
 
         self._export_worker = ExportWorker(
-            self._file_path, self._cursor, output,
+            self._file_path, jobs,
             short_side=short_side,
             portrait_ratio=portrait_ratio,
             crop_center=self._crop_center,
             image_sequence=image_sequence,
         )
-        self._export_worker.finished.connect(self._on_export_done)
+        self._export_worker.finished.connect(self._on_clip_done)
+        self._export_worker.all_done.connect(self._on_batch_done)
         self._export_worker.error.connect(self._on_export_error)
         self._export_worker.start()
 
-    def _on_export_done(self, path: str):
+    def _on_clip_done(self, path: str):
+        """Called per clip as each finishes."""
         label = self._txt_label.currentText().strip()
         category = self._cmb_category.currentText()
         self._db.add(
@@ -1646,15 +1694,16 @@ class MainWindow(QMainWindow):
         )
         folder = self._txt_folder.text()
         upsert_clip_annotation(folder, path, label)
-        # For MP4 exports path is a file; for WebP sequence it is a directory.
-        # build_mask_output_dir handles both correctly via Path.stem.
         self._last_export_path = path
+        self.statusBar().showMessage(f"Exported: {os.path.basename(path)}")
+
+    def _on_batch_done(self):
+        """Called once after all clips in the batch are done."""
         self._export_counter += 1
         self._update_next_label()
         self._btn_export.setEnabled(True)
         self._btn_delete.setEnabled(True)
         self._btn_delete.setText("Delete")
-        self.statusBar().showMessage(f"Exported: {os.path.basename(path)}")
         self._refresh_markers()
         self._playlist.mark_done(self._file_path)
         # Refresh label history so the new label is immediately selectable.

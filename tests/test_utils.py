@@ -12,6 +12,14 @@ def test_build_export_path_counter():
 def test_build_export_path_deep_counter():
     assert build_export_path("/out", "shot", 999) == "/out/shot_999.mp4"
 
+def test_build_export_path_sub():
+    assert build_export_path("/out", "clip", 1, sub=0) == "/out/clip_001_0.mp4"
+    assert build_export_path("/out", "clip", 1, sub=2) == "/out/clip_001_2.mp4"
+
+def test_build_sequence_dir_sub():
+    assert build_sequence_dir("/out", "clip", 1, sub=0) == "/out/clip_001_0"
+    assert build_sequence_dir("/out", "clip", 1, sub=1) == "/out/clip_001_1"
+
 def test_format_time_seconds():
     assert format_time(0.0) == "0:00.0"
 
