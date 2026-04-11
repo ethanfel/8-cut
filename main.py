@@ -85,7 +85,7 @@ def build_ffmpeg_command(
             os.path.join(output_path, "frame_%04d.webp"),
         ]
     else:
-        cmd += ["-c:v", "libx264", "-c:a", "aac", output_path]
+        cmd += ["-c:v", "libx264", "-c:a", "pcm_s16le", output_path]
     return cmd
 
 
