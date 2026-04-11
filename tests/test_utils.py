@@ -4,21 +4,21 @@ from main import _normalize_filename, ProcessedDB
 
 
 def test_build_export_path_first():
-    assert build_export_path("/out", "clip", 1) == "/out/clip_001.mp4"
+    assert build_export_path("/out", "clip", 1) == "/out/clip_001/clip_001.mp4"
 
 def test_build_export_path_counter():
-    assert build_export_path("/out", "clip", 42) == "/out/clip_042.mp4"
+    assert build_export_path("/out", "clip", 42) == "/out/clip_042/clip_042.mp4"
 
 def test_build_export_path_deep_counter():
-    assert build_export_path("/out", "shot", 999) == "/out/shot_999.mp4"
+    assert build_export_path("/out", "shot", 999) == "/out/shot_999/shot_999.mp4"
 
 def test_build_export_path_sub():
-    assert build_export_path("/out", "clip", 1, sub=0) == "/out/clip_001_0.mp4"
-    assert build_export_path("/out", "clip", 1, sub=2) == "/out/clip_001_2.mp4"
+    assert build_export_path("/out", "clip", 1, sub=0) == "/out/clip_001/clip_001_0.mp4"
+    assert build_export_path("/out", "clip", 1, sub=2) == "/out/clip_001/clip_001_2.mp4"
 
 def test_build_sequence_dir_sub():
-    assert build_sequence_dir("/out", "clip", 1, sub=0) == "/out/clip_001_0"
-    assert build_sequence_dir("/out", "clip", 1, sub=1) == "/out/clip_001_1"
+    assert build_sequence_dir("/out", "clip", 1, sub=0) == "/out/clip_001/clip_001_0"
+    assert build_sequence_dir("/out", "clip", 1, sub=1) == "/out/clip_001/clip_001_1"
 
 def test_format_time_seconds():
     assert format_time(0.0) == "0:00.0"
@@ -216,10 +216,10 @@ def test_audio_extract_timing():
 
 
 def test_build_sequence_dir_basic():
-    assert build_sequence_dir("/out", "clip", 1) == "/out/clip_001"
+    assert build_sequence_dir("/out", "clip", 1) == "/out/clip_001/clip_001"
 
 def test_build_sequence_dir_counter():
-    assert build_sequence_dir("/out", "clip", 42) == "/out/clip_042"
+    assert build_sequence_dir("/out", "clip", 42) == "/out/clip_042/clip_042"
 
 def test_ffmpeg_command_image_sequence():
     cmd = build_ffmpeg_command("/in/v.mp4", 0.0, "/out/seq_001", image_sequence=True)

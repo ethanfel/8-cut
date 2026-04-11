@@ -26,17 +26,15 @@ import mpv
 
 
 def build_export_path(folder: str, basename: str, counter: int, sub: int | None = None) -> str:
-    name = f"{basename}_{counter:03d}"
-    if sub is not None:
-        name += f"_{sub}"
-    return os.path.join(folder, name + ".mp4")
+    group = f"{basename}_{counter:03d}"
+    name = f"{group}_{sub}" if sub is not None else group
+    return os.path.join(folder, group, name + ".mp4")
 
 
 def build_sequence_dir(folder: str, basename: str, counter: int, sub: int | None = None) -> str:
-    name = f"{basename}_{counter:03d}"
-    if sub is not None:
-        name += f"_{sub}"
-    return os.path.join(folder, name)
+    group = f"{basename}_{counter:03d}"
+    name = f"{group}_{sub}" if sub is not None else group
+    return os.path.join(folder, group, name)
 
 
 def format_time(seconds: float) -> str:
@@ -1799,6 +1797,9 @@ class MainWindow(QMainWindow):
         else:
             name = self._txt_name.text() or "clip"
             n_clips = self._spn_clips.value()
+            # Create the group subfolder
+            group_dir = os.path.join(folder, f"{name}_{self._export_counter:03d}")
+            os.makedirs(group_dir, exist_ok=True)
             jobs = []
             for sub in range(n_clips):
                 start = self._cursor + sub * spread
