@@ -20,8 +20,9 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QFileDialog, QFrame, QStatusBar,
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
     QComboBox, QDialog, QPlainTextEdit, QCheckBox, QSpinBox, QDoubleSpinBox,
+    QMessageBox,
 )
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSettings
+from PyQt6.QtCore import Qt, QObject, QThread, QTimer, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
 import mpv
 
@@ -676,7 +677,7 @@ class TimelineWidget(QWidget):
             if self._hover_cache:
                 w = self.width()
                 for (frac, output_path) in self._hover_cache:
-                    if abs(x - frac * w) <= 6:
+                    if abs(x - frac * w) <= 10:
                         t = frac * self._duration
                         self.marker_clicked.emit(t, output_path)
                         self._seek(x)
@@ -686,12 +687,12 @@ class TimelineWidget(QWidget):
 
     def mouseMoveEvent(self, event):
         x = event.position().x()
-        # Check marker hover (±4px) using pre-computed fractions.
+        # Check marker hover using pre-computed fractions.
         if self._hover_cache:
             w = self.width()
             for (frac, output_path) in self._hover_cache:
-                if abs(x - frac * w) <= 4:
-                    QToolTip.showText(QCursor.pos(), output_path, self)
+                if abs(x - frac * w) <= 8:
+                    QToolTip.showText(QCursor.pos(), os.path.basename(output_path), self)
                     if event.buttons():
                         self._seek(x)
                     return
@@ -711,7 +712,7 @@ class TimelineWidget(QWidget):
         w = self.width()
         hit_path = None
         for (frac, output_path) in self._hover_cache:
-            if abs(x - frac * w) <= 6:
+            if abs(x - frac * w) <= 10:
                 hit_path = output_path
                 break
         if hit_path is None:
@@ -1240,6 +1241,16 @@ class SettingsDialog(QDialog):
         self._log.appendPlainText(f"ERROR: {msg}")
 
 
+class _KeyFilter(QObject):
+    """Suppress global keyboard shortcuts when a text input widget has focus."""
+    def eventFilter(self, obj, event):
+        from PyQt6.QtCore import QEvent
+        if event.type() == QEvent.Type.ShortcutOverride and isinstance(obj, QLineEdit):
+            event.accept()
+            return True
+        return super().eventFilter(obj, event)
+
+
 def main():
     # Force desktop OpenGL (not GLES) so mpv's render context produces non-black output.
     # Must be set before QApplication.
@@ -1252,6 +1263,8 @@ def main():
 
     app = QApplication(sys.argv)
     locale.setlocale(locale.LC_NUMERIC, "C")  # QApplication resets locale; re-apply for libmpv
+    _kf = _KeyFilter(app)
+    app.installEventFilter(_kf)
     app.setStyle("Fusion")
     app.setStyleSheet("""
         QWidget { background: #1e1e1e; color: #ddd; }
@@ -1600,6 +1613,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("K"), self, context=ctx).activated.connect(self._on_pause)
         QShortcut(QKeySequence("E"), self, context=ctx).activated.connect(self._on_export)
         QShortcut(QKeySequence("M"), self, context=ctx).activated.connect(self._jump_to_next_marker)
+        QShortcut(QKeySequence("N"), self, context=ctx).activated.connect(self._playlist.advance)
 
     def _load_file(self, path: str):
         self._file_path = path
@@ -1616,6 +1630,13 @@ class MainWindow(QMainWindow):
         self._btn_play.setEnabled(True)
         self._btn_pause.setEnabled(True)
         self._btn_export.setEnabled(True)
+        # Reset stale state from previous file
+        self._overwrite_path = ""
+        self._last_export_path = ""
+        self._btn_export.setText("Export")
+        self._btn_export.setStyleSheet("")
+        self._btn_delete.setEnabled(False)
+        self._btn_delete.setText("Delete")
         self._fps = self._mpv.get_fps()
         self._crop_bar.set_source_ratio(*self._mpv.get_video_size())
         # Reset export settings to defaults for the new video
@@ -1663,6 +1684,8 @@ class MainWindow(QMainWindow):
     def _on_marker_clicked(self, start_time: float, output_path: str) -> None:
         self._overwrite_path = output_path
         self._lbl_next.setText(f"↺ {os.path.basename(output_path)}")
+        self._btn_export.setText("Overwrite")
+        self._btn_export.setStyleSheet("QPushButton { background: #6a3030; border-color: #a04040; }")
         self._btn_delete.setEnabled(True)
         self._btn_delete.setText(f"Delete {os.path.basename(output_path)}")
         # Restore config from the original export
@@ -1695,6 +1718,8 @@ class MainWindow(QMainWindow):
     def _on_marker_deselected(self) -> None:
         if self._overwrite_path:
             self._overwrite_path = ""
+            self._btn_export.setText("Export")
+            self._btn_export.setStyleSheet("")
             self._update_next_label()
             if not self._last_export_path:
                 self._btn_delete.setEnabled(False)
@@ -1705,6 +1730,13 @@ class MainWindow(QMainWindow):
         if not target:
             return
         name = os.path.basename(target)
+        reply = QMessageBox.question(
+            self, "Delete clip",
+            f"Delete {name} from disk and database?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
         # Delete from disk
         if os.path.isdir(target):
             shutil.rmtree(target, ignore_errors=True)
@@ -1993,6 +2025,8 @@ class MainWindow(QMainWindow):
         self._export_counter += 1
         self._update_next_label()
         self._btn_export.setEnabled(True)
+        self._btn_export.setText("Export")
+        self._btn_export.setStyleSheet("")
         self._btn_delete.setEnabled(True)
         self._btn_delete.setText("Delete")
         self._refresh_markers()
@@ -2004,10 +2038,11 @@ class MainWindow(QMainWindow):
         self._txt_label.addItems(self._db.get_labels())
         self._txt_label.setCurrentText(current)
         self._txt_label.blockSignals(False)
-        self._playlist.advance()
 
     def _on_export_error(self, msg: str):
         self._btn_export.setEnabled(True)
+        self._btn_export.setText("Export")
+        self._btn_export.setStyleSheet("")
         self.statusBar().showMessage(f"Export error: {msg}")
 
     # --- Mask generation ---
