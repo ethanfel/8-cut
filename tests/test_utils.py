@@ -1,5 +1,5 @@
 import tempfile, os, json
-from main import build_export_path, format_time, build_ffmpeg_command, build_mask_output_dir, build_sequence_dir, build_audio_extract_command, build_annotation_json_path, upsert_clip_annotation
+from main import build_export_path, format_time, build_ffmpeg_command, build_sequence_dir, build_audio_extract_command, build_annotation_json_path, upsert_clip_annotation
 from main import _normalize_filename, ProcessedDB
 
 
@@ -181,16 +181,6 @@ def test_ffmpeg_command_portrait_and_resize():
 def test_ffmpeg_command_portrait_off():
     cmd = build_ffmpeg_command("/in/video.mp4", 0.0, "/out/clip.mp4")
     assert "-vf" not in cmd
-
-def test_mask_output_dir_basic():
-    assert build_mask_output_dir("/out/clip_001.mp4") == "/out/clip_001_masks"
-
-def test_mask_output_dir_mkv():
-    assert build_mask_output_dir("/out/my_clip.mkv") == "/out/my_clip_masks"
-
-def test_mask_output_dir_nested():
-    assert build_mask_output_dir("/a/b/c/shot_042.mp4") == "/a/b/c/shot_042_masks"
-
 
 # --- build_audio_extract_command ---
 
