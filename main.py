@@ -645,8 +645,10 @@ class TimelineWidget(QWidget):
             for (frac, output_path) in self._hover_cache:
                 if abs(x - frac * w) <= 6:
                     t = frac * self._duration
-                    self._seek(x)
+                    # Emit marker_clicked BEFORE seek so the handler can set
+                    # _overwrite_path before _on_cursor_changed clears it.
                     self.marker_clicked.emit(t, output_path)
+                    self._seek(x)
                     return
         self._seek(event.position().x())
 
@@ -1248,6 +1250,7 @@ class MainWindow(QMainWindow):
         self._export_worker: ExportWorker | None = None
         self._last_export_path: str = ""
         self._overwrite_path: str = ""   # set when a marker is selected for re-export
+        self._marker_just_clicked: bool = False
         self._mask_worker: MaskWorker | None = None
         self._db_worker: _DBWorker | None = None
         self._frame_grabber: FrameGrabber | None = None
@@ -1617,6 +1620,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_marker_clicked(self, start_time: float, output_path: str) -> None:
+        self._marker_just_clicked = True
         self._overwrite_path = output_path
         self._lbl_next.setText(f"↺ {os.path.basename(output_path)}")
         self._btn_delete.setEnabled(True)
@@ -1752,12 +1756,13 @@ class MainWindow(QMainWindow):
         self._cursor = t
         self._lbl_cursor.setText(f"cursor: {format_time(t)}")
         self._preview_timer.start()
-        if self._overwrite_path:
+        if self._overwrite_path and not self._marker_just_clicked:
             self._overwrite_path = ""
             self._update_next_label()
             if not self._last_export_path:
                 self._btn_delete.setEnabled(False)
             self._btn_delete.setText("Delete")
+        self._marker_just_clicked = False
         if self._mpv.is_playing():
             self._mpv.play_loop(t, t + self._clip_span)
         else:
