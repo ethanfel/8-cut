@@ -240,7 +240,7 @@ class ProcessedDB:
                 "  output_path     TEXT    NOT NULL,"
                 "  label           TEXT    NOT NULL DEFAULT '',"
                 "  category        TEXT    NOT NULL DEFAULT '',"
-                "  short_side      INTEGER,"
+                "  short_side      INTEGER DEFAULT 512,"
                 "  portrait_ratio  TEXT    NOT NULL DEFAULT '',"
                 "  crop_center     REAL    NOT NULL DEFAULT 0.5,"
                 "  format          TEXT    NOT NULL DEFAULT 'MP4',"
@@ -254,7 +254,7 @@ class ProcessedDB:
             new_cols = {
                 "label":          "TEXT NOT NULL DEFAULT ''",
                 "category":       "TEXT NOT NULL DEFAULT ''",
-                "short_side":     "INTEGER",
+                "short_side":     "INTEGER DEFAULT 512",
                 "portrait_ratio": "TEXT NOT NULL DEFAULT ''",
                 "crop_center":    "REAL NOT NULL DEFAULT 0.5",
                 "format":         "TEXT NOT NULL DEFAULT 'MP4'",
