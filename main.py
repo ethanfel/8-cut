@@ -230,18 +230,27 @@ class ProcessedDB:
             row[1]
             for row in self._con.execute("PRAGMA table_info(processed)").fetchall()
         }
-        needs_recreate = not {"start_time", "output_path", "label", "category"}.issubset(cols)
+        required = {"start_time", "output_path", "label", "category",
+                    "short_side", "portrait_ratio", "crop_center", "format",
+                    "clip_count", "spread"}
+        needs_recreate = not required.issubset(cols)
         if needs_recreate:
             self._con.execute("DROP TABLE IF EXISTS processed")
         self._con.execute(
             "CREATE TABLE IF NOT EXISTS processed ("
-            "  id           INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "  filename     TEXT    NOT NULL,"
-            "  start_time   REAL    NOT NULL,"
-            "  output_path  TEXT    NOT NULL,"
-            "  label        TEXT    NOT NULL DEFAULT '',"
-            "  category     TEXT    NOT NULL DEFAULT '',"
-            "  processed_at TEXT    NOT NULL"
+            "  id              INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  filename        TEXT    NOT NULL,"
+            "  start_time      REAL    NOT NULL,"
+            "  output_path     TEXT    NOT NULL,"
+            "  label           TEXT    NOT NULL DEFAULT '',"
+            "  category        TEXT    NOT NULL DEFAULT '',"
+            "  short_side      INTEGER,"
+            "  portrait_ratio  TEXT    NOT NULL DEFAULT '',"
+            "  crop_center     REAL    NOT NULL DEFAULT 0.5,"
+            "  format          TEXT    NOT NULL DEFAULT 'MP4',"
+            "  clip_count      INTEGER NOT NULL DEFAULT 3,"
+            "  spread          REAL    NOT NULL DEFAULT 3.0,"
+            "  processed_at    TEXT    NOT NULL"
             ")"
         )
         self._con.execute(
@@ -250,13 +259,21 @@ class ProcessedDB:
         self._con.commit()
 
     def add(self, filename: str, start_time: float, output_path: str,
-            label: str = "", category: str = "") -> None:
+            label: str = "", category: str = "",
+            short_side: int | None = None, portrait_ratio: str = "",
+            crop_center: float = 0.5, fmt: str = "MP4",
+            clip_count: int = 3, spread: float = 3.0) -> None:
         if not self._enabled:
             return
         self._con.execute(
-            "INSERT INTO processed (filename, start_time, output_path, label, category, processed_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO processed"
+            " (filename, start_time, output_path, label, category,"
+            "  short_side, portrait_ratio, crop_center, format,"
+            "  clip_count, spread, processed_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (filename, start_time, output_path, label, category,
+             short_side, portrait_ratio, crop_center, fmt,
+             clip_count, spread,
              datetime.now(timezone.utc).isoformat()),
         )
         self._con.commit()
@@ -279,15 +296,19 @@ class ProcessedDB:
                 result.append(lbl)
         return result
 
-    def get_by_output_path(self, output_path: str) -> tuple[str, str] | None:
-        """Return (label, category) for an output_path, or None."""
+    def get_by_output_path(self, output_path: str) -> dict | None:
+        """Return config dict for an output_path, or None."""
         if not self._enabled:
             return None
+        self._con.row_factory = sqlite3.Row
         row = self._con.execute(
-            "SELECT label, category FROM processed WHERE output_path = ?",
+            "SELECT label, category, short_side, portrait_ratio, crop_center, format,"
+            " clip_count, spread"
+            " FROM processed WHERE output_path = ?",
             (output_path,),
         ).fetchone()
-        return row if row else None
+        self._con.row_factory = None
+        return dict(row) if row else None
 
     def delete_by_output_path(self, output_path: str) -> None:
         if not self._enabled:
@@ -1587,16 +1608,29 @@ class MainWindow(QMainWindow):
         self._lbl_next.setText(f"↺ {os.path.basename(output_path)}")
         self._btn_delete.setEnabled(True)
         self._btn_delete.setText(f"Delete {os.path.basename(output_path)}")
-        # Restore label and category from the original export
+        # Restore config from the original export
         meta = self._db.get_by_output_path(output_path)
         if meta:
-            label, category = meta
-            if label:
-                self._txt_label.setCurrentText(label)
-            if category:
-                idx = self._cmb_category.findText(category)
+            if meta["label"]:
+                self._txt_label.setCurrentText(meta["label"])
+            if meta["category"]:
+                idx = self._cmb_category.findText(meta["category"])
                 if idx >= 0:
                     self._cmb_category.setCurrentIndex(idx)
+            if meta["short_side"] is not None:
+                self._txt_resize.setText(str(meta["short_side"]))
+            ratio = meta["portrait_ratio"] or "Off"
+            idx = self._cmb_portrait.findText(ratio)
+            if idx >= 0:
+                self._cmb_portrait.setCurrentIndex(idx)
+            fmt = meta["format"] or "MP4"
+            idx = self._cmb_format.findText(fmt)
+            if idx >= 0:
+                self._cmb_format.setCurrentIndex(idx)
+            if meta["clip_count"]:
+                self._spn_clips.setValue(meta["clip_count"])
+            if meta["spread"]:
+                self._spn_spread.setValue(meta["spread"])
         self.statusBar().showMessage(
             f"Overwrite mode: {os.path.basename(output_path)} — export to replace", 5000
         )
@@ -1845,6 +1879,13 @@ class MainWindow(QMainWindow):
         except ValueError:
             short_side = None
 
+        # Stash export config for _on_clip_done DB writes
+        self._export_short_side = short_side
+        self._export_portrait = self._cmb_portrait.currentText()
+        self._export_format = fmt
+        self._export_clip_count = self._spn_clips.value()
+        self._export_spread = self._spn_spread.value()
+
         self._btn_export.setEnabled(False)
         self.statusBar().showMessage(f"Exporting {len(jobs)} clip(s)…")
 
@@ -1868,12 +1909,19 @@ class MainWindow(QMainWindow):
         """Called per clip as each finishes."""
         label = self._txt_label.currentText().strip()
         category = self._cmb_category.currentText()
+        portrait = self._export_portrait if self._export_portrait != "Off" else ""
         self._db.add(
             os.path.basename(self._file_path),
             self._cursor,
             path,
             label=label,
             category=category,
+            short_side=self._export_short_side,
+            portrait_ratio=portrait,
+            crop_center=self._crop_center,
+            fmt=self._export_format,
+            clip_count=self._export_clip_count,
+            spread=self._export_spread,
         )
         folder = self._txt_folder.text()
         upsert_clip_annotation(folder, path, label)
