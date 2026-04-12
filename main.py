@@ -279,6 +279,16 @@ class ProcessedDB:
                 result.append(lbl)
         return result
 
+    def get_by_output_path(self, output_path: str) -> tuple[str, str] | None:
+        """Return (label, category) for an output_path, or None."""
+        if not self._enabled:
+            return None
+        row = self._con.execute(
+            "SELECT label, category FROM processed WHERE output_path = ?",
+            (output_path,),
+        ).fetchone()
+        return row if row else None
+
     def delete_by_output_path(self, output_path: str) -> None:
         if not self._enabled:
             return
@@ -1577,6 +1587,16 @@ class MainWindow(QMainWindow):
         self._lbl_next.setText(f"↺ {os.path.basename(output_path)}")
         self._btn_delete.setEnabled(True)
         self._btn_delete.setText(f"Delete {os.path.basename(output_path)}")
+        # Restore label and category from the original export
+        meta = self._db.get_by_output_path(output_path)
+        if meta:
+            label, category = meta
+            if label:
+                self._txt_label.setCurrentText(label)
+            if category:
+                idx = self._cmb_category.findText(category)
+                if idx >= 0:
+                    self._cmb_category.setCurrentIndex(idx)
         self.statusBar().showMessage(
             f"Overwrite mode: {os.path.basename(output_path)} — export to replace", 5000
         )
