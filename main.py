@@ -225,34 +225,47 @@ class ProcessedDB:
             self._enabled = False
 
     def _migrate(self) -> None:
-        """Create or recreate table if schema is outdated."""
+        """Create table if missing, then add any new columns for old DBs."""
         cols = {
             row[1]
             for row in self._con.execute("PRAGMA table_info(processed)").fetchall()
         }
-        required = {"start_time", "output_path", "label", "category",
-                    "short_side", "portrait_ratio", "crop_center", "format",
-                    "clip_count", "spread"}
-        needs_recreate = not required.issubset(cols)
-        if needs_recreate:
-            self._con.execute("DROP TABLE IF EXISTS processed")
-        self._con.execute(
-            "CREATE TABLE IF NOT EXISTS processed ("
-            "  id              INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "  filename        TEXT    NOT NULL,"
-            "  start_time      REAL    NOT NULL,"
-            "  output_path     TEXT    NOT NULL,"
-            "  label           TEXT    NOT NULL DEFAULT '',"
-            "  category        TEXT    NOT NULL DEFAULT '',"
-            "  short_side      INTEGER,"
-            "  portrait_ratio  TEXT    NOT NULL DEFAULT '',"
-            "  crop_center     REAL    NOT NULL DEFAULT 0.5,"
-            "  format          TEXT    NOT NULL DEFAULT 'MP4',"
-            "  clip_count      INTEGER NOT NULL DEFAULT 3,"
-            "  spread          REAL    NOT NULL DEFAULT 3.0,"
-            "  processed_at    TEXT    NOT NULL"
-            ")"
-        )
+        if not cols:
+            # Fresh DB — create from scratch
+            self._con.execute(
+                "CREATE TABLE IF NOT EXISTS processed ("
+                "  id              INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "  filename        TEXT    NOT NULL,"
+                "  start_time      REAL    NOT NULL,"
+                "  output_path     TEXT    NOT NULL,"
+                "  label           TEXT    NOT NULL DEFAULT '',"
+                "  category        TEXT    NOT NULL DEFAULT '',"
+                "  short_side      INTEGER,"
+                "  portrait_ratio  TEXT    NOT NULL DEFAULT '',"
+                "  crop_center     REAL    NOT NULL DEFAULT 0.5,"
+                "  format          TEXT    NOT NULL DEFAULT 'MP4',"
+                "  clip_count      INTEGER NOT NULL DEFAULT 3,"
+                "  spread          REAL    NOT NULL DEFAULT 3.0,"
+                "  processed_at    TEXT    NOT NULL"
+                ")"
+            )
+        else:
+            # Add missing columns to legacy tables
+            new_cols = {
+                "label":          "TEXT NOT NULL DEFAULT ''",
+                "category":       "TEXT NOT NULL DEFAULT ''",
+                "short_side":     "INTEGER",
+                "portrait_ratio": "TEXT NOT NULL DEFAULT ''",
+                "crop_center":    "REAL NOT NULL DEFAULT 0.5",
+                "format":         "TEXT NOT NULL DEFAULT 'MP4'",
+                "clip_count":     "INTEGER NOT NULL DEFAULT 3",
+                "spread":         "REAL NOT NULL DEFAULT 3.0",
+            }
+            for col, typedef in new_cols.items():
+                if col not in cols:
+                    self._con.execute(
+                        f"ALTER TABLE processed ADD COLUMN {col} {typedef}"
+                    )
         self._con.execute(
             "CREATE INDEX IF NOT EXISTS idx_filename ON processed(filename)"
         )
