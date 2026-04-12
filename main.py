@@ -10,6 +10,7 @@ import random
 import shutil
 import sqlite3
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -404,35 +405,47 @@ class ExportWorker(QThread):
         self._short_side = short_side
         self._image_sequence = image_sequence
 
+    def _run_one(self, start: float, output: str,
+                  portrait_ratio: str | None, crop_center: float) -> str:
+        """Encode a single clip. Returns output path on success, raises on error."""
+        if self._image_sequence:
+            os.makedirs(output, exist_ok=True)
+        cmd = build_ffmpeg_command(
+            self._input, start, output,
+            short_side=self._short_side,
+            portrait_ratio=portrait_ratio,
+            crop_center=crop_center,
+            image_sequence=self._image_sequence,
+        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr[-500:] if result.stderr else "ffmpeg failed")
+        if self._image_sequence:
+            audio_cmd = build_audio_extract_command(self._input, start, output)
+            subprocess.run(audio_cmd, capture_output=True, text=True, timeout=60)
+        return output
+
     def run(self):
-        for start, output, portrait_ratio, crop_center in self._jobs:
-            try:
-                if self._image_sequence:
-                    os.makedirs(output, exist_ok=True)
-                cmd = build_ffmpeg_command(
-                    self._input, start, output,
-                    short_side=self._short_side,
-                    portrait_ratio=portrait_ratio,
-                    crop_center=crop_center,
-                    image_sequence=self._image_sequence,
-                )
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-                if result.returncode == 0:
-                    if self._image_sequence:
-                        audio_cmd = build_audio_extract_command(
-                            self._input, start, output
-                        )
-                        subprocess.run(audio_cmd, capture_output=True, text=True, timeout=60)
-                    self.finished.emit(output)
-                else:
-                    self.error.emit(result.stderr[-500:])
-                    return
-            except FileNotFoundError:
-                self.error.emit("ffmpeg not found — is it installed and on PATH?")
-                return
-            except Exception as e:
-                self.error.emit(str(e))
-                return
+        workers = min(len(self._jobs), os.cpu_count() or 2)
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(self._run_one, s, o, pr, cc): o
+                    for s, o, pr, cc in self._jobs
+                }
+                for fut in as_completed(futures):
+                    try:
+                        path = fut.result()
+                        self.finished.emit(path)
+                    except FileNotFoundError:
+                        self.error.emit("ffmpeg not found — is it installed and on PATH?")
+                        return
+                    except Exception as e:
+                        self.error.emit(str(e))
+                        return
+        except Exception as e:
+            self.error.emit(str(e))
+            return
         self.all_done.emit()
 
 
@@ -465,6 +478,7 @@ class TimelineWidget(QWidget):
     cursor_changed = pyqtSignal(float)              # emits position in seconds
     marker_delete_requested = pyqtSignal(str)       # emits output_path
     marker_clicked = pyqtSignal(float, str)         # emits (start_time, output_path)
+    marker_deselected = pyqtSignal()                # double-click on empty space
 
     _RULER_H = 22   # pixels reserved for the time ruler
     _HANDLE_H = 8   # height of the playhead triangle
@@ -476,6 +490,7 @@ class TimelineWidget(QWidget):
         self._duration = 0.0
         self._cursor = 0.0
         self._clip_span = 14.0  # 8 + 2*spread, updated from MainWindow
+        self._play_pos: float | None = None  # current playback position (seconds)
         self._markers: list[tuple[float, int, str]] = []
         self._hover_cache: list[tuple[float, str]] = []  # (t/duration, path)
 
@@ -501,6 +516,7 @@ class TimelineWidget(QWidget):
     def set_duration(self, duration: float):
         self._duration = duration
         self._cursor = 0.0
+        self._play_pos = None
         self._rebuild_hover_cache()
         self.update()
 
@@ -519,6 +535,10 @@ class TimelineWidget(QWidget):
         """markers: list of (start_time, number, output_path)"""
         self._markers = markers
         self._rebuild_hover_cache()
+        self.update()
+
+    def set_play_position(self, t: float | None) -> None:
+        self._play_pos = t
         self.update()
 
     def _rebuild_hover_cache(self) -> None:
@@ -603,6 +623,15 @@ class TimelineWidget(QWidget):
             x_end   = int(min(self._cursor + self._clip_span, self._duration) / self._duration * w)
             sel_w   = max(x_end - x_start, 1)
             p.fillRect(x_start, rh, sel_w, th, QColor(60, 130, 220, 90))
+
+            # ── playback progress fill ────────────────────────────────────
+            if self._play_pos is not None and self._play_pos > self._cursor:
+                prog_end = min(self._play_pos, self._cursor + self._clip_span, self._duration)
+                x_prog = int(prog_end / self._duration * w)
+                prog_w = max(x_prog - x_start, 0)
+                if prog_w > 0:
+                    p.fillRect(x_start, rh, prog_w, th, QColor(100, 200, 255, 60))
+
             # left/right edges of selection
             p.setPen(QPen(QColor(60, 130, 220, 180), 1))
             p.drawLine(x_start, rh, x_start, h)
@@ -638,19 +667,22 @@ class TimelineWidget(QWidget):
             p.end()
 
     def mousePressEvent(self, event):
-        from PyQt6.QtCore import Qt as _Qt
-        if event.button() == _Qt.MouseButton.LeftButton and self._hover_cache:
-            x = event.position().x()
-            w = self.width()
-            for (frac, output_path) in self._hover_cache:
-                if abs(x - frac * w) <= 6:
-                    t = frac * self._duration
-                    # Emit marker_clicked BEFORE seek so the handler can set
-                    # _overwrite_path before _on_cursor_changed clears it.
-                    self.marker_clicked.emit(t, output_path)
-                    self._seek(x)
-                    return
         self._seek(event.position().x())
+
+    def mouseDoubleClickEvent(self, event):
+        from PyQt6.QtCore import Qt as _Qt
+        if event.button() == _Qt.MouseButton.LeftButton:
+            x = event.position().x()
+            if self._hover_cache:
+                w = self.width()
+                for (frac, output_path) in self._hover_cache:
+                    if abs(x - frac * w) <= 6:
+                        t = frac * self._duration
+                        self.marker_clicked.emit(t, output_path)
+                        self._seek(x)
+                        return
+            self.marker_deselected.emit()
+            self._seek(x)
 
     def mouseMoveEvent(self, event):
         x = event.position().x()
@@ -710,6 +742,7 @@ class MpvWidget(QWidget):
     """
     file_loaded = pyqtSignal()
     crop_clicked = pyqtSignal(float)
+    time_pos_changed = pyqtSignal(float)  # emits current playback position in seconds
     _do_file_loaded = pyqtSignal()  # mpv thread → Qt main thread for file-loaded event
 
     def __init__(self):
@@ -797,6 +830,10 @@ class MpvWidget(QWidget):
         if self._needs_render and self._render_ctx and self._render_ctx.update():
             self._needs_render = False
             self._render_frame()
+        if not self._player.pause:
+            tp = self._player.time_pos
+            if tp is not None:
+                self.time_pos_changed.emit(tp)
 
     def _render_frame(self):
         from PyQt6.QtOpenGL import QOpenGLFramebufferObject
@@ -1250,7 +1287,6 @@ class MainWindow(QMainWindow):
         self._export_worker: ExportWorker | None = None
         self._last_export_path: str = ""
         self._overwrite_path: str = ""   # set when a marker is selected for re-export
-        self._marker_just_clicked: bool = False
         self._mask_worker: MaskWorker | None = None
         self._db_worker: _DBWorker | None = None
         self._frame_grabber: FrameGrabber | None = None
@@ -1287,7 +1323,9 @@ class MainWindow(QMainWindow):
         self._timeline.set_clip_span(8.0 + (_init_clips - 1) * _init_spread)
         self._timeline.cursor_changed.connect(self._on_cursor_changed)
         self._timeline.marker_delete_requested.connect(self._on_delete_marker)
+        self._mpv.time_pos_changed.connect(self._timeline.set_play_position)
         self._timeline.marker_clicked.connect(self._on_marker_clicked)
+        self._timeline.marker_deselected.connect(self._on_marker_deselected)
 
         self._lbl_file = QLabel("Drop files onto the queue →")
         self._lbl_file.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1580,6 +1618,9 @@ class MainWindow(QMainWindow):
         self._btn_export.setEnabled(True)
         self._fps = self._mpv.get_fps()
         self._crop_bar.set_source_ratio(*self._mpv.get_video_size())
+        # Reset export settings to defaults for the new video
+        self._spn_clips.setValue(int(self._settings.value("clip_count", "3")))
+        self._spn_spread.setValue(float(self._settings.value("spread", "3.0")))
         self._preview_win.show()
         self._preview_timer.start()
 
@@ -1620,7 +1661,6 @@ class MainWindow(QMainWindow):
         )
 
     def _on_marker_clicked(self, start_time: float, output_path: str) -> None:
-        self._marker_just_clicked = True
         self._overwrite_path = output_path
         self._lbl_next.setText(f"↺ {os.path.basename(output_path)}")
         self._btn_delete.setEnabled(True)
@@ -1651,6 +1691,14 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Overwrite mode: {os.path.basename(output_path)} — export to replace", 5000
         )
+
+    def _on_marker_deselected(self) -> None:
+        if self._overwrite_path:
+            self._overwrite_path = ""
+            self._update_next_label()
+            if not self._last_export_path:
+                self._btn_delete.setEnabled(False)
+            self._btn_delete.setText("Delete")
 
     def _on_delete_export(self) -> None:
         target = self._overwrite_path or self._last_export_path
@@ -1756,13 +1804,6 @@ class MainWindow(QMainWindow):
         self._cursor = t
         self._lbl_cursor.setText(f"cursor: {format_time(t)}")
         self._preview_timer.start()
-        if self._overwrite_path and not self._marker_just_clicked:
-            self._overwrite_path = ""
-            self._update_next_label()
-            if not self._last_export_path:
-                self._btn_delete.setEnabled(False)
-            self._btn_delete.setText("Delete")
-        self._marker_just_clicked = False
         if self._mpv.is_playing():
             self._mpv.play_loop(t, t + self._clip_span)
         else:
@@ -1789,6 +1830,7 @@ class MainWindow(QMainWindow):
     def _on_pause(self):
         self._mpv.stop_loop()
         self._mpv.seek(self._cursor)
+        self._timeline.set_play_position(None)
 
     def _step_cursor(self, delta: float) -> None:
         if not self._file_path:
