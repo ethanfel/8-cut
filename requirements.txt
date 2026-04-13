@@ -1,3 +1,4 @@
 PyQt6>=6.4
 python-mpv>=1.0
 pytest>=7.0
+ultralytics>=8.0
