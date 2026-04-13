@@ -1525,6 +1525,8 @@ class PlaylistWidget(QListWidget):
 
     def _apply_visibility(self) -> None:
         """Centralized: item is hidden if profile-hidden OR (hide_exported AND done)."""
+        sb = self.verticalScrollBar()
+        pos = sb.value() if sb else 0
         self.setUpdatesEnabled(False)
         for i, path in enumerate(self._paths):
             item = self.item(i)
@@ -1534,10 +1536,8 @@ class PlaylistWidget(QListWidget):
                       or (self._hide_exported and path in self._done_set))
             item.setHidden(hidden)
         self.setUpdatesEnabled(True)
-        # Restore scroll to current selection.
-        cur = self.currentItem()
-        if cur:
-            self.scrollToItem(cur, QListWidget.ScrollHint.EnsureVisible)
+        if sb:
+            sb.setValue(pos)
 
     def advance(self) -> None:
         """Move to next visible item in queue."""
@@ -1565,11 +1565,16 @@ class PlaylistWidget(QListWidget):
 
     def _select(self, row: int) -> None:
         prev = self.currentRow()
+        # Save scroll position — setCurrentRow triggers Qt internal scroll.
+        sb = self.verticalScrollBar()
+        scroll_pos = sb.value() if sb else 0
         self.setCurrentRow(row)
+        if sb:
+            sb.setValue(scroll_pos)
         if prev >= 0 and prev != row and self.item(prev):
             self._refresh_item_text(prev)
-        if self.item(row):
-            item = self.item(row)
+        item = self.item(row)
+        if item:
             cur = item.text()
             # Preserve [N] tag from mark_done.
             if cur.startswith("[") and "] " in cur:
@@ -1579,6 +1584,7 @@ class PlaylistWidget(QListWidget):
             else:
                 tag = ""
             item.setText(f"▶ {tag}{os.path.basename(self._paths[row])}")
+            # If the item is off-screen, scroll just enough to show it.
             self.scrollToItem(item, QListWidget.ScrollHint.EnsureVisible)
         self.file_selected.emit(self._paths[row])
 
@@ -2263,6 +2269,8 @@ class MainWindow(QMainWindow):
     def _refresh_playlist_checks(self) -> None:
         """Re-evaluate marks on every playlist item for the current profile."""
         profile = self._profile
+        sb = self._playlist.verticalScrollBar()
+        pos = sb.value() if sb else 0
         self._playlist.setUpdatesEnabled(False)
         for path in self._playlist._paths:
             markers = self._db.get_markers(os.path.basename(path), profile)
@@ -2271,6 +2279,8 @@ class MainWindow(QMainWindow):
             else:
                 self._playlist.unmark_done(path)
         self._playlist.setUpdatesEnabled(True)
+        if sb:
+            sb.setValue(pos)
 
     def _on_delete_marker(self, output_path: str) -> None:
         deleted = self._db.delete_group(output_path)
