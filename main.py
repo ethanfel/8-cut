@@ -20,9 +20,9 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QFileDialog, QFrame, QStatusBar,
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
     QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox,
-    QMessageBox,
+    QMessageBox, QInputDialog,
 )
-from PyQt6.QtCore import Qt, QObject, QThread, QTimer, pyqtSignal, QSettings
+from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QRect, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
 import mpv
 
@@ -840,10 +840,9 @@ class MpvWidget(QWidget):
         self._render_timer.start()
 
         self._do_file_loaded.connect(self._on_file_loaded_qt)
-        self._overlay_ratio: tuple[int, int] | None = None  # (num, den) or None
-        self._overlay_crop_center: float = 0.5
-        self._overlay_lines_only: bool = False
-        self._overlay_fracs: "tuple[float, float] | None" = None  # (left_frac, right_frac)
+        # Each overlay: {"ratio": (num,den), "center": float, "lines_only": bool,
+        #                "color": QColor, "_fracs": (left,right)|None}
+        self._overlays: list[dict] = []
 
         @self._player.event_callback("file-loaded")
         def _on_file_loaded(event):
@@ -852,15 +851,33 @@ class MpvWidget(QWidget):
     def _on_file_loaded_qt(self) -> None:
         self._video_w = self._player.width or 0
         self._video_h = self._player.height or 0
-        self._overlay_fracs = None  # recompute with new dimensions
+        for ov in self._overlays:
+            ov["_fracs"] = None  # recompute with new dimensions
         self.file_loaded.emit()
+
+    def set_crop_overlays(self, overlays: "list[tuple[tuple[int,int], float, bool, QColor | None]]") -> None:
+        """Set one or more crop overlays.
+
+        Each entry is (ratio, center, lines_only, color).
+        Pass an empty list to clear.
+        """
+        self._overlays = []
+        for ratio, center, lines_only, color in overlays:
+            self._overlays.append({
+                "ratio": ratio, "center": center,
+                "lines_only": lines_only,
+                "color": color or QColor(220, 60, 60, 200),
+                "_fracs": None,
+            })
+        self.update()
 
     def set_crop_overlay(self, ratio: "tuple[int,int] | None", crop_center: float,
                          lines_only: bool = False) -> None:
-        self._overlay_ratio = ratio
-        self._overlay_crop_center = crop_center
-        self._overlay_lines_only = lines_only
-        self._overlay_fracs: "tuple[float,float] | None" = None  # invalidate cache
+        """Convenience: single overlay (backward-compat)."""
+        if ratio is None:
+            self._overlays = []
+        else:
+            self.set_crop_overlays([(ratio, crop_center, lines_only, None)])
         self.update()
 
     def _on_mpv_update(self):
@@ -897,49 +914,77 @@ class MpvWidget(QWidget):
             self._gl_ctx.doneCurrent()
         self.update()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Re-render the current frame at the new widget size so it isn't
+        # stretched from the old FBO dimensions.
+        if self._render_ctx:
+            self._render_frame()
+
+    def _video_rect(self) -> QRect:
+        """Return the sub-rect where the video sits inside the widget (letterboxed)."""
+        ww, wh = self.width(), self.height()
+        vw, vh = self._video_w, self._video_h
+        if vw <= 0 or vh <= 0:
+            return QRect(0, 0, ww, wh)
+        video_aspect = vw / vh
+        widget_aspect = ww / wh
+        if widget_aspect > video_aspect:
+            # Pillarbox — black bars on sides
+            draw_h = wh
+            draw_w = int(wh * video_aspect)
+            return QRect((ww - draw_w) // 2, 0, draw_w, draw_h)
+        else:
+            # Letterbox — black bars top/bottom
+            draw_w = ww
+            draw_h = int(ww / video_aspect)
+            return QRect(0, (wh - draw_h) // 2, draw_w, draw_h)
+
     def paintEvent(self, event):
         p = QPainter(self)
+        p.fillRect(self.rect(), QColor(0, 0, 0))
         if self._frame and not self._frame.isNull():
             p.drawImage(self.rect(), self._frame)
-        else:
-            p.fillRect(self.rect(), QColor(0, 0, 0))
 
-        if self._overlay_ratio is not None and self._player.pause:
-            if self._overlay_fracs is None:
-                vw, vh = self._video_w, self._video_h
-                if vw > 0 and vh > 0:
-                    num, den = self._overlay_ratio
+        if self._overlays and self._player.pause:
+            vw, vh = self._video_w, self._video_h
+            vr = self._video_rect()
+            for ov in self._overlays:
+                if ov["_fracs"] is None and vw > 0 and vh > 0:
+                    num, den = ov["ratio"]
                     crop_w_frac = min((vh * num / den) / vw, 1.0)
                     half = crop_w_frac / 2.0
-                    center = self._overlay_crop_center
-                    self._overlay_fracs = (
+                    center = ov["center"]
+                    ov["_fracs"] = (
                         max(0.0, center - half),
                         min(1.0, center + half),
                     )
-            if self._overlay_fracs is not None:
-                left_frac, right_frac = self._overlay_fracs
-                ww, wh = self.width(), self.height()
-                left_px  = int(left_frac  * ww)
-                right_px = int(right_frac * ww)
-                if self._overlay_lines_only:
-                    line_pen = QPen(QColor(220, 60, 60, 200))
+                if ov["_fracs"] is None:
+                    continue
+                left_frac, right_frac = ov["_fracs"]
+                left_px  = vr.x() + int(left_frac  * vr.width())
+                right_px = vr.x() + int(right_frac * vr.width())
+                color = ov["color"]
+                if ov["lines_only"]:
+                    line_pen = QPen(color)
                     line_pen.setWidth(2)
                     p.setPen(line_pen)
-                    p.drawLine(left_px, 0, left_px, wh)
-                    p.drawLine(right_px, 0, right_px, wh)
+                    p.drawLine(left_px, vr.y(), left_px, vr.y() + vr.height())
+                    p.drawLine(right_px, vr.y(), right_px, vr.y() + vr.height())
                 else:
-                    cut_color = QColor(180, 0, 0, 140)
-                    if left_px > 0:
-                        p.fillRect(0, 0, left_px, wh, cut_color)
-                    if right_px < ww:
-                        p.fillRect(right_px, 0, ww - right_px, wh, cut_color)
+                    cut_color = QColor(color.red(), color.green(), color.blue(), 140)
+                    if left_px > vr.x():
+                        p.fillRect(vr.x(), vr.y(), left_px - vr.x(), vr.height(), cut_color)
+                    if right_px < vr.x() + vr.width():
+                        p.fillRect(right_px, vr.y(), vr.x() + vr.width() - right_px, vr.height(), cut_color)
 
         p.end()
 
     def mousePressEvent(self, event):
-        w = self.width()
-        if w > 0:
-            self.crop_clicked.emit(event.position().x() / w)
+        vr = self._video_rect()
+        if vr.width() > 0:
+            x = (event.position().x() - vr.x()) / vr.width()
+            self.crop_clicked.emit(max(0.0, min(1.0, x)))
 
     def load(self, path: str): self._player.play(path)
 
@@ -1101,6 +1146,17 @@ class PlaylistWidget(QListWidget):
         name = os.path.basename(path)
         item.setText(f"✓ {name}")
         item.setForeground(QColor(100, 180, 100))
+
+    def unmark_done(self, path: str) -> None:
+        """Remove the ✓ prefix and restore default color."""
+        if path not in self._path_set:
+            return
+        row = self._paths.index(path)
+        item = self.item(row)
+        if item is None:
+            return
+        item.setText(os.path.basename(path))
+        item.setForeground(QColor(200, 200, 200))
 
     def advance(self) -> None:
         """Move to next item in queue. Does nothing if at end or nothing selected."""
@@ -1352,7 +1408,7 @@ class MainWindow(QMainWindow):
 
         self._chk_rand_portrait = QCheckBox("1 random portrait")
         self._chk_rand_portrait.setToolTip(
-            "One random clip per batch gets a random portrait crop (ratio + position)"
+            "One random clip per batch gets a random portrait crop (9:16 + random position)"
         )
         self._chk_rand_portrait.setChecked(
             self._settings.value("rand_portrait", "false") == "true"
@@ -1360,7 +1416,19 @@ class MainWindow(QMainWindow):
         self._chk_rand_portrait.toggled.connect(
             lambda v: self._settings.setValue("rand_portrait", "true" if v else "false")
         )
-        self._chk_rand_portrait.toggled.connect(self._on_rand_portrait_toggled)
+        self._chk_rand_portrait.toggled.connect(self._on_rand_toggle)
+
+        self._chk_rand_square = QCheckBox("1 random square")
+        self._chk_rand_square.setToolTip(
+            "One random clip per batch gets a random square crop (1:1 + random position)"
+        )
+        self._chk_rand_square.setChecked(
+            self._settings.value("rand_square", "false") == "true"
+        )
+        self._chk_rand_square.toggled.connect(
+            lambda v: self._settings.setValue("rand_square", "true" if v else "false")
+        )
+        self._chk_rand_square.toggled.connect(self._on_rand_toggle)
 
         self._txt_label = QComboBox()
         self._txt_label.setEditable(True)
@@ -1407,23 +1475,26 @@ class MainWindow(QMainWindow):
         self._btn_delete.clicked.connect(self._on_delete_export)
 
         self._cmb_profile = QComboBox()
-        self._cmb_profile.setEditable(True)
         self._cmb_profile.setToolTip("Export profile — each profile has its own set of markers")
         self._cmb_profile.setMinimumWidth(100)
-        existing = self._db.get_profiles()
-        if existing:
-            self._cmb_profile.addItems(existing)
-        else:
-            self._cmb_profile.addItem("default")
+        self._populate_profile_combo()
         saved_profile = self._settings.value("profile", "default")
-        self._cmb_profile.setCurrentText(saved_profile)
-        self._cmb_profile.currentTextChanged.connect(self._on_profile_changed)
+        idx = self._cmb_profile.findText(saved_profile)
+        if idx >= 0:
+            self._cmb_profile.setCurrentIndex(idx)
+        self._cmb_profile.activated.connect(self._on_profile_activated)
+
+        self._btn_shortcuts = QPushButton("?")
+        self._btn_shortcuts.setFixedWidth(28)
+        self._btn_shortcuts.setToolTip("Keyboard shortcuts (? or F1)")
+        self._btn_shortcuts.clicked.connect(self._show_shortcuts)
 
         # Right-side layout (video + controls)
         top_bar = QHBoxLayout()
         top_bar.addWidget(self._lbl_file, stretch=1)
         top_bar.addWidget(QLabel("Profile:"))
         top_bar.addWidget(self._cmb_profile)
+        top_bar.addWidget(self._btn_shortcuts)
 
         # Row 1 — transport + export actions
         transport_row = QHBoxLayout()
@@ -1460,6 +1531,7 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(QLabel("Spread:"))
         settings_row.addWidget(self._spn_spread)
         settings_row.addWidget(self._chk_rand_portrait)
+        settings_row.addWidget(self._chk_rand_square)
         settings_row.addStretch()
 
         right = QWidget()
@@ -1494,16 +1566,11 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(splitter)
         self.setStatusBar(QStatusBar())
-        _rand_portrait_on = self._settings.value("rand_portrait", "false") == "true"
         if saved_ratio != "Off":
             self._crop_bar.setVisible(True)
             self._mpv.set_crop_overlay(_RATIOS[saved_ratio], self._crop_center)
-        elif _rand_portrait_on:
-            self._crop_bar.set_portrait_ratio("9:16")
-            self._crop_bar.setVisible(True)
-            self._mpv.set_crop_overlay(_RATIOS["9:16"], self._crop_center, lines_only=True)
         else:
-            self._crop_bar.setVisible(False)
+            self._update_rand_overlays()
 
         # Application-wide shortcuts — fire regardless of which widget has focus.
         ctx = Qt.ShortcutContext.ApplicationShortcut
@@ -1531,12 +1598,73 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("E"), self, context=ctx).activated.connect(self._on_export)
         QShortcut(QKeySequence("M"), self, context=ctx).activated.connect(self._jump_to_next_marker)
         QShortcut(QKeySequence("N"), self, context=ctx).activated.connect(self._playlist.advance)
+        for key in ("?", "F1"):
+            QShortcut(QKeySequence(key), self, context=ctx).activated.connect(self._show_shortcuts)
+
+    def _show_shortcuts(self) -> None:
+        text = (
+            "<table cellpadding='4' style='font-size:13px'>"
+            "<tr><td><b>Left / J</b></td><td>Step back 1 frame</td></tr>"
+            "<tr><td><b>Right / L</b></td><td>Step forward 1 frame</td></tr>"
+            "<tr><td><b>Shift+Left / Shift+J</b></td><td>Step back 1 second</td></tr>"
+            "<tr><td><b>Shift+Right / Shift+L</b></td><td>Step forward 1 second</td></tr>"
+            "<tr><td><b>Space / P</b></td><td>Play / Pause</td></tr>"
+            "<tr><td><b>K</b></td><td>Pause and snap to cursor</td></tr>"
+            "<tr><td><b>E</b></td><td>Export</td></tr>"
+            "<tr><td><b>M</b></td><td>Jump to next marker</td></tr>"
+            "<tr><td><b>N</b></td><td>Next file in playlist</td></tr>"
+            "<tr><td><b>? / F1</b></td><td>This help</td></tr>"
+            "<tr><td colspan='2'><hr></td></tr>"
+            "<tr><td><b>Double-click marker</b></td><td>Enter overwrite mode</td></tr>"
+            "<tr><td><b>Right-click marker</b></td><td>Delete clip group</td></tr>"
+            "<tr><td><b>Click video / crop bar</b></td><td>Reposition portrait crop</td></tr>"
+            "</table>"
+        )
+        QMessageBox.information(self, "Keyboard shortcuts", text)
+
+    _NEW_PROFILE_SENTINEL = "+ New profile..."
+
+    def _populate_profile_combo(self) -> None:
+        """Rebuild profile combo items from DB, preserving selection."""
+        self._cmb_profile.blockSignals(True)
+        prev = self._cmb_profile.currentText()
+        self._cmb_profile.clear()
+        existing = self._db.get_profiles()
+        if existing:
+            self._cmb_profile.addItems(existing)
+        else:
+            self._cmb_profile.addItem("default")
+        self._cmb_profile.addItem(self._NEW_PROFILE_SENTINEL)
+        idx = self._cmb_profile.findText(prev)
+        if idx >= 0:
+            self._cmb_profile.setCurrentIndex(idx)
+        self._cmb_profile.blockSignals(False)
 
     @property
     def _profile(self) -> str:
-        return self._cmb_profile.currentText().strip() or "default"
+        text = self._cmb_profile.currentText()
+        if text == self._NEW_PROFILE_SENTINEL:
+            return "default"
+        return text.strip() or "default"
 
-    def _on_profile_changed(self, text: str) -> None:
+    def _on_profile_activated(self, index: int) -> None:
+        text = self._cmb_profile.itemText(index)
+        if text == self._NEW_PROFILE_SENTINEL:
+            name, ok = QInputDialog.getText(self, "New profile", "Profile name:")
+            name = name.strip()
+            if ok and name and name != self._NEW_PROFILE_SENTINEL:
+                # Insert before the sentinel and select it
+                sentinel_idx = self._cmb_profile.count() - 1
+                self._cmb_profile.insertItem(sentinel_idx, name)
+                self._cmb_profile.setCurrentIndex(sentinel_idx)
+            else:
+                # Cancelled — revert to previous profile
+                prev = self._settings.value("profile", "default")
+                idx = self._cmb_profile.findText(prev)
+                if idx >= 0:
+                    self._cmb_profile.setCurrentIndex(idx)
+                return
+            text = name
         self._settings.setValue("profile", text)
         # Clear overwrite state — the selected marker belongs to the old profile
         if self._overwrite_path:
@@ -1548,6 +1676,7 @@ class MainWindow(QMainWindow):
             if not self._last_export_path:
                 self._btn_delete.setEnabled(False)
         self._update_next_label()
+        self._refresh_playlist_checks()
         if self._file_path:
             self._refresh_markers()
             self.statusBar().showMessage(f"Profile: {text}", 3000)
@@ -1623,6 +1752,15 @@ class MainWindow(QMainWindow):
         else:
             markers = []
         self._timeline.set_markers(markers)
+
+    def _refresh_playlist_checks(self) -> None:
+        """Re-evaluate ✓ marks on every playlist item for the current profile."""
+        profile = self._profile
+        for path in self._playlist._paths:
+            if self._db.get_markers(os.path.basename(path), profile):
+                self._playlist.mark_done(path)
+            else:
+                self._playlist.unmark_done(path)
 
     def _on_delete_marker(self, output_path: str) -> None:
         deleted = self._db.delete_group(output_path)
@@ -1742,36 +1880,43 @@ class MainWindow(QMainWindow):
     def _on_portrait_ratio_changed(self, text: str) -> None:
         ratio = None if text == "Off" else text
         self._crop_bar.set_portrait_ratio(ratio)
-        rand_on = self._chk_rand_portrait.isChecked()
-        # Show crop bar if portrait is set OR random portrait is on
         if ratio is not None:
             self._crop_bar.setVisible(True)
             self._mpv.set_crop_overlay(_RATIOS[ratio], self._crop_center)
-        elif rand_on:
-            self._crop_bar.set_portrait_ratio("9:16")
-            self._crop_bar.setVisible(True)
-            self._mpv.set_crop_overlay(_RATIOS["9:16"], self._crop_center, lines_only=True)
         else:
-            self._crop_bar.setVisible(False)
-            self._mpv.set_crop_overlay(None, self._crop_center)
+            # Fall back to random overlay guides (or hide)
+            self._update_rand_overlays()
         self._settings.setValue("portrait_ratio", text)
 
-    def _on_rand_portrait_toggled(self, checked: bool) -> None:
+    def _on_rand_toggle(self, _checked: bool = False) -> None:
         ratio_text = self._cmb_portrait.currentText()
         if ratio_text != "Off":
             return  # manual portrait already controls the overlay
-        if checked:
-            self._crop_bar.set_portrait_ratio("9:16")
+        self._update_rand_overlays()
+
+    def _update_rand_overlays(self) -> None:
+        """Show lines-only overlay guides for whichever random crop options are on."""
+        portrait_on = self._chk_rand_portrait.isChecked()
+        square_on = self._chk_rand_square.isChecked()
+        overlays: list[tuple[tuple[int,int], float, bool, QColor | None]] = []
+        if portrait_on:
+            overlays.append((_RATIOS["9:16"], self._crop_center, True, QColor(220, 60, 60, 200)))
+        if square_on:
+            overlays.append((_RATIOS["1:1"], self._crop_center, True, QColor(60, 180, 220, 200)))
+        if overlays:
+            # Show the narrower ratio on the crop bar for reference
+            bar_ratio = "9:16" if portrait_on else "1:1"
+            self._crop_bar.set_portrait_ratio(bar_ratio)
             self._crop_bar.setVisible(True)
-            self._mpv.set_crop_overlay(_RATIOS["9:16"], self._crop_center, lines_only=True)
+            self._mpv.set_crop_overlays(overlays)
         else:
             self._crop_bar.setVisible(False)
-            self._mpv.set_crop_overlay(None, self._crop_center)
+            self._mpv.set_crop_overlays([])
 
     def _on_crop_click(self, frac: float) -> None:
         ratio = self._cmb_portrait.currentText()
-        rand_on = self._chk_rand_portrait.isChecked()
-        if ratio == "Off" and not rand_on:
+        any_rand = self._chk_rand_portrait.isChecked() or self._chk_rand_square.isChecked()
+        if ratio == "Off" and not any_rand:
             return
         self._crop_center = max(0.0, min(1.0, frac))
         self._settings.setValue("crop_center", str(self._crop_center))
@@ -1779,7 +1924,7 @@ class MainWindow(QMainWindow):
         if ratio != "Off":
             self._mpv.set_crop_overlay(_RATIOS[ratio], self._crop_center)
         else:
-            self._mpv.set_crop_overlay(_RATIOS["9:16"], self._crop_center, lines_only=True)
+            self._update_rand_overlays()
 
     # --- End-frame preview ---
 
@@ -1940,13 +2085,23 @@ class MainWindow(QMainWindow):
                     out = build_export_path(folder, name, self._export_counter, sub=sub)
                 jobs.append((start, out, base_ratio, base_center))
 
-            # Random portrait: ~1 per 3 clips gets a random ratio + position
-            if self._chk_rand_portrait.isChecked() and n_clips > 1:
-                n_portrait = max(1, n_clips // 3)
-                indices = random.sample(range(n_clips), n_portrait)
+            # Random crop: ~1 per 3 clips gets a random crop + random position.
+            # When both portrait and square are on, they share the quota.
+            rand_portrait = self._chk_rand_portrait.isChecked()
+            rand_square = self._chk_rand_square.isChecked()
+            if (rand_portrait or rand_square) and n_clips > 1:
+                n_random = max(1, n_clips // 3)
+                indices = random.sample(range(n_clips), n_random)
+                # Build pool of ratios to assign
+                if rand_portrait and rand_square:
+                    ratios = ["9:16", "1:1"]
+                elif rand_portrait:
+                    ratios = ["9:16"]
+                else:
+                    ratios = ["1:1"]
                 for idx in indices:
                     s, o, _, _ = jobs[idx]
-                    jobs[idx] = (s, o, "9:16", base_center)
+                    jobs[idx] = (s, o, random.choice(ratios), base_center)
 
         short_side = self._spn_resize.value() or None
 
@@ -2018,13 +2173,8 @@ class MainWindow(QMainWindow):
         self._txt_label.addItems(self._db.get_labels())
         self._txt_label.setCurrentText(current)
         self._txt_label.blockSignals(False)
-        # Refresh profile list so newly typed profiles appear in the dropdown.
-        cur_profile = self._cmb_profile.currentText()
-        self._cmb_profile.blockSignals(True)
-        self._cmb_profile.clear()
-        self._cmb_profile.addItems(self._db.get_profiles() or ["default"])
-        self._cmb_profile.setCurrentText(cur_profile)
-        self._cmb_profile.blockSignals(False)
+        # Refresh profile list so new profiles appear in the dropdown.
+        self._populate_profile_combo()
 
     def _on_export_error(self, msg: str):
         self._btn_export.setEnabled(True)
