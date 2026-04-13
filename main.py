@@ -588,6 +588,7 @@ class ExportWorker(QThread):
     finished = pyqtSignal(str)   # emitted per completed clip
     error = pyqtSignal(str)      # error message
     all_done = pyqtSignal()      # emitted after all jobs complete
+    cancelled = pyqtSignal()     # emitted when cancel completes
 
     def __init__(self, input_path: str,
                  jobs: list[tuple[float, str, str | None, float]],
@@ -602,10 +603,24 @@ class ExportWorker(QThread):
         self._image_sequence = image_sequence
         self._max_workers = max_workers
         self._encoder = encoder
+        self._cancel = False
+        self._procs: list[subprocess.Popen] = []
+        self._procs_lock = __import__('threading').Lock()
+
+    def cancel(self) -> None:
+        self._cancel = True
+        with self._procs_lock:
+            for proc in self._procs:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
 
     def _run_one(self, start: float, output: str,
                   portrait_ratio: str | None, crop_center: float) -> str:
         """Encode a single clip. Returns output path on success, raises on error."""
+        if self._cancel:
+            raise RuntimeError("cancelled")
         if self._image_sequence:
             os.makedirs(output, exist_ok=True)
         cmd = build_ffmpeg_command(
@@ -616,9 +631,22 @@ class ExportWorker(QThread):
             image_sequence=self._image_sequence,
             encoder=self._encoder,
         )
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr[-500:] if result.stderr else "ffmpeg failed")
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        with self._procs_lock:
+            self._procs.append(proc)
+        try:
+            _, stderr = proc.communicate(timeout=120)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise RuntimeError("ffmpeg timed out")
+        finally:
+            with self._procs_lock:
+                self._procs.remove(proc)
+        if self._cancel:
+            raise RuntimeError("cancelled")
+        if proc.returncode != 0:
+            msg = stderr.decode(errors='replace')[-500:] if stderr else "ffmpeg failed"
+            raise RuntimeError(msg)
         if self._image_sequence:
             audio_cmd = build_audio_extract_command(self._input, start, output)
             subprocess.run(audio_cmd, capture_output=True, text=True, timeout=60)
@@ -634,6 +662,10 @@ class ExportWorker(QThread):
                     for s, o, pr, cc in self._jobs
                 }
                 for fut in as_completed(futures):
+                    if self._cancel:
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        self.cancelled.emit()
+                        return
                     try:
                         path = fut.result()
                         self.finished.emit(path)
@@ -641,12 +673,18 @@ class ExportWorker(QThread):
                         self.error.emit("ffmpeg not found — is it installed and on PATH?")
                         return
                     except Exception as e:
+                        if self._cancel:
+                            break
                         self.error.emit(str(e))
                         return
         except Exception as e:
-            self.error.emit(str(e))
+            if not self._cancel:
+                self.error.emit(str(e))
             return
-        self.all_done.emit()
+        if self._cancel:
+            self.cancelled.emit()
+        else:
+            self.all_done.emit()
 
 
 class FrameGrabber(QThread):
@@ -1942,6 +1980,11 @@ class MainWindow(QMainWindow):
         self._btn_export.setToolTip("Export clips at cursor position (E)")
         self._btn_export.clicked.connect(self._on_export)
 
+        self._btn_cancel = QPushButton("Cancel")
+        self._btn_cancel.setEnabled(False)
+        self._btn_cancel.setToolTip("Cancel running export")
+        self._btn_cancel.clicked.connect(self._on_cancel_export)
+
         self._btn_delete = QPushButton("Delete")
         self._btn_delete.setEnabled(False)
         self._btn_delete.setToolTip("Delete last export or selected marker from disk and DB")
@@ -1978,6 +2021,7 @@ class MainWindow(QMainWindow):
         transport_row.addStretch()
         transport_row.addWidget(self._lbl_next)
         transport_row.addWidget(self._btn_export)
+        transport_row.addWidget(self._btn_cancel)
         transport_row.addWidget(self._spn_workers)
         transport_row.addWidget(self._btn_delete)
 
@@ -2775,6 +2819,8 @@ class MainWindow(QMainWindow):
         self._export_worker.finished.connect(self._on_clip_done)
         self._export_worker.all_done.connect(self._on_batch_done)
         self._export_worker.error.connect(self._on_export_error)
+        self._export_worker.cancelled.connect(self._on_export_cancelled)
+        self._btn_cancel.setEnabled(True)
         self._export_worker.start()
 
     def _on_clip_done(self, path: str):
@@ -2805,6 +2851,7 @@ class MainWindow(QMainWindow):
     def _on_batch_done(self):
         """Called once after all clips in the batch are done."""
         _log("Batch complete")
+        self._btn_cancel.setEnabled(False)
         self._export_counter += 1
         self._update_next_label()
         self._btn_export.setEnabled(True)
@@ -2827,11 +2874,30 @@ class MainWindow(QMainWindow):
 
     def _on_export_error(self, msg: str):
         _log(f"Export error: {msg}")
+        self._btn_cancel.setEnabled(False)
         self._btn_export.setEnabled(True)
         self._btn_export.setText("Export")
         self._btn_export.setStyleSheet("")
         self._refresh_markers()  # remove stale pending marker
         self.statusBar().showMessage(f"Export error: {msg}")
+
+    def _on_cancel_export(self):
+        if self._export_worker and self._export_worker.isRunning():
+            self._btn_cancel.setEnabled(False)
+            self._export_worker.cancel()
+            self.statusBar().showMessage("Cancelling export…")
+
+    def _on_export_cancelled(self):
+        _log("Export cancelled")
+        self._btn_export.setEnabled(True)
+        self._btn_export.setText("Export")
+        self._btn_export.setStyleSheet("")
+        self._update_next_label()
+        self._refresh_markers()
+        markers = self._db.get_markers(os.path.basename(self._file_path), self._profile)
+        if markers:
+            self._playlist.mark_done(self._file_path, len(markers))
+        self.statusBar().showMessage("Export cancelled", 4000)
 
     def changeEvent(self, event):
         super().changeEvent(event)
