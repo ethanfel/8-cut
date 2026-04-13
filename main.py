@@ -2741,8 +2741,6 @@ class MainWindow(QMainWindow):
             # at or before its start time (keyframes set in lock mode).
             if self._crop_keyframes:
                 for i, (s, o, r, c) in enumerate(jobs):
-                    if r is None:
-                        continue  # no crop → skip
                     center = base_center
                     for kt, kc in self._crop_keyframes:
                         if kt <= s + 0.05:
@@ -2766,8 +2764,8 @@ class MainWindow(QMainWindow):
                 else:
                     ratios = ["1:1"]
                 for idx in indices:
-                    s, o, _, _ = jobs[idx]
-                    jobs[idx] = (s, o, random.choice(ratios), base_center)
+                    s, o, _, c = jobs[idx]
+                    jobs[idx] = (s, o, random.choice(ratios), c)
 
         # Subject tracking: re-detect crop center per sub-clip.
         if self._chk_track.isChecked() and any(j[2] for j in jobs):
