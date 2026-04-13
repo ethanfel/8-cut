@@ -27,6 +27,12 @@ from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QDragEnterEvent, QDropE
 import mpv
 
 
+def _log(*args) -> None:
+    """Print a timestamped log line to stderr."""
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[8-cut {ts}]", *args, file=sys.stderr)
+
+
 def build_export_path(folder: str, basename: str, counter: int, sub: int | None = None) -> str:
     group = f"{basename}_{counter:03d}"
     name = f"{group}_{sub}" if sub is not None else group
@@ -53,11 +59,18 @@ def build_ffmpeg_command(
     portrait_ratio: str | None = None,
     crop_center: float = 0.5,
     image_sequence: bool = False,
+    encoder: str = "libx264",
 ) -> list[str]:
-    # -ss before -i: fast input-seeking. Safe here because we always re-encode
-    # (libx264/aac), so there is no keyframe-alignment issue from pre-input seek.
-    cmd = [
-        "ffmpeg", "-y",
+    # -ss before -i: fast input-seeking. Safe here because we always re-encode,
+    # so there is no keyframe-alignment issue from pre-input seek.
+    cmd = ["ffmpeg", "-y"]
+
+    # VAAPI needs a device for hardware context.
+    if encoder == "h264_vaapi":
+        cmd += ["-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi",
+                "-vaapi_device", "/dev/dri/renderD128"]
+
+    cmd += [
         "-threads", "0",
         "-ss", str(start),
         "-i", input_path,
@@ -70,10 +83,21 @@ def build_ffmpeg_command(
     if short_side is not None:
         # Scale so the shorter dimension equals short_side.
         # if(lt(iw,ih),...) → portrait output: fix width; landscape: fix height.
-        # -2 keeps aspect ratio with even-pixel rounding (libx264 requirement).
+        # -2 keeps aspect ratio with even-pixel rounding (encoder requirement).
         filters.append(
             f"scale='if(lt(iw,ih),{short_side},-2)':'if(lt(iw,ih),-2,{short_side})':flags=lanczos"
         )
+
+    # VAAPI filters need upload to hw surface; crop/scale must happen on CPU
+    # first, then upload back to VAAPI.
+    if encoder == "h264_vaapi":
+        if filters:
+            filters.append("format=nv12")
+            filters.append("hwupload")
+        else:
+            filters.append("format=nv12")
+            filters.append("hwupload")
+
     if filters:
         cmd += ["-vf", ",".join(filters)]
 
@@ -86,7 +110,7 @@ def build_ffmpeg_command(
             os.path.join(output_path, "frame_%04d.webp"),
         ]
     else:
-        cmd += ["-c:v", "libx264", "-c:a", "pcm_s16le", output_path]
+        cmd += ["-c:v", encoder, "-c:a", "pcm_s16le", output_path]
     return cmd
 
 
@@ -157,6 +181,34 @@ def upsert_clip_annotation(folder: str, clip_path: str, label: str) -> None:
         f.write("\n")
 
 
+def detect_hw_encoders() -> list[str]:
+    """Probe ffmpeg for available H.264 hardware encoders.
+
+    Returns a list like ["h264_nvenc", "h264_vaapi", ...].
+    Only includes encoders that ffmpeg reports as available.
+    """
+    _HW_ENCODERS = ["h264_nvenc", "h264_vaapi", "h264_qsv", "h264_amf", "h264_videotoolbox"]
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+        output = result.stdout
+    except Exception:
+        return []
+    available = []
+    for enc in _HW_ENCODERS:
+        if re.search(rf'\b{enc}\b', output):
+            available.append(enc)
+    if available:
+        _log(f"HW encoders detected: {', '.join(available)}")
+    else:
+        _log("No HW encoders detected — GPU export unavailable")
+    return available
+
+
 _RATIOS: dict[str, tuple[int, int]] = {
     "9:16": (9, 16),
     "4:5":  (4, 5),
@@ -207,8 +259,9 @@ class ProcessedDB:
             self._con = sqlite3.connect(db_path, check_same_thread=False)
             self._migrate()
             self._enabled = True
+            _log(f"DB opened: {db_path}")
         except Exception as e:
-            print(f"8-cut: DB unavailable: {e}", file=sys.stderr)
+            _log(f"DB unavailable: {e}")
             self._con = None
             self._enabled = False
 
@@ -439,12 +492,16 @@ class ExportWorker(QThread):
     def __init__(self, input_path: str,
                  jobs: list[tuple[float, str, str | None, float]],
                  short_side: int | None = None,
-                 image_sequence: bool = False):
+                 image_sequence: bool = False,
+                 max_workers: int | None = None,
+                 encoder: str = "libx264"):
         super().__init__()
         self._input = input_path
         self._jobs = jobs  # [(start, output, portrait_ratio, crop_center), ...]
         self._short_side = short_side
         self._image_sequence = image_sequence
+        self._max_workers = max_workers
+        self._encoder = encoder
 
     def _run_one(self, start: float, output: str,
                   portrait_ratio: str | None, crop_center: float) -> str:
@@ -457,6 +514,7 @@ class ExportWorker(QThread):
             portrait_ratio=portrait_ratio,
             crop_center=crop_center,
             image_sequence=self._image_sequence,
+            encoder=self._encoder,
         )
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
@@ -467,7 +525,8 @@ class ExportWorker(QThread):
         return output
 
     def run(self):
-        workers = min(len(self._jobs), os.cpu_count() or 2)
+        cap = self._max_workers or (os.cpu_count() or 2)
+        workers = min(len(self._jobs), cap)
         try:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 futures = {
@@ -820,15 +879,17 @@ class MpvWidget(QWidget):
 
         self._get_proc_addr_fn = _get_proc_addr
 
-        self._player = mpv.MPV(keep_open=True, pause=True, vo="libmpv")
+        self._player = mpv.MPV(keep_open=True, pause=True, vo="libmpv", hwdec="auto")
+        _log("mpv created (hwdec=auto)")
         try:
             self._render_ctx = mpv.MpvRenderContext(
                 self._player, "opengl",
                 opengl_init_params={"get_proc_address": self._get_proc_addr_fn},
             )
             self._render_ctx.update_cb = self._on_mpv_update
+            _log("OpenGL render context ready")
         except Exception as e:
-            print(f"[8-cut] MpvRenderContext failed: {e}", file=sys.stderr)
+            _log(f"MpvRenderContext failed: {e}")
 
         self._gl_ctx.doneCurrent()
 
@@ -909,7 +970,7 @@ class MpvWidget(QWidget):
             self._render_ctx.report_swap()
             self._frame = self._fbo.toImage()
         except Exception as e:
-            print(f"[8-cut] render error: {e}", file=sys.stderr)
+            _log(f"Render error: {e}")
         finally:
             self._gl_ctx.doneCurrent()
         self.update()
@@ -1112,6 +1173,78 @@ class CropBarWidget(QWidget):
         self.crop_changed.emit(self._crop_center)
 
 
+class SnapPreviewWindow(QWidget):
+    """Floating preview window that snaps and docks to the main window edges."""
+
+    _SNAP_DIST = 20  # pixels within which snapping activates
+
+    def __init__(self, main_win: QMainWindow):
+        super().__init__(None, Qt.WindowType.Tool)
+        self._main_win = main_win
+        self._dock_edge: str | None = None  # "left", "right", "top", "bottom" or None
+        self._dock_offset: int = 0  # offset along the docked edge
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if not self._main_win.isVisible():
+            return
+        mg = self._main_win.frameGeometry()
+        pg = self.frameGeometry()
+        snap = self._SNAP_DIST
+
+        # Check each edge for snapping
+        if abs(pg.right() - mg.left()) < snap and self._overlaps_v(pg, mg):
+            self._dock("left", mg, pg)
+        elif abs(pg.left() - mg.right()) < snap and self._overlaps_v(pg, mg):
+            self._dock("right", mg, pg)
+        elif abs(pg.bottom() - mg.top()) < snap and self._overlaps_h(pg, mg):
+            self._dock("top", mg, pg)
+        elif abs(pg.top() - mg.bottom()) < snap and self._overlaps_h(pg, mg):
+            self._dock("bottom", mg, pg)
+        else:
+            self._dock_edge = None
+
+    def _overlaps_v(self, a, b) -> bool:
+        return a.bottom() > b.top() and a.top() < b.bottom()
+
+    def _overlaps_h(self, a, b) -> bool:
+        return a.right() > b.left() and a.left() < b.right()
+
+    def _dock(self, edge: str, mg, pg) -> None:
+        self._dock_edge = edge
+        if edge == "left":
+            x = mg.left() - pg.width()
+            self._dock_offset = pg.top() - mg.top()
+            self.move(x, pg.top())
+        elif edge == "right":
+            x = mg.right()
+            self._dock_offset = pg.top() - mg.top()
+            self.move(x, pg.top())
+        elif edge == "top":
+            y = mg.top() - pg.height()
+            self._dock_offset = pg.left() - mg.left()
+            self.move(pg.left(), y)
+        elif edge == "bottom":
+            y = mg.bottom()
+            self._dock_offset = pg.left() - mg.left()
+            self.move(pg.left(), y)
+
+    def follow_main(self) -> None:
+        """Called by main window on move/resize to keep docked position."""
+        if self._dock_edge is None:
+            return
+        mg = self._main_win.frameGeometry()
+        pw, ph = self.frameGeometry().width(), self.frameGeometry().height()
+        if self._dock_edge == "left":
+            self.move(mg.left() - pw, mg.top() + self._dock_offset)
+        elif self._dock_edge == "right":
+            self.move(mg.right(), mg.top() + self._dock_offset)
+        elif self._dock_edge == "top":
+            self.move(mg.left() + self._dock_offset, mg.top() - ph)
+        elif self._dock_edge == "bottom":
+            self.move(mg.left() + self._dock_offset, mg.bottom())
+
+
 class PlaylistWidget(QListWidget):
     file_selected = pyqtSignal(str)  # emits full path of selected file
 
@@ -1120,6 +1253,7 @@ class PlaylistWidget(QListWidget):
         self.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         self.setMinimumWidth(200)
         self.setWordWrap(True)
+        self.setAlternatingRowColors(True)
         self._paths: list[str] = []
         self._path_set: set[str] = set()  # O(1) duplicate check
         self.itemClicked.connect(self._on_item_clicked)
@@ -1244,8 +1378,9 @@ def main():
         QSpinBox, QDoubleSpinBox { background: #2a2a2a; border: 1px solid #555; padding: 3px; border-radius: 3px; }
         QCheckBox::indicator { width: 14px; height: 14px; }
         QStatusBar { color: #aaa; }
-        QListWidget { background: #252525; }
-        QListWidget::item { padding: 4px; color: #ddd; }
+        QListWidget { background: #252525; alternate-background-color: #2a2a2a; }
+        QListWidget::item { padding: 4px; color: #ccc; }
+        QListWidget::item:alternate { color: #ddd; }
         QListWidget::item:selected { background: #3a6ea8; color: #fff; }
     """)
     win = MainWindow()
@@ -1288,7 +1423,7 @@ class MainWindow(QMainWindow):
         self._end_preview.setStyleSheet("background: #1a1a1a;")
         self._end_preview.setScaledContents(False)
 
-        self._preview_win = QWidget(None, Qt.WindowType.Tool)
+        self._preview_win = SnapPreviewWindow(self)
         self._preview_win.setWindowTitle("End frame")
         self._preview_win.resize(320, 240)
         _pw_layout = QVBoxLayout(self._preview_win)
@@ -1314,6 +1449,9 @@ class MainWindow(QMainWindow):
         self._lbl_file = QLabel("← Drop files onto the queue")
         self._lbl_file.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_file.setStyleSheet("color: #aaa; padding: 6px;")
+        self._lbl_file.setWordWrap(False)
+        from PyQt6.QtWidgets import QSizePolicy
+        self._lbl_file.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
         self._btn_play = QPushButton("▶ Play")
         self._btn_play.setEnabled(False)
@@ -1377,6 +1515,20 @@ class MainWindow(QMainWindow):
         )
         self._cmb_format.currentTextChanged.connect(self._update_next_label)
 
+        self._hw_encoders = detect_hw_encoders()
+        self._chk_hw = QCheckBox("HW encode")
+        if self._hw_encoders:
+            self._chk_hw.setToolTip(f"Use GPU encoder ({self._hw_encoders[0]})")
+            self._chk_hw.setChecked(
+                self._settings.value("hw_encode", "false") == "true"
+            )
+        else:
+            self._chk_hw.setToolTip("No GPU encoder detected")
+            self._chk_hw.setEnabled(False)
+        self._chk_hw.toggled.connect(
+            lambda v: self._settings.setValue("hw_encode", "true" if v else "false")
+        )
+
         self._spn_clips = QSpinBox()
         self._spn_clips.setRange(1, 99)
         self._spn_clips.setToolTip("Number of overlapping 8s clips per export")
@@ -1429,6 +1581,16 @@ class MainWindow(QMainWindow):
             lambda v: self._settings.setValue("rand_square", "true" if v else "false")
         )
         self._chk_rand_square.toggled.connect(self._on_rand_toggle)
+
+        cpu_count = os.cpu_count() or 2
+        self._spn_workers = QSpinBox()
+        self._spn_workers.setRange(1, cpu_count)
+        self._spn_workers.setToolTip("Max parallel ffmpeg workers for export")
+        saved_workers = int(self._settings.value("workers", str(cpu_count)))
+        self._spn_workers.setValue(min(saved_workers, cpu_count))
+        self._spn_workers.valueChanged.connect(
+            lambda v: self._settings.setValue("workers", str(v))
+        )
 
         self._txt_label = QComboBox()
         self._txt_label.setEditable(True)
@@ -1504,6 +1666,7 @@ class MainWindow(QMainWindow):
         transport_row.addStretch()
         transport_row.addWidget(self._lbl_next)
         transport_row.addWidget(self._btn_export)
+        transport_row.addWidget(self._spn_workers)
         transport_row.addWidget(self._btn_delete)
 
         # Row 2 — annotation + output path
@@ -1518,7 +1681,7 @@ class MainWindow(QMainWindow):
         path_row.addWidget(self._txt_folder, stretch=1)
         path_row.addWidget(self._btn_folder)
 
-        # Row 3 — encoding settings (set once per session)
+        # Row 3 — video + encoding settings
         settings_row = QHBoxLayout()
         settings_row.addWidget(QLabel("Resize:"))
         settings_row.addWidget(self._spn_resize)
@@ -1526,6 +1689,7 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(self._cmb_portrait)
         settings_row.addWidget(QLabel("Format:"))
         settings_row.addWidget(self._cmb_format)
+        settings_row.addWidget(self._chk_hw)
         settings_row.addWidget(QLabel("Clips:"))
         settings_row.addWidget(self._spn_clips)
         settings_row.addWidget(QLabel("Spread:"))
@@ -1679,6 +1843,7 @@ class MainWindow(QMainWindow):
         self._refresh_playlist_checks()
         if self._file_path:
             self._refresh_markers()
+            _log(f"Profile switched: {text}")
             self.statusBar().showMessage(f"Profile: {text}", 3000)
 
     def _on_open_files(self) -> None:
@@ -1696,6 +1861,7 @@ class MainWindow(QMainWindow):
         self._file_path = path
         self._lbl_file.setText(os.path.basename(path))
         self.setWindowTitle(f"8-cut — {os.path.basename(path)}")
+        _log(f"Loading: {os.path.basename(path)}")
         self._mpv.load(path)
         # _after_load triggered by MpvWidget.file_loaded signal
 
@@ -1716,7 +1882,10 @@ class MainWindow(QMainWindow):
         self._btn_delete.setEnabled(False)
         self._btn_delete.setText("Delete")
         self._fps = self._mpv.get_fps()
-        self._crop_bar.set_source_ratio(*self._mpv.get_video_size())
+        vw, vh = self._mpv.get_video_size()
+        self._crop_bar.set_source_ratio(vw, vh)
+        hwdec_active = self._mpv._player.hwdec_current or "none"
+        _log(f"Loaded: {vw}x{vh} @ {self._fps:.2f}fps, duration={format_time(dur)}, hwdec={hwdec_active}")
         # Reset export settings to defaults for the new video
         self._spn_clips.setValue(int(self._settings.value("clip_count", "3")))
         self._spn_spread.setValue(float(self._settings.value("spread", "3.0")))
@@ -1768,6 +1937,7 @@ class MainWindow(QMainWindow):
             self._db.delete_by_output_path(output_path)
         self._refresh_markers()
         n = len(deleted) if deleted else 1
+        _log(f"Deleted marker: {n} clip(s) from DB")
         self.statusBar().showMessage(
             f"Deleted marker ({n} clip{'s' if n != 1 else ''})", 4000
         )
@@ -2121,10 +2291,19 @@ class MainWindow(QMainWindow):
         pending.append((self._cursor, self._export_counter, first_out))
         self._timeline.set_markers(pending)
 
+        hw_on = self._chk_hw.isChecked() and self._hw_encoders
+        encoder = self._hw_encoders[0] if hw_on else "libx264"
+        # GPU encoders have a limited number of concurrent sessions
+        # (typically 3–5 on consumer NVIDIA cards), so cap workers.
+        max_workers = min(self._spn_workers.value(), 3) if hw_on else self._spn_workers.value()
+        _log(f"Export: {len(jobs)} clip(s), encoder={encoder}, workers={max_workers}, "
+             f"resize={short_side}, format={fmt}")
         self._export_worker = ExportWorker(
             self._file_path, jobs,
             short_side=short_side,
             image_sequence=image_sequence,
+            max_workers=max_workers,
+            encoder=encoder,
         )
         self._export_worker.finished.connect(self._on_clip_done)
         self._export_worker.all_done.connect(self._on_batch_done)
@@ -2153,10 +2332,12 @@ class MainWindow(QMainWindow):
         folder = self._txt_folder.text()
         upsert_clip_annotation(folder, path, label)
         self._last_export_path = path
+        _log(f"  clip done: {os.path.basename(path)}")
         self.statusBar().showMessage(f"Exported: {os.path.basename(path)}")
 
     def _on_batch_done(self):
         """Called once after all clips in the batch are done."""
+        _log("Batch complete")
         self._export_counter += 1
         self._update_next_label()
         self._btn_export.setEnabled(True)
@@ -2177,10 +2358,35 @@ class MainWindow(QMainWindow):
         self._populate_profile_combo()
 
     def _on_export_error(self, msg: str):
+        _log(f"Export error: {msg}")
         self._btn_export.setEnabled(True)
         self._btn_export.setText("Export")
         self._btn_export.setStyleSheet("")
         self.statusBar().showMessage(f"Export error: {msg}")
+
+    def closeEvent(self, event):
+        _log("Shutting down…")
+        # Stop timers first to prevent callbacks into dead objects.
+        self._preview_timer.stop()
+        self._mpv._render_timer.stop()
+        # Free the OpenGL render context before Qt tears down the GL surface.
+        if self._mpv._render_ctx:
+            self._mpv._render_ctx.free()
+            self._mpv._render_ctx = None
+        # Terminate the mpv player (joins its background threads).
+        self._mpv._player.terminate()
+        self._mpv._fbo = None
+        self._preview_win.close()
+        _log("Shutdown complete")
+        super().closeEvent(event)
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._preview_win.follow_main()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._preview_win.follow_main()
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
