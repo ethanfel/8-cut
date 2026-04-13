@@ -2246,9 +2246,11 @@ class MainWindow(QMainWindow):
         self._spn_spread.setValue(float(self._settings.value("spread", "3.0")))
         self._preview_win.show()
         self._preview_timer.start()
-        # Restore playlist scroll after Qt processes pending layout events.
+        # Restore playlist scroll — layout events from video load trickle in
+        # across several event loop cycles, so restore multiple times.
         if hasattr(self, '_playlist_scroll_stash'):
-            QTimer.singleShot(0, self._restore_playlist_scroll)
+            for delay in (0, 50, 150):
+                QTimer.singleShot(delay, self._restore_playlist_scroll)
 
         # Run DB fuzzy match off the main thread — can be slow on large databases.
         filename = os.path.basename(self._file_path)
