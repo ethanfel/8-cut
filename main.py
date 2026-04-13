@@ -1313,20 +1313,19 @@ class PreviewLabel(QWidget):
     def __init__(self):
         super().__init__()
         self._pixmap: QPixmap | None = None
-        self._portrait_ratio: tuple[int, int] | None = None
+        # list of (ratio, crop_center, color)
+        self._overlays: list[tuple[tuple[int, int], float, QColor]] = []
         self._source_ratio: float = 16 / 9
-        self._crop_center: float = 0.5
         self.setMinimumSize(160, 120)
 
     def setPixmap(self, px: QPixmap) -> None:
         self._pixmap = px
         self.update()
 
-    def set_crop(self, portrait_ratio: tuple[int, int] | None,
-                 source_ratio: float, crop_center: float) -> None:
-        self._portrait_ratio = portrait_ratio
+    def set_overlays(self, overlays: list[tuple[tuple[int, int], float, QColor]],
+                     source_ratio: float) -> None:
+        self._overlays = overlays
         self._source_ratio = source_ratio
-        self._crop_center = crop_center
         self.update()
 
     def sizeHint(self):
@@ -1340,7 +1339,6 @@ class PreviewLabel(QWidget):
             w, h = self.width(), self.height()
             p.fillRect(0, 0, w, h, QColor(26, 26, 26))
             if self._pixmap and not self._pixmap.isNull():
-                # Scale pixmap to fit, centered.
                 scaled = self._pixmap.scaled(
                     w, h,
                     Qt.AspectRatioMode.KeepAspectRatio,
@@ -1349,22 +1347,20 @@ class PreviewLabel(QWidget):
                 ix = (w - scaled.width()) // 2
                 iy = (h - scaled.height()) // 2
                 p.drawPixmap(ix, iy, scaled)
-                # Draw crop lines if portrait mode is active.
-                if self._portrait_ratio is not None:
-                    num, den = self._portrait_ratio
-                    crop_ar = num / den
-                    win_frac = crop_ar / self._source_ratio
-                    if win_frac < 1.0:
-                        iw = scaled.width()
-                        win_px = iw * win_frac
-                        max_x = iw - win_px
-                        cx = ix + int(max_x * self._crop_center)
-                        cw = int(win_px)
-                        pen = QPen(QColor(100, 160, 240, 200))
-                        pen.setWidth(1)
-                        p.setPen(pen)
-                        p.drawLine(cx, iy, cx, iy + scaled.height())
-                        p.drawLine(cx + cw, iy, cx + cw, iy + scaled.height())
+                iw, ih = scaled.width(), scaled.height()
+                for ratio, center, color in self._overlays:
+                    num, den = ratio
+                    win_frac = (num / den) / self._source_ratio
+                    if win_frac >= 1.0:
+                        continue
+                    win_px = int(iw * win_frac)
+                    max_x = iw - win_px
+                    cx = ix + int(max_x * center)
+                    pen = QPen(color)
+                    pen.setWidth(1)
+                    p.setPen(pen)
+                    p.drawLine(cx, iy, cx, iy + ih)
+                    p.drawLine(cx + win_px, iy, cx + win_px, iy + ih)
         finally:
             p.end()
 
@@ -2479,11 +2475,19 @@ class MainWindow(QMainWindow):
             self._update_preview_crop()
 
     def _update_preview_crop(self) -> None:
-        self._end_preview.set_crop(
-            self._crop_bar._portrait_ratio,
-            self._crop_bar._source_ratio,
-            self._crop_bar._crop_center,
-        )
+        overlays: list[tuple[tuple[int, int], float, QColor]] = []
+        center = self._crop_bar._crop_center
+        ratio_text = self._cmb_portrait.currentText()
+        if ratio_text != "Off":
+            # Manual portrait — red lines.
+            overlays.append((_RATIOS[ratio_text], center, QColor(220, 60, 60, 200)))
+        else:
+            # Random modes.
+            if self._chk_rand_portrait.isChecked():
+                overlays.append((_RATIOS["9:16"], center, QColor(220, 60, 60, 200)))
+            if self._chk_rand_square.isChecked():
+                overlays.append((_RATIOS["1:1"], center, QColor(60, 180, 220, 200)))
+        self._end_preview.set_overlays(overlays, self._crop_bar._source_ratio)
 
     # --- Playback ---
 
