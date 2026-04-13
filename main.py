@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QFileDialog, QFrame, QStatusBar,
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
     QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox,
-    QMessageBox, QInputDialog, QScrollBar,
+    QMessageBox, QInputDialog,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QRect, QSize, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
@@ -1497,156 +1497,142 @@ class SnapPreviewWindow(QWidget):
         self._in_dock = False
 
 
-class _LockedScrollBar(QScrollBar):
-    """Vertical scrollbar that ignores programmatic setValue when locked."""
-
-    def __init__(self, *args):
-        super().__init__(*args)
-        self.locked = False
-
-    def setValue(self, v: int) -> None:
-        if self.locked:
-            super().setValue(0)
-        else:
-            super().setValue(v)
-
-
 class PlaylistWidget(QListWidget):
     file_selected = pyqtSignal(str)  # emits full path of selected file
 
     def __init__(self):
         super().__init__()
-        self._locked_sb = _LockedScrollBar(Qt.Orientation.Vertical, self)
-        self.setVerticalScrollBar(self._locked_sb)
         self.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         self.setMinimumWidth(200)
         self.setAlternatingRowColors(True)
         self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
-        self._paths: list[str] = []
-        self._path_set: set[str] = set()  # O(1) duplicate check
-        self._done_set: set[str] = set()  # paths with exported clips
-        self._hidden_basenames: set[str] = set()  # profile-hidden basenames
+        self._paths: list[str] = []           # all paths (full list)
+        self._path_set: set[str] = set()      # O(1) duplicate check
+        self._done_set: set[str] = set()      # paths with exported clips
+        self._done_counts: dict[str, int] = {}  # path → clip count
+        self._hidden_basenames: set[str] = set()
         self._hide_exported = False
+        self._visible: list[str] = []         # paths currently shown in widget
+        self._selected_path: str | None = None
         self.itemClicked.connect(self._on_item_clicked)
 
+    def _is_visible(self, path: str) -> bool:
+        if os.path.basename(path) in self._hidden_basenames:
+            return False
+        if self._hide_exported and path in self._done_set:
+            return False
+        return True
+
+    def _rebuild(self) -> None:
+        """Rebuild the QListWidget from scratch with only visible items."""
+        self.blockSignals(True)
+        self.clear()
+        self._visible = [p for p in self._paths if self._is_visible(p)]
+        for path in self._visible:
+            name = os.path.basename(path)
+            if path in self._done_set:
+                n = self._done_counts.get(path, 0)
+                tag = f"[{n}]" if n else "✓"
+                item = QListWidgetItem(f"{tag} {name}")
+                item.setForeground(QColor(100, 180, 100))
+            else:
+                item = QListWidgetItem(name)
+            self.addItem(item)
+        # Restore selection.
+        if self._selected_path and self._selected_path in self._visible:
+            row = self._visible.index(self._selected_path)
+            self.setCurrentRow(row)
+            self._decorate_current(row)
+        self.blockSignals(False)
+
     def add_files(self, paths: list[str]) -> None:
-        """Append paths not already in queue; auto-select first if queue was empty."""
         was_empty = len(self._paths) == 0
-        self.setUpdatesEnabled(False)
         for path in paths:
             if path not in self._path_set and os.path.isfile(path):
                 self._paths.append(path)
                 self._path_set.add(path)
-                self.addItem(os.path.basename(path))
-        self.setUpdatesEnabled(True)
-        if was_empty and self._paths:
-            self._select_first_visible()
+        self._rebuild()
+        if was_empty and self._visible:
+            self._select(0)
 
     def mark_done(self, path: str, n_clips: int = 0) -> None:
-        """Gray out and show clip count on the queue item for path."""
         if path not in self._path_set:
             return
         self._done_set.add(path)
-        row = self._paths.index(path)
-        item = self.item(row)
-        if item is None:
-            return
-        name = os.path.basename(path)
-        tag = f"[{n_clips}]" if n_clips else "✓"
-        item.setText(f"{tag} {name}")
-        item.setForeground(QColor(100, 180, 100))
+        self._done_counts[path] = n_clips
+        # Update in-place if visible, otherwise rebuild handles it.
+        if path in self._visible:
+            row = self._visible.index(path)
+            item = self.item(row)
+            if item:
+                name = os.path.basename(path)
+                tag = f"[{n_clips}]" if n_clips else "✓"
+                item.setText(f"{tag} {name}")
+                item.setForeground(QColor(100, 180, 100))
 
     def unmark_done(self, path: str) -> None:
-        """Remove the done mark and restore default color."""
         if path not in self._path_set:
             return
         self._done_set.discard(path)
-        row = self._paths.index(path)
-        item = self.item(row)
-        if item is None:
-            return
-        item.setText(os.path.basename(path))
-        item.setForeground(QColor(200, 200, 200))
+        self._done_counts.pop(path, None)
+        if path in self._visible:
+            row = self._visible.index(path)
+            item = self.item(row)
+            if item:
+                item.setText(os.path.basename(path))
+                item.setForeground(QColor(200, 200, 200))
 
     def set_hidden_basenames(self, basenames: set[str]) -> None:
-        """Set the profile-hidden basenames and refresh visibility."""
         self._hidden_basenames = basenames
-        self._apply_visibility()
+        self._rebuild()
 
     def set_hide_exported(self, hide: bool) -> None:
         self._hide_exported = hide
-        self._apply_visibility()
-
-    def _apply_visibility(self) -> None:
-        """Centralized: item is hidden if profile-hidden OR (hide_exported AND done)."""
-        self._locked_sb.locked = True
-        self.setUpdatesEnabled(False)
-        for i, path in enumerate(self._paths):
-            item = self.item(i)
-            if item is None:
-                continue
-            hidden = (os.path.basename(path) in self._hidden_basenames
-                      or (self._hide_exported and path in self._done_set))
-            item.setHidden(hidden)
-        self.setUpdatesEnabled(True)
-        self._locked_sb.locked = False
+        self._rebuild()
 
     def advance(self) -> None:
-        """Move to next visible item in queue."""
         row = self.currentRow()
-        for r in range(row + 1, self.count()):
-            item = self.item(r)
-            if item and not item.isHidden():
-                self._select(r)
-                return
-
-    def _select_first_visible(self) -> None:
-        """Select the first non-hidden item, or item 0 if none hidden."""
-        for r in range(self.count()):
-            item = self.item(r)
-            if item and not item.isHidden():
-                self._select(r)
-                return
-        # Fallback: select first item regardless.
-        if self.count() > 0:
-            self._select(0)
+        if row >= 0 and row < self.count() - 1:
+            self._select(row + 1)
 
     def current_path(self) -> str | None:
         row = self.currentRow()
-        return self._paths[row] if 0 <= row < len(self._paths) else None
+        return self._visible[row] if 0 <= row < len(self._visible) else None
 
     def _select(self, row: int) -> None:
+        """Select a row in the visible list."""
         prev = self.currentRow()
-        self._locked_sb.locked = True
         self.setCurrentRow(row)
-        self._locked_sb.locked = False
-        if prev >= 0 and prev != row and self.item(prev):
-            self._refresh_item_text(prev)
-        item = self.item(row)
-        if item:
-            cur = item.text()
-            # Preserve [N] tag from mark_done.
-            if cur.startswith("[") and "] " in cur:
-                tag = cur[:cur.index("] ") + 2]
-            elif item.foreground().color() == QColor(100, 180, 100):
-                tag = "✓ "
-            else:
-                tag = ""
-            item.setText(f"▶ {tag}{os.path.basename(self._paths[row])}")
-        self.file_selected.emit(self._paths[row])
+        if prev >= 0 and prev != row:
+            self._decorate_prev(prev)
+        if 0 <= row < len(self._visible):
+            self._selected_path = self._visible[row]
+            self._decorate_current(row)
+            self.file_selected.emit(self._visible[row])
 
-    def _refresh_item_text(self, row: int) -> None:
+    def _decorate_current(self, row: int) -> None:
         item = self.item(row)
-        if item is None:
+        if not item:
             return
-        name = os.path.basename(self._paths[row])
-        # Preserve the [N] prefix from mark_done if present.
-        cur = item.text()
-        if cur.startswith("[") and "] " in cur:
-            prefix = cur[:cur.index("] ") + 2]
-            item.setText(f"{prefix}{name}")
-        elif item.foreground().color() == QColor(100, 180, 100):
-            item.setText(f"✓ {name}")
+        path = self._visible[row]
+        name = os.path.basename(path)
+        if path in self._done_set:
+            n = self._done_counts.get(path, 0)
+            tag = f"[{n}] " if n else "✓ "
+        else:
+            tag = ""
+        item.setText(f"▶ {tag}{name}")
+
+    def _decorate_prev(self, row: int) -> None:
+        item = self.item(row)
+        if not item or row >= len(self._visible):
+            return
+        path = self._visible[row]
+        name = os.path.basename(path)
+        if path in self._done_set:
+            n = self._done_counts.get(path, 0)
+            tag = f"[{n}] " if n else "✓ "
+            item.setText(f"{tag}{name}")
         else:
             item.setText(name)
 
@@ -1660,19 +1646,22 @@ class PlaylistWidget(QListWidget):
         if item is None:
             return
         row = self.row(item)
+        if row >= len(self._visible):
+            return
+        path = self._visible[row]
         from PyQt6.QtWidgets import QMenu
         menu = QMenu(self)
-        name = os.path.basename(self._paths[row])
+        name = os.path.basename(path)
         act_remove = menu.addAction(f"Remove: {name}")
         act_hide = menu.addAction(f"Hide in profile: {name}")
         chosen = menu.exec(event.globalPos())
         if chosen == act_remove:
-            path = self._paths.pop(row)
+            self._paths.remove(path)
             self._path_set.discard(path)
             self._done_set.discard(path)
-            self.takeItem(row)
+            self._done_counts.pop(path, None)
+            self._rebuild()
         elif chosen == act_hide:
-            path = self._paths[row]
             self.hide_requested.emit(path)
 
 
@@ -2151,8 +2140,8 @@ class MainWindow(QMainWindow):
             if valid:
                 self._playlist.add_files(valid)
                 self._apply_playlist_filters()
-                self._playlist._select_first_visible()
-                self._playlist.scrollToTop()
+                if self._playlist.count() > 0:
+                    self._playlist._select(0)
                 _log(f"Resumed session: {len(valid)} file(s)")
 
     def _show_shortcuts(self) -> None:
@@ -2246,7 +2235,7 @@ class MainWindow(QMainWindow):
         basename = os.path.basename(path)
         self._db.hide_file(basename, self._profile)
         self._playlist._hidden_basenames.add(basename)
-        self._playlist._apply_visibility()
+        self._playlist._rebuild()
         _log(f"Hidden file: {basename} in profile {self._profile}")
 
     def _apply_playlist_filters(self) -> None:
@@ -2269,7 +2258,6 @@ class MainWindow(QMainWindow):
         self._lbl_file.setText(os.path.basename(path))
         self.setWindowTitle(f"8-cut — {os.path.basename(path)}")
         _log(f"Loading: {os.path.basename(path)}")
-        self._playlist._locked_sb.locked = True
         self._mpv.load(path)
         # _after_load triggered by MpvWidget.file_loaded signal
 
@@ -2300,7 +2288,6 @@ class MainWindow(QMainWindow):
         self._preview_win.show()
         self._preview_timer.start()
         # Unlock scrollbar after Qt finishes processing layout events from load.
-        QTimer.singleShot(200, lambda: setattr(self._playlist._locked_sb, 'locked', False))
 
         # Run DB fuzzy match off the main thread — can be slow on large databases.
         filename = os.path.basename(self._file_path)
@@ -2326,16 +2313,12 @@ class MainWindow(QMainWindow):
     def _refresh_playlist_checks(self) -> None:
         """Re-evaluate marks on every playlist item for the current profile."""
         profile = self._profile
-        self._playlist._locked_sb.locked = True
-        self._playlist.setUpdatesEnabled(False)
         for path in self._playlist._paths:
             markers = self._db.get_markers(os.path.basename(path), profile)
             if markers:
                 self._playlist.mark_done(path, len(markers))
             else:
                 self._playlist.unmark_done(path)
-        self._playlist.setUpdatesEnabled(True)
-        self._playlist._locked_sb.locked = False
 
     def _on_delete_marker(self, output_path: str) -> None:
         deleted = self._db.delete_group(output_path)
