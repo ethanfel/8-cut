@@ -286,3 +286,61 @@ def test_db_stores_label_and_category():
         assert row == ("dog barking", "Animal")
     finally:
         os.unlink(path)
+
+
+def test_db_get_group_returns_all_sub_clips():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    try:
+        db = ProcessedDB(path)
+        db.add("video.mp4", 10.0, "/out/clip_001/clip_001_0.mp4")
+        db.add("video.mp4", 10.0, "/out/clip_001/clip_001_1.mp4")
+        db.add("video.mp4", 10.0, "/out/clip_001/clip_001_2.mp4")
+        group = db.get_group("/out/clip_001/clip_001_0.mp4")
+        assert len(group) == 3
+        assert "/out/clip_001/clip_001_0.mp4" in group
+        assert "/out/clip_001/clip_001_2.mp4" in group
+    finally:
+        os.unlink(path)
+
+
+def test_db_get_group_isolates_by_start_time():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    try:
+        db = ProcessedDB(path)
+        db.add("video.mp4", 10.0, "/out/clip_001/clip_001_0.mp4")
+        db.add("video.mp4", 10.0, "/out/clip_001/clip_001_1.mp4")
+        db.add("video.mp4", 30.0, "/out/clip_002/clip_002_0.mp4")
+        group = db.get_group("/out/clip_001/clip_001_0.mp4")
+        assert len(group) == 2
+    finally:
+        os.unlink(path)
+
+
+def test_db_delete_group_removes_all():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    try:
+        db = ProcessedDB(path)
+        db.add("video.mp4", 10.0, "/out/clip_001/clip_001_0.mp4")
+        db.add("video.mp4", 10.0, "/out/clip_001/clip_001_1.mp4")
+        db.add("video.mp4", 30.0, "/out/clip_002/clip_002_0.mp4")
+        deleted = db.delete_group("/out/clip_001/clip_001_0.mp4")
+        assert len(deleted) == 2
+        # clip_002 should still exist
+        markers = db.get_markers("video.mp4")
+        assert len(markers) == 1
+        assert markers[0][0] == 30.0
+    finally:
+        os.unlink(path)
+
+
+def test_db_get_group_disabled():
+    db = ProcessedDB("/no/such/directory/8cut.db")
+    assert db.get_group("/out/clip_001.mp4") == []
+
+
+def test_db_delete_group_disabled():
+    db = ProcessedDB("/no/such/directory/8cut.db")
+    assert db.delete_group("/out/clip_001.mp4") == []

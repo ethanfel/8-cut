@@ -317,6 +317,46 @@ class ProcessedDB:
         self._con.execute("DELETE FROM processed WHERE output_path = ?", (output_path,))
         self._con.commit()
 
+    def get_group(self, output_path: str) -> list[str]:
+        """Return all output_paths sharing the same (filename, start_time) as *output_path*."""
+        if not self._enabled:
+            return []
+        row = self._con.execute(
+            "SELECT filename, start_time FROM processed WHERE output_path = ?",
+            (output_path,),
+        ).fetchone()
+        if not row:
+            return []
+        rows = self._con.execute(
+            "SELECT output_path FROM processed"
+            " WHERE filename = ? AND start_time = ? ORDER BY output_path",
+            (row[0], row[1]),
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def delete_group(self, output_path: str) -> list[str]:
+        """Delete all rows sharing the same (filename, start_time) as *output_path*.
+        Returns list of deleted output_paths."""
+        if not self._enabled:
+            return []
+        row = self._con.execute(
+            "SELECT filename, start_time FROM processed WHERE output_path = ?",
+            (output_path,),
+        ).fetchone()
+        if not row:
+            return []
+        filename, start_time = row
+        paths = [r[0] for r in self._con.execute(
+            "SELECT output_path FROM processed WHERE filename = ? AND start_time = ?",
+            (filename, start_time),
+        ).fetchall()]
+        self._con.execute(
+            "DELETE FROM processed WHERE filename = ? AND start_time = ?",
+            (filename, start_time),
+        )
+        self._con.commit()
+        return paths
+
     def find_similar(self, filename: str) -> str | None:
         if not self._enabled:
             return None
@@ -1082,6 +1122,19 @@ class PlaylistWidget(QListWidget):
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         self._select(self.row(item))
 
+    def contextMenuEvent(self, event) -> None:
+        item = self.itemAt(event.pos())
+        if item is None:
+            return
+        row = self.row(item)
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        action = menu.addAction(f"Remove: {os.path.basename(self._paths[row])}")
+        if menu.exec(event.globalPos()) == action:
+            path = self._paths.pop(row)
+            self._path_set.discard(path)
+            self.takeItem(row)
+
 
 class _KeyFilter(QObject):
     """Suppress global keyboard shortcuts when a text input widget has focus."""
@@ -1114,6 +1167,11 @@ def main():
         QPushButton:hover { background: #444; }
         QPushButton:disabled { color: #555; }
         QLineEdit { background: #2a2a2a; border: 1px solid #555; padding: 3px; border-radius: 3px; }
+        QComboBox { background: #2a2a2a; border: 1px solid #555; padding: 3px 6px; border-radius: 3px; }
+        QComboBox::drop-down { border: none; }
+        QComboBox QAbstractItemView { background: #2a2a2a; border: 1px solid #555; selection-background-color: #3a6ea8; }
+        QSpinBox, QDoubleSpinBox { background: #2a2a2a; border: 1px solid #555; padding: 3px; border-radius: 3px; }
+        QCheckBox::indicator { width: 14px; height: 14px; }
         QStatusBar { color: #aaa; }
         QListWidget { background: #252525; }
         QListWidget::item { padding: 4px; color: #ddd; }
@@ -1142,6 +1200,7 @@ class MainWindow(QMainWindow):
         self._export_worker: ExportWorker | None = None
         self._last_export_path: str = ""
         self._overwrite_path: str = ""   # set when a marker is selected for re-export
+        self._overwrite_group: list[str] = []  # all output_paths in the selected group
         self._db_worker: _DBWorker | None = None
         self._frame_grabber: FrameGrabber | None = None
         self._fps: float = 25.0  # cached on file load via get_fps()
@@ -1181,39 +1240,47 @@ class MainWindow(QMainWindow):
         self._timeline.marker_clicked.connect(self._on_marker_clicked)
         self._timeline.marker_deselected.connect(self._on_marker_deselected)
 
-        self._lbl_file = QLabel("Drop files onto the queue →")
+        self._lbl_file = QLabel("← Drop files onto the queue")
         self._lbl_file.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._lbl_file.setStyleSheet("color: #aaa; padding: 6px;")
 
         self._btn_play = QPushButton("▶ Play")
         self._btn_play.setEnabled(False)
+        self._btn_play.setToolTip("Play selection loop (Space / P)")
         self._btn_play.clicked.connect(self._on_play)
 
         self._btn_pause = QPushButton("⏸ Pause")
         self._btn_pause.setEnabled(False)
+        self._btn_pause.setToolTip("Pause playback (Space / K)")
         self._btn_pause.clicked.connect(self._on_pause)
 
-        self._lbl_cursor = QLabel("cursor: --")
-        self._lbl_duration = QLabel("dur: --")
+        self._lbl_time = QLabel("-- / --")
 
         self._txt_name = QLineEdit("clip")
         self._txt_name.setPlaceholderText("base name")
         self._txt_name.setMaximumWidth(150)
+        self._txt_name.setToolTip("Base name for exported clips")
         self._txt_name.textChanged.connect(self._reset_counter)
 
         self._txt_folder = QLineEdit(self._settings.value("export_folder", str(Path.home())))
+        self._txt_folder.setToolTip("Export output folder")
         self._txt_folder.textChanged.connect(self._reset_counter)
         self._txt_folder.textChanged.connect(
             lambda v: self._settings.setValue("export_folder", v)
         )
-        self._btn_folder = QPushButton("Browse")
+        self._btn_folder = QPushButton("...")
+        self._btn_folder.setFixedWidth(30)
+        self._btn_folder.setToolTip("Browse for output folder")
         self._btn_folder.clicked.connect(self._pick_folder)
-        self._txt_resize = QLineEdit()
-        self._txt_resize.setPlaceholderText("px (opt.)")
-        self._txt_resize.setMaximumWidth(70)
-        self._txt_resize.setText(self._settings.value("resize_short_side", ""))
-        self._txt_resize.textChanged.connect(
-            lambda v: self._settings.setValue("resize_short_side", v)
+        self._spn_resize = QSpinBox()
+        self._spn_resize.setRange(0, 4320)
+        self._spn_resize.setSingleStep(64)
+        self._spn_resize.setSpecialValueText("off")
+        self._spn_resize.setToolTip("Resize short side in pixels (0 = no resize)")
+        saved_resize = int(self._settings.value("resize_short_side", "0") or "0")
+        self._spn_resize.setValue(saved_resize)
+        self._spn_resize.valueChanged.connect(
+            lambda v: self._settings.setValue("resize_short_side", str(v))
         )
 
         self._crop_center: float = float(
@@ -1222,12 +1289,14 @@ class MainWindow(QMainWindow):
 
         self._cmb_portrait = QComboBox()
         self._cmb_portrait.addItems(["Off", "9:16", "4:5", "1:1"])
+        self._cmb_portrait.setToolTip("Portrait crop ratio (click video to reposition)")
         saved_ratio = self._settings.value("portrait_ratio", "Off")
         idx = self._cmb_portrait.findText(saved_ratio)
         self._cmb_portrait.setCurrentIndex(idx if idx >= 0 else 0)
         self._cmb_portrait.currentTextChanged.connect(self._on_portrait_ratio_changed)
 
         self._cmb_format = QComboBox()
+        self._cmb_format.setToolTip("Export format")
         self._cmb_format.addItems(["MP4", "WebP sequence"])
         saved_fmt = self._settings.value("export_format", "MP4")
         idx = self._cmb_format.findText(saved_fmt)
@@ -1282,7 +1351,8 @@ class MainWindow(QMainWindow):
         self._txt_label.setEditable(True)
         self._txt_label.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._txt_label.lineEdit().setPlaceholderText("Sound label (e.g. dog barking)")
-        self._txt_label.setFixedWidth(220)
+        self._txt_label.setMinimumWidth(180)
+        self._txt_label.setToolTip("SELVA sound label — persists between exports")
         self._txt_label.addItems(self._db.get_labels())
         saved_label = self._settings.value("sound_label", "")
         self._txt_label.setCurrentText(saved_label)
@@ -1291,6 +1361,7 @@ class MainWindow(QMainWindow):
         )
 
         self._cmb_category = QComboBox()
+        self._cmb_category.setToolTip("SELVA sound category")
         self._cmb_category.addItems(_SELVA_CATEGORIES)
         saved_cat = self._settings.value("sound_category", "")
         cat_idx = self._cmb_category.findText(saved_cat)
@@ -1312,41 +1383,44 @@ class MainWindow(QMainWindow):
 
         self._btn_export = QPushButton("Export")
         self._btn_export.setEnabled(False)
+        self._btn_export.setToolTip("Export clips at cursor position (E)")
         self._btn_export.clicked.connect(self._on_export)
 
         self._btn_delete = QPushButton("Delete")
         self._btn_delete.setEnabled(False)
-        self._btn_delete.setToolTip("Delete last export (or selected marker) from disk, DB, and dataset.json")
+        self._btn_delete.setToolTip("Delete last export or selected marker from disk and DB")
         self._btn_delete.clicked.connect(self._on_delete_export)
 
         # Right-side layout (video + controls)
         top_bar = QHBoxLayout()
         top_bar.addWidget(self._lbl_file, stretch=1)
 
-        # Row 1 — transport + annotation + export trigger
+        # Row 1 — transport + export actions
         transport_row = QHBoxLayout()
         transport_row.addWidget(self._btn_play)
         transport_row.addWidget(self._btn_pause)
-        transport_row.addWidget(self._lbl_cursor)
-        transport_row.addWidget(self._lbl_duration)
+        transport_row.addWidget(self._lbl_time)
         transport_row.addStretch()
-        transport_row.addWidget(QLabel("Label:"))
-        transport_row.addWidget(self._txt_label)
-        transport_row.addWidget(QLabel("Cat:"))
-        transport_row.addWidget(self._cmb_category)
         transport_row.addWidget(self._lbl_next)
         transport_row.addWidget(self._btn_export)
         transport_row.addWidget(self._btn_delete)
 
-        # Row 2 — output path + encoding settings (bottom)
+        # Row 2 — annotation + output path
+        path_row = QHBoxLayout()
+        path_row.addWidget(QLabel("Label:"))
+        path_row.addWidget(self._txt_label)
+        path_row.addWidget(QLabel("Cat:"))
+        path_row.addWidget(self._cmb_category)
+        path_row.addWidget(QLabel("Name:"))
+        path_row.addWidget(self._txt_name)
+        path_row.addWidget(QLabel("Folder:"))
+        path_row.addWidget(self._txt_folder, stretch=1)
+        path_row.addWidget(self._btn_folder)
+
+        # Row 3 — encoding settings (set once per session)
         settings_row = QHBoxLayout()
-        settings_row.addWidget(QLabel("Name:"))
-        settings_row.addWidget(self._txt_name)
-        settings_row.addWidget(QLabel("Folder:"))
-        settings_row.addWidget(self._txt_folder, stretch=1)
-        settings_row.addWidget(self._btn_folder)
-        settings_row.addWidget(QLabel("Short side:"))
-        settings_row.addWidget(self._txt_resize)
+        settings_row.addWidget(QLabel("Resize:"))
+        settings_row.addWidget(self._spn_resize)
         settings_row.addWidget(QLabel("Portrait:"))
         settings_row.addWidget(self._cmb_portrait)
         settings_row.addWidget(QLabel("Format:"))
@@ -1356,6 +1430,7 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(QLabel("Spread:"))
         settings_row.addWidget(self._spn_spread)
         settings_row.addWidget(self._chk_rand_portrait)
+        settings_row.addStretch()
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -1366,15 +1441,17 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self._timeline)
         right_layout.addWidget(self._crop_bar)
         right_layout.addLayout(transport_row)
+        right_layout.addLayout(path_row)
         right_layout.addLayout(settings_row)
 
-        # Left: queue label + playlist
-        queue_label = QLabel("Queue")
-        queue_label.setStyleSheet("color: #aaa; padding: 4px;")
+        # Left: queue header + playlist
+        self._btn_open = QPushButton("+ Open Files")
+        self._btn_open.setToolTip("Add video files to the queue")
+        self._btn_open.clicked.connect(self._on_open_files)
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(4, 4, 4, 4)
-        left_layout.addWidget(queue_label)
+        left_layout.addWidget(self._btn_open)
         left_layout.addWidget(self._playlist)
 
         # Root: horizontal splitter
@@ -1425,9 +1502,21 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("M"), self, context=ctx).activated.connect(self._jump_to_next_marker)
         QShortcut(QKeySequence("N"), self, context=ctx).activated.connect(self._playlist.advance)
 
+    def _on_open_files(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Open video files", "",
+            "Video files (*.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv *.ts);;All files (*)",
+        )
+        if paths:
+            self._playlist.add_files(paths)
+            for p in paths:
+                if self._db.get_markers(os.path.basename(p)):
+                    self._playlist.mark_done(p)
+
     def _load_file(self, path: str):
         self._file_path = path
         self._lbl_file.setText(os.path.basename(path))
+        self.setWindowTitle(f"8-cut — {os.path.basename(path)}")
         self._mpv.load(path)
         # _after_load triggered by MpvWidget.file_loaded signal
 
@@ -1435,13 +1524,13 @@ class MainWindow(QMainWindow):
         dur = self._mpv.get_duration()
         self._timeline.set_duration(dur)
         self._cursor = 0.0
-        self._lbl_duration.setText(f"dur: {format_time(dur)}")
-        self._lbl_cursor.setText(f"cursor: {format_time(0.0)}")
+        self._lbl_time.setText(f"{format_time(0.0)} / {format_time(dur)}")
         self._btn_play.setEnabled(True)
         self._btn_pause.setEnabled(True)
         self._btn_export.setEnabled(True)
         # Reset stale state from previous file
         self._overwrite_path = ""
+        self._overwrite_group = []
         self._last_export_path = ""
         self._btn_export.setText("Export")
         self._btn_export.setStyleSheet("")
@@ -1485,19 +1574,29 @@ class MainWindow(QMainWindow):
         self._timeline.set_markers(markers)
 
     def _on_delete_marker(self, output_path: str) -> None:
-        self._db.delete_by_output_path(output_path)
+        deleted = self._db.delete_group(output_path)
+        if not deleted:
+            self._db.delete_by_output_path(output_path)
         self._refresh_markers()
+        n = len(deleted) if deleted else 1
         self.statusBar().showMessage(
-            f"Deleted marker: {os.path.basename(output_path)}", 4000
+            f"Deleted marker ({n} clip{'s' if n != 1 else ''})", 4000
         )
 
     def _on_marker_clicked(self, start_time: float, output_path: str) -> None:
         self._overwrite_path = output_path
-        self._lbl_next.setText(f"↺ {os.path.basename(output_path)}")
+        self._overwrite_group = self._db.get_group(output_path)
+        n = len(self._overwrite_group)
+        group_dir = os.path.basename(os.path.dirname(output_path))
+        if n > 1:
+            self._lbl_next.setText(f"↺ {group_dir} ({n} clips)")
+            self._btn_delete.setText(f"Delete {group_dir} ({n})")
+        else:
+            self._lbl_next.setText(f"↺ {os.path.basename(output_path)}")
+            self._btn_delete.setText(f"Delete {os.path.basename(output_path)}")
         self._btn_export.setText("Overwrite")
         self._btn_export.setStyleSheet("QPushButton { background: #6a3030; border-color: #a04040; }")
         self._btn_delete.setEnabled(True)
-        self._btn_delete.setText(f"Delete {os.path.basename(output_path)}")
         # Restore config from the original export
         meta = self._db.get_by_output_path(output_path)
         if meta:
@@ -1508,7 +1607,7 @@ class MainWindow(QMainWindow):
                 if idx >= 0:
                     self._cmb_category.setCurrentIndex(idx)
             if meta["short_side"] is not None:
-                self._txt_resize.setText(str(meta["short_side"]))
+                self._spn_resize.setValue(meta["short_side"])
             ratio = meta["portrait_ratio"] or "Off"
             idx = self._cmb_portrait.findText(ratio)
             if idx >= 0:
@@ -1522,12 +1621,13 @@ class MainWindow(QMainWindow):
             if meta["spread"]:
                 self._spn_spread.setValue(meta["spread"])
         self.statusBar().showMessage(
-            f"Overwrite mode: {os.path.basename(output_path)} — export to replace", 5000
+            f"Overwrite mode: {group_dir} ({n} clip{'s' if n != 1 else ''}) — export to replace", 5000
         )
 
     def _on_marker_deselected(self) -> None:
         if self._overwrite_path:
             self._overwrite_path = ""
+            self._overwrite_group = []
             self._btn_export.setText("Export")
             self._btn_export.setStyleSheet("")
             self._update_next_label()
@@ -1539,37 +1639,54 @@ class MainWindow(QMainWindow):
         target = self._overwrite_path or self._last_export_path
         if not target:
             return
-        name = os.path.basename(target)
+        # Resolve the full group (all sub-clips at the same start_time)
+        all_paths = self._db.get_group(target)
+        if not all_paths:
+            all_paths = [target]
+        n = len(all_paths)
+        group_dir = os.path.basename(os.path.dirname(all_paths[0]))
+        if n > 1:
+            msg = f"Delete {n} clips in {group_dir} from disk and database?"
+        else:
+            msg = f"Delete {os.path.basename(target)} from disk and database?"
         reply = QMessageBox.question(
-            self, "Delete clip",
-            f"Delete {name} from disk and database?",
+            self, "Delete clips", msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        # Delete from disk
-        if os.path.isdir(target):
-            shutil.rmtree(target, ignore_errors=True)
-            wav = target + ".wav"
-            if os.path.exists(wav):
-                os.remove(wav)
-        elif os.path.exists(target):
-            os.remove(target)
-        # Remove from DB and dataset.json
-        self._db.delete_by_output_path(target)
+        # Delete all group clips from disk
         folder = self._txt_folder.text()
-        remove_clip_annotation(folder, target)
+        for path in all_paths:
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+                wav = path + ".wav"
+                if os.path.exists(wav):
+                    os.remove(wav)
+            elif os.path.exists(path):
+                os.remove(path)
+            remove_clip_annotation(folder, path)
+        # Remove empty group directory
+        parent = os.path.dirname(all_paths[0])
+        try:
+            if os.path.isdir(parent) and not os.listdir(parent):
+                os.rmdir(parent)
+        except OSError:
+            pass
+        # Remove all from DB
+        self._db.delete_group(target)
         # Reset state
         if self._overwrite_path:
             self._overwrite_path = ""
-        if self._last_export_path == target:
+            self._overwrite_group = []
+        if self._last_export_path in all_paths:
             self._last_export_path = ""
             self._export_counter = max(1, self._export_counter - 1)
         self._btn_delete.setEnabled(False)
         self._btn_delete.setText("Delete")
         self._update_next_label()
         self._refresh_markers()
-        self.statusBar().showMessage(f"Deleted: {name}")
+        self.statusBar().showMessage(f"Deleted {n} clip{'s' if n != 1 else ''}: {group_dir}")
 
     def _on_portrait_ratio_changed(self, text: str) -> None:
         ratio = None if text == "Off" else text
@@ -1644,7 +1761,8 @@ class MainWindow(QMainWindow):
 
     def _on_cursor_changed(self, t: float):
         self._cursor = t
-        self._lbl_cursor.setText(f"cursor: {format_time(t)}")
+        dur = self._mpv.get_duration()
+        self._lbl_time.setText(f"{format_time(t)} / {format_time(dur)}")
         self._preview_timer.start()
         if self._mpv.is_playing():
             self._mpv.play_loop(t, t + self._clip_span)
@@ -1682,7 +1800,8 @@ class MainWindow(QMainWindow):
         # Update label and internal state immediately; route the seek through
         # the timeline's debounce timer so rapid key repeats don't hammer mpv.
         self._cursor = new_t
-        self._lbl_cursor.setText(f"cursor: {format_time(new_t)}")
+        dur = self._mpv.get_duration()
+        self._lbl_time.setText(f"{format_time(new_t)} / {format_time(dur)}")
         self._timeline.set_cursor(new_t)
         self._timeline._seek_timer.start()
 
@@ -1747,9 +1866,14 @@ class MainWindow(QMainWindow):
         base_center = self._crop_center
 
         if self._overwrite_path:
-            # Single-clip overwrite mode
-            jobs = [(self._cursor, self._overwrite_path, base_ratio, base_center)]
+            # Group overwrite mode — re-export all sub-clips at this marker
+            group_paths = sorted(self._overwrite_group) if self._overwrite_group else [self._overwrite_path]
+            jobs = []
+            for i, path in enumerate(group_paths):
+                start = self._cursor + i * spread
+                jobs.append((start, path, base_ratio, base_center))
             self._overwrite_path = ""
+            self._overwrite_group = []
         else:
             name = self._txt_name.text() or "clip"
             n_clips = self._spn_clips.value()
@@ -1773,13 +1897,7 @@ class MainWindow(QMainWindow):
                     s, o, _, _ = jobs[idx]
                     jobs[idx] = (s, o, "9:16", base_center)
 
-        raw = self._txt_resize.text().strip()
-        try:
-            short_side = int(raw) if raw else None
-            if short_side is not None and short_side <= 0:
-                short_side = None
-        except ValueError:
-            short_side = None
+        short_side = self._spn_resize.value() or None
 
         # Stash export config for _on_clip_done DB writes
         self._export_short_side = short_side
@@ -1854,8 +1972,6 @@ class MainWindow(QMainWindow):
         self._btn_export.setText("Export")
         self._btn_export.setStyleSheet("")
         self.statusBar().showMessage(f"Export error: {msg}")
-
-    # --- Mask generation ---
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
