@@ -678,6 +678,7 @@ class TimelineWidget(QWidget):
     cursor_changed = pyqtSignal(float)              # emits position in seconds
     seek_changed = pyqtSignal(float)                # emits seek position (lock mode)
     marker_delete_requested = pyqtSignal(str)       # emits output_path
+    keyframe_delete_requested = pyqtSignal(float)   # emits keyframe time
     marker_clicked = pyqtSignal(float, str)         # emits (start_time, output_path)
     marker_deselected = pyqtSignal()                # double-click on empty space
 
@@ -932,22 +933,38 @@ class TimelineWidget(QWidget):
         self._emit_seek()
 
     def contextMenuEvent(self, event):
-        if not self._hover_cache or self._duration <= 0:
+        if self._duration <= 0:
             return
         x = event.pos().x()
         w = self.width()
-        hit_path = None
-        for (frac, output_path) in self._hover_cache:
-            if abs(x - frac * w) <= 10:
-                hit_path = output_path
+        # Check keyframe diamonds first.
+        hit_kf_time = None
+        for (kt, _kc) in self._crop_keyframes:
+            kx = kt / self._duration * w
+            if abs(x - kx) <= 8:
+                hit_kf_time = kt
                 break
-        if hit_path is None:
+        # Check export markers.
+        hit_path = None
+        if self._hover_cache:
+            for (frac, output_path) in self._hover_cache:
+                if abs(x - frac * w) <= 10:
+                    hit_path = output_path
+                    break
+        if hit_kf_time is None and hit_path is None:
             return
         from PyQt6.QtWidgets import QMenu
         menu = QMenu(self)
-        name = os.path.basename(hit_path)
-        action = menu.addAction(f"Delete marker: {name}")
-        if menu.exec(event.globalPos()) == action:
+        act_kf = None
+        act_marker = None
+        if hit_kf_time is not None:
+            act_kf = menu.addAction(f"Delete keyframe @ {format_time(hit_kf_time)}")
+        if hit_path is not None:
+            act_marker = menu.addAction(f"Delete marker: {os.path.basename(hit_path)}")
+        chosen = menu.exec(event.globalPos())
+        if chosen and chosen == act_kf:
+            self.keyframe_delete_requested.emit(hit_kf_time)
+        elif chosen and chosen == act_marker:
             self.marker_delete_requested.emit(hit_path)
 
     def _seek(self, x: float):
@@ -1713,6 +1730,7 @@ class MainWindow(QMainWindow):
         self._timeline.cursor_changed.connect(self._on_cursor_changed)
         self._timeline.seek_changed.connect(self._on_seek_changed)
         self._timeline.marker_delete_requested.connect(self._on_delete_marker)
+        self._timeline.keyframe_delete_requested.connect(self._on_delete_keyframe)
         self._mpv.time_pos_changed.connect(self._timeline.set_play_position)
         self._timeline.marker_clicked.connect(self._on_marker_clicked)
         self._timeline.marker_deselected.connect(self._on_marker_deselected)
@@ -2266,6 +2284,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Deleted marker ({n} clip{'s' if n != 1 else ''})", 4000
         )
+
+    def _on_delete_keyframe(self, time: float) -> None:
+        self._crop_keyframes = [
+            (t, c) for t, c in self._crop_keyframes
+            if abs(t - time) > 0.05
+        ]
+        self._timeline.set_crop_keyframes(self._crop_keyframes)
+        _log(f"Deleted crop keyframe @ {format_time(time)} ({len(self._crop_keyframes)} remaining)")
+        self.statusBar().showMessage(f"Deleted keyframe @ {format_time(time)}", 3000)
 
     def _on_marker_clicked(self, start_time: float, output_path: str) -> None:
         self._overwrite_path = output_path
