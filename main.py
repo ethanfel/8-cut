@@ -13,7 +13,6 @@ import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from difflib import SequenceMatcher
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -230,24 +229,7 @@ def _portrait_crop_filter(ratio: str, crop_center: float) -> str:
     return f"crop={cw}:ih:{x}:0"
 
 
-_QUALITY_RE = re.compile(
-    r'(?<![a-z0-9])(2160p?|4k|8k|1080p?|720p?|480p?|360p?|240p?'
-    r'|hdr|sdr|x264|x265|h264|h265|hevc|avc'
-    r'|blu[-_.]?ray|webrip|web[-_.]dl|dvdrip|hdtv)(?![a-z0-9])',
-    re.IGNORECASE,
-)
-_SEP_RE = re.compile(r'[\s_\-\.]+')
 _SELVA_CATEGORIES = ["", "Human", "Animal", "Vehicle", "Tool", "Music", "Nature", "Sport", "Other"]
-
-
-def _normalize_filename(filename: str) -> str:
-    """Strip extension and common resolution/quality tags for fuzzy comparison."""
-    # Use lookaround assertions instead of \b: \b treats '_' as a word char,
-    # so 'clip_2160p' would not form a word boundary before '2160p'.
-    name = os.path.splitext(filename)[0].lower()
-    name = _QUALITY_RE.sub('', name)
-    name = _SEP_RE.sub('_', name).strip('_')
-    return name
 
 
 # ---------------------------------------------------------------------------
@@ -519,23 +501,6 @@ class ProcessedDB:
         self._con.commit()
         return paths
 
-    def find_similar(self, filename: str, profile: str = "default") -> str | None:
-        if not self._enabled:
-            return None
-        rows = self._con.execute(
-            "SELECT DISTINCT filename FROM processed WHERE profile = ?",
-            (profile,),
-        ).fetchall()
-        norm_new = _normalize_filename(filename)
-        best_ratio, best_match = 0.0, None
-        for (stored,) in rows:
-            ratio = SequenceMatcher(
-                None, norm_new, _normalize_filename(stored)
-            ).ratio()
-            if ratio >= 0.75 and ratio > best_ratio:
-                best_ratio, best_match = ratio, stored
-        return best_match
-
     def _get_markers_for(self, match: str, profile: str = "default") -> list[tuple[float, int, str]]:
         rows = self._con.execute(
             "SELECT start_time, output_path FROM processed"
@@ -552,14 +517,11 @@ class ProcessedDB:
         return list(seen_times.values())
 
     def get_markers(self, filename: str, profile: str = "default") -> list[tuple[float, int, str]]:
-        """Return [(start_time, marker_number, output_path), ...] for the best
-        fuzzy match of filename, sorted by start_time. Empty list if no match."""
+        """Return [(start_time, marker_number, output_path), ...] for exact
+        filename match, sorted by start_time. Empty list if no match."""
         if not self._enabled:
             return []
-        match = self.find_similar(filename, profile)
-        if match is None:
-            return []
-        return self._get_markers_for(match, profile)
+        return self._get_markers_for(filename, profile)
 
     def get_profiles(self) -> list[str]:
         """Return distinct profile names, ordered alphabetically."""
@@ -583,11 +545,10 @@ class _DBWorker(QThread):
 
     def run(self):
         try:
-            match = self._db.find_similar(self._filename, self._profile)
-            markers = self._db._get_markers_for(match, self._profile) if match else []
+            markers = self._db._get_markers_for(self._filename, self._profile)
         except Exception:
-            match, markers = None, []
-        self.result.emit(self._filename, match, markers)
+            markers = []
+        self.result.emit(self._filename, self._filename if markers else None, markers)
 
 
 class ExportWorker(QThread):
@@ -682,6 +643,7 @@ class FrameGrabber(QThread):
 
 class TimelineWidget(QWidget):
     cursor_changed = pyqtSignal(float)              # emits position in seconds
+    seek_changed = pyqtSignal(float)                # emits seek position (lock mode)
     marker_delete_requested = pyqtSignal(str)       # emits output_path
     marker_clicked = pyqtSignal(float, str)         # emits (start_time, output_path)
     marker_deselected = pyqtSignal()                # double-click on empty space
@@ -697,6 +659,8 @@ class TimelineWidget(QWidget):
         self._cursor = 0.0
         self._clip_span = 14.0  # 8 + 2*spread, updated from MainWindow
         self._play_pos: float | None = None  # current playback position (seconds)
+        self._locked = False                 # when True, clicks scrub playback, not cursor
+        self._crop_keyframes: list[tuple[float, float]] = []  # [(time, center)]
         self._markers: list[tuple[float, int, str]] = []
         self._hover_cache: list[tuple[float, str]] = []  # (t/duration, path)
 
@@ -717,7 +681,7 @@ class TimelineWidget(QWidget):
         self._seek_timer = QTimer()
         self._seek_timer.setSingleShot(True)
         self._seek_timer.setInterval(16)  # ~60 fps
-        self._seek_timer.timeout.connect(lambda: self.cursor_changed.emit(self._cursor))
+        self._seek_timer.timeout.connect(self._emit_seek)
 
     def set_duration(self, duration: float):
         self._duration = duration
@@ -745,6 +709,10 @@ class TimelineWidget(QWidget):
 
     def set_play_position(self, t: float | None) -> None:
         self._play_pos = t
+        self.update()
+
+    def set_crop_keyframes(self, kfs: list[tuple[float, float]]) -> None:
+        self._crop_keyframes = kfs
         self.update()
 
     def _rebuild_hover_cache(self) -> None:
@@ -855,6 +823,20 @@ class TimelineWidget(QWidget):
                 p.drawText(mx + 1, rh + 2, 13, 12,
                            Qt.AlignmentFlag.AlignCenter, str(num))
 
+            # ── crop keyframe diamonds ────────────────────────────────────
+            if self._crop_keyframes and self._duration > 0:
+                for (kt, _kc) in self._crop_keyframes:
+                    kx = int(kt / self._duration * w)
+                    d = 4  # half-size of diamond
+                    ky = h - d - 2  # near bottom of track
+                    diamond = QPolygon([
+                        QPoint(kx, ky - d), QPoint(kx + d, ky),
+                        QPoint(kx, ky + d), QPoint(kx - d, ky),
+                    ])
+                    p.setBrush(QColor(255, 180, 0))
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.drawPolygon(diamond)
+
             # ── playhead ──────────────────────────────────────────────────
             p.setPen(self._cursor_pen)
             p.drawLine(x_start, rh, x_start, h)
@@ -905,10 +887,16 @@ class TimelineWidget(QWidget):
         if event.buttons():
             self._seek(x)
 
+    def _emit_seek(self):
+        if self._locked:
+            self.seek_changed.emit(self._play_pos or 0.0)
+        else:
+            self.cursor_changed.emit(self._cursor)
+
     def mouseReleaseEvent(self, event):
         # On release, flush any pending debounced seek immediately.
         self._seek_timer.stop()
-        self.cursor_changed.emit(self._cursor)
+        self._emit_seek()
 
     def contextMenuEvent(self, event):
         if not self._hover_cache or self._duration <= 0:
@@ -931,8 +919,13 @@ class TimelineWidget(QWidget):
 
     def _seek(self, x: float):
         t = self._pos_to_time(int(x))
-        self.set_cursor(t)           # update visuals immediately
-        self._seek_timer.start()     # debounce the mpv seek
+        if self._locked:
+            self._play_pos = t
+            self.update()
+            self._seek_timer.start()
+        else:
+            self.set_cursor(t)           # update visuals immediately
+            self._seek_timer.start()     # debounce the mpv seek
 
 
 import ctypes
@@ -1529,6 +1522,7 @@ class MainWindow(QMainWindow):
         self._db_worker: _DBWorker | None = None
         self._frame_grabber: FrameGrabber | None = None
         self._fps: float = 25.0  # cached on file load via get_fps()
+        self._crop_keyframes: list[tuple[float, float]] = []  # [(time, center), ...] sorted
 
         # Widgets
         self._playlist = PlaylistWidget()
@@ -1560,6 +1554,7 @@ class MainWindow(QMainWindow):
         _init_spread = float(self._settings.value("spread", "3.0"))
         self._timeline.set_clip_span(8.0 + (_init_clips - 1) * _init_spread)
         self._timeline.cursor_changed.connect(self._on_cursor_changed)
+        self._timeline.seek_changed.connect(self._on_seek_changed)
         self._timeline.marker_delete_requested.connect(self._on_delete_marker)
         self._mpv.time_pos_changed.connect(self._timeline.set_play_position)
         self._timeline.marker_clicked.connect(self._on_marker_clicked)
@@ -1581,6 +1576,11 @@ class MainWindow(QMainWindow):
         self._btn_pause.setEnabled(False)
         self._btn_pause.setToolTip("Pause playback (Space / K)")
         self._btn_pause.clicked.connect(self._on_pause)
+
+        self._btn_lock = QPushButton("🔒 Lock")
+        self._btn_lock.setCheckable(True)
+        self._btn_lock.setToolTip("Lock cursor — click/drag scrubs playback without moving the export point")
+        self._btn_lock.toggled.connect(self._on_lock_toggled)
 
         self._lbl_time = QLabel("-- / --")
 
@@ -1793,6 +1793,7 @@ class MainWindow(QMainWindow):
         transport_row = QHBoxLayout()
         transport_row.addWidget(self._btn_play)
         transport_row.addWidget(self._btn_pause)
+        transport_row.addWidget(self._btn_lock)
         transport_row.addWidget(self._lbl_time)
         transport_row.addStretch()
         transport_row.addWidget(self._lbl_next)
@@ -1894,6 +1895,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("E"), self, context=ctx).activated.connect(self._on_export)
         QShortcut(QKeySequence("M"), self, context=ctx).activated.connect(self._jump_to_next_marker)
         QShortcut(QKeySequence("N"), self, context=ctx).activated.connect(self._playlist.advance)
+        QShortcut(QKeySequence("G"), self, context=ctx).activated.connect(self._btn_lock.toggle)
         for key in ("?", "F1"):
             QShortcut(QKeySequence(key), self, context=ctx).activated.connect(self._show_shortcuts)
 
@@ -1909,6 +1911,7 @@ class MainWindow(QMainWindow):
             "<tr><td><b>E</b></td><td>Export</td></tr>"
             "<tr><td><b>M</b></td><td>Jump to next marker</td></tr>"
             "<tr><td><b>N</b></td><td>Next file in playlist</td></tr>"
+            "<tr><td><b>G</b></td><td>Toggle cursor lock</td></tr>"
             "<tr><td><b>? / F1</b></td><td>This help</td></tr>"
             "<tr><td colspan='2'><hr></td></tr>"
             "<tr><td><b>Double-click marker</b></td><td>Enter overwrite mode</td></tr>"
@@ -2043,16 +2046,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_markers(self) -> None:
         filename = os.path.basename(self._file_path)
-        profile = self._profile
-        # After an export we already know the exact stored filename, so skip
-        # the expensive fuzzy match and query directly.
-        if self._db._enabled:
-            markers = self._db._get_markers_for(filename, profile)
-            if not markers:
-                # First export for this file — fall back to fuzzy match once.
-                markers = self._db.get_markers(filename, profile)
-        else:
-            markers = []
+        markers = self._db.get_markers(filename, self._profile)
         self._timeline.set_markers(markers)
 
     def _refresh_playlist_checks(self) -> None:
@@ -2230,7 +2224,26 @@ class MainWindow(QMainWindow):
         any_rand = self._chk_rand_portrait.isChecked() or self._chk_rand_square.isChecked()
         if ratio == "Off" and not any_rand:
             return
-        self._crop_center = max(0.0, min(1.0, frac))
+        frac = max(0.0, min(1.0, frac))
+        if self._btn_lock.isChecked():
+            # Lock mode: set a crop keyframe at the current playback position.
+            play_t = self._timeline._play_pos
+            if play_t is None:
+                play_t = self._cursor
+            # Replace existing keyframe at same time, or insert sorted.
+            self._crop_keyframes = [
+                (t, c) for t, c in self._crop_keyframes
+                if abs(t - play_t) > 0.05
+            ]
+            self._crop_keyframes.append((play_t, frac))
+            self._crop_keyframes.sort()
+            self._timeline.set_crop_keyframes(self._crop_keyframes)
+            _log(f"Crop keyframe: t={play_t:.2f}s center={frac:.3f} ({len(self._crop_keyframes)} total)")
+            self._crop_bar.set_crop_center(frac)
+            if ratio != "Off":
+                self._mpv.set_crop_overlay(_RATIOS[ratio], frac)
+            return
+        self._crop_center = frac
         self._settings.setValue("crop_center", str(self._crop_center))
         self._crop_bar.set_crop_center(self._crop_center)
         if ratio != "Off":
@@ -2268,6 +2281,38 @@ class MainWindow(QMainWindow):
             self._preview_win.adjustSize()
 
     # --- Playback ---
+
+    def _on_lock_toggled(self, locked: bool):
+        self._timeline._locked = locked
+        self._btn_lock.setText("🔒 Lock" if locked else "🔓 Lock")
+        if locked:
+            self._btn_lock.setStyleSheet("background: #4a3000; border-color: #ffd230;")
+        else:
+            self._btn_lock.setStyleSheet("")
+            # Clear keyframes when unlocking.
+            if self._crop_keyframes:
+                n = len(self._crop_keyframes)
+                self._crop_keyframes.clear()
+                self._timeline.set_crop_keyframes([])
+                _log(f"Cleared {n} crop keyframe(s)")
+
+    def _on_seek_changed(self, t: float):
+        """Lock mode: scrub playback without moving the export cursor."""
+        dur = self._mpv.get_duration()
+        self._lbl_time.setText(f"{format_time(t)} / {format_time(dur)}")
+        self._mpv.seek(t)
+        # Update crop bar to show the effective center at this time.
+        if self._crop_keyframes:
+            center = self._crop_center
+            for kt, kc in self._crop_keyframes:
+                if kt <= t + 0.05:
+                    center = kc
+                else:
+                    break
+            self._crop_bar.set_crop_center(center)
+            ratio = self._cmb_portrait.currentText()
+            if ratio != "Off":
+                self._mpv.set_crop_overlay(_RATIOS[ratio], center)
 
     def _on_cursor_changed(self, t: float):
         self._cursor = t
@@ -2399,6 +2444,20 @@ class MainWindow(QMainWindow):
                 else:
                     out = build_export_path(folder, name, self._export_counter, sub=sub)
                 jobs.append((start, out, base_ratio, base_center))
+
+            # Apply crop keyframes: each sub-clip uses the latest keyframe
+            # at or before its start time (keyframes set in lock mode).
+            if self._crop_keyframes:
+                for i, (s, o, r, c) in enumerate(jobs):
+                    if r is None:
+                        continue  # no crop → skip
+                    center = base_center
+                    for kt, kc in self._crop_keyframes:
+                        if kt <= s + 0.05:
+                            center = kc
+                        else:
+                            break
+                    jobs[i] = (s, o, r, center)
 
             # Random crop: ~1 per 3 clips gets a random crop + random position.
             # When both portrait and square are on, they share the quota.

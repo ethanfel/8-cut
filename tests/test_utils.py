@@ -1,6 +1,6 @@
 import tempfile, os, json
 from main import build_export_path, format_time, build_ffmpeg_command, build_sequence_dir, build_audio_extract_command, build_annotation_json_path, upsert_clip_annotation
-from main import _normalize_filename, ProcessedDB
+from main import ProcessedDB
 
 
 def test_build_export_path_first():
@@ -53,63 +53,47 @@ def test_ffmpeg_command_with_resize():
     assert cmd[-1] == "/out/clip_001.mp4"
 
 
-# --- _normalize_filename ---
-
-def test_normalize_strips_extension():
-    assert _normalize_filename("clip.mp4") == "clip"
-
-def test_normalize_strips_resolution():
-    assert _normalize_filename("clip_2160p.mp4") == "clip"
-
-def test_normalize_strips_1080p():
-    assert _normalize_filename("clip_1080p.mkv") == "clip"
-
-def test_normalize_strips_multiple_tags():
-    assert _normalize_filename("show_1080p_HDR.mkv") == "show"
-
-def test_normalize_lowercases():
-    assert _normalize_filename("MyVideo_4K.mp4") == "myvideo"
-
-def test_normalize_collapses_separators():
-    assert _normalize_filename("my__video--2160p.mp4") == "my_video"
-
-
 # --- ProcessedDB ---
 
-def test_db_add_and_find_exact():
+def test_db_add_and_get_markers():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         path = f.name
     try:
         db = ProcessedDB(path)
         db.add("video.mp4", 12.5, "/out/clip_001.mp4")
-        assert db.find_similar("video.mp4") == "video.mp4"
+        markers = db.get_markers("video.mp4")
+        assert len(markers) == 1
+        assert markers[0][0] == 12.5
     finally:
         os.unlink(path)
 
-def test_db_find_similar_resolution_variant():
+def test_db_exact_match_only():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         path = f.name
     try:
         db = ProcessedDB(path)
         db.add("episode_s01e01_2160p.mkv", 0.0, "/out/ep_001.mp4")
-        assert db.find_similar("episode_s01e01_1080p.mkv") == "episode_s01e01_2160p.mkv"
+        # Different filename — no match even if similar
+        assert db.get_markers("episode_s01e01_1080p.mkv") == []
+        # Exact filename — match
+        assert len(db.get_markers("episode_s01e01_2160p.mkv")) == 1
     finally:
         os.unlink(path)
 
-def test_db_find_similar_no_match():
+def test_db_no_match():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         path = f.name
     try:
         db = ProcessedDB(path)
         db.add("alpha.mp4", 0.0, "/out/alpha_001.mp4")
-        assert db.find_similar("completely_different_zzzz.mp4") is None
+        assert db.get_markers("completely_different.mp4") == []
     finally:
         os.unlink(path)
 
 def test_db_disabled_survives_bad_path():
     db = ProcessedDB("/no/such/directory/8cut.db")
     db.add("x.mp4", 0.0, "/out/x_001.mp4")   # must not raise
-    assert db.find_similar("x.mp4") is None
+    assert db.get_markers("x.mp4") == []
 
 def test_db_get_markers_returns_sorted():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
@@ -124,19 +108,6 @@ def test_db_get_markers_returns_sorted():
         assert markers[0] == (10.0, 1, "/out/clip_001.mp4")
         assert markers[1] == (30.0, 2, "/out/clip_002.mp4")
         assert markers[2] == (50.0, 3, "/out/clip_003.mp4")
-    finally:
-        os.unlink(path)
-
-def test_db_get_markers_fuzzy_match():
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        path = f.name
-    try:
-        db = ProcessedDB(path)
-        db.add("show_2160p.mkv", 5.0, "/out/s_001.mp4")
-        markers = db.get_markers("show_1080p.mkv")
-        assert len(markers) == 1
-        assert markers[0][0] == 5.0
-        assert markers[0][2] == "/out/s_001.mp4"
     finally:
         os.unlink(path)
 
@@ -361,20 +332,6 @@ def test_db_markers_isolated_by_profile():
         assert land[0][0] == 10.0
         assert len(port) == 1
         assert port[0][0] == 20.0
-    finally:
-        os.unlink(path)
-
-
-def test_db_find_similar_isolated_by_profile():
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
-        path = f.name
-    try:
-        db = ProcessedDB(path)
-        db.add("episode_2160p.mkv", 0.0, "/out/a.mp4", profile="hires")
-        # Same normalized name but different profile → no match
-        assert db.find_similar("episode_1080p.mkv", profile="lores") is None
-        # Same profile → match
-        assert db.find_similar("episode_1080p.mkv", profile="hires") == "episode_2160p.mkv"
     finally:
         os.unlink(path)
 
