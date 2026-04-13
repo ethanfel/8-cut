@@ -1505,7 +1505,9 @@ class _LockedScrollBar(QScrollBar):
         self.locked = False
 
     def setValue(self, v: int) -> None:
-        if not self.locked:
+        if self.locked:
+            super().setValue(0)
+        else:
             super().setValue(v)
 
 
