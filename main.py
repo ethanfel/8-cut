@@ -1182,7 +1182,8 @@ def main():
         QPushButton:disabled { color: #555; }
         QLineEdit { background: #2a2a2a; border: 1px solid #555; padding: 3px; border-radius: 3px; }
         QComboBox { background: #2a2a2a; border: 1px solid #555; padding: 3px 6px; border-radius: 3px; }
-        QComboBox::drop-down { border: none; }
+        QComboBox::drop-down { subcontrol-position: right center; width: 18px; border-left: 1px solid #444; }
+        QComboBox::down-arrow { image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #888; margin-right: 4px; }
         QComboBox QAbstractItemView { background: #2a2a2a; border: 1px solid #555; selection-background-color: #3a6ea8; }
         QSpinBox, QDoubleSpinBox { background: #2a2a2a; border: 1px solid #555; padding: 3px; border-radius: 3px; }
         QCheckBox::indicator { width: 14px; height: 14px; }
