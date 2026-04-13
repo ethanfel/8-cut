@@ -1450,6 +1450,7 @@ class PlaylistWidget(QListWidget):
 
     def _apply_visibility(self) -> None:
         """Centralized: item is hidden if profile-hidden OR (hide_exported AND done)."""
+        self.setUpdatesEnabled(False)
         for i, path in enumerate(self._paths):
             item = self.item(i)
             if item is None:
@@ -1457,6 +1458,11 @@ class PlaylistWidget(QListWidget):
             hidden = (os.path.basename(path) in self._hidden_basenames
                       or (self._hide_exported and path in self._done_set))
             item.setHidden(hidden)
+        self.setUpdatesEnabled(True)
+        # Restore scroll to current selection.
+        cur = self.currentItem()
+        if cur:
+            self.scrollToItem(cur, QListWidget.ScrollHint.EnsureVisible)
 
     def advance(self) -> None:
         """Move to next visible item in queue."""
@@ -2183,12 +2189,14 @@ class MainWindow(QMainWindow):
     def _refresh_playlist_checks(self) -> None:
         """Re-evaluate marks on every playlist item for the current profile."""
         profile = self._profile
+        self._playlist.setUpdatesEnabled(False)
         for path in self._playlist._paths:
             markers = self._db.get_markers(os.path.basename(path), profile)
             if markers:
                 self._playlist.mark_done(path, len(markers))
             else:
                 self._playlist.unmark_done(path)
+        self._playlist.setUpdatesEnabled(True)
 
     def _on_delete_marker(self, output_path: str) -> None:
         deleted = self._db.delete_group(output_path)
