@@ -1487,6 +1487,7 @@ class PlaylistWidget(QListWidget):
             else:
                 tag = ""
             item.setText(f"▶ {tag}{os.path.basename(self._paths[row])}")
+            self.scrollToItem(item, QListWidget.ScrollHint.EnsureVisible)
         self.file_selected.emit(self._paths[row])
 
     def _refresh_item_text(self, row: int) -> None:
