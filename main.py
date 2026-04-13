@@ -1260,8 +1260,8 @@ class PlaylistWidget(QListWidget):
         super().__init__()
         self.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         self.setMinimumWidth(200)
-        self.setWordWrap(True)
         self.setAlternatingRowColors(True)
+        self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self._paths: list[str] = []
         self._path_set: set[str] = set()  # O(1) duplicate check
         self.itemClicked.connect(self._on_item_clicked)
