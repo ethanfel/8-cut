@@ -2436,9 +2436,12 @@ class MainWindow(QMainWindow):
             self._crop_keyframes.sort()
             self._timeline.set_crop_keyframes(self._crop_keyframes)
             _log(f"Crop keyframe: t={play_t:.2f}s center={frac:.3f} ({len(self._crop_keyframes)} total)")
+            self._crop_center = frac
             self._crop_bar.set_crop_center(frac)
             if ratio != "Off":
                 self._mpv.set_crop_overlay(_RATIOS[ratio], frac)
+            else:
+                self._update_rand_overlays()
             self._update_preview_crop()
             return
         self._crop_center = frac
