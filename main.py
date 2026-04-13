@@ -2152,6 +2152,7 @@ class MainWindow(QMainWindow):
                 self._playlist.add_files(valid)
                 self._apply_playlist_filters()
                 self._playlist._select_first_visible()
+                self._playlist.scrollToTop()
                 _log(f"Resumed session: {len(valid)} file(s)")
 
     def _show_shortcuts(self) -> None:
