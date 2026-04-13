@@ -35,7 +35,7 @@
   <text x="560" y="244" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="110" font-weight="300" fill="#cccccc">-cut</text>
 
   <!-- Tagline -->
-  <text x="640" y="310" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="26" fill="#777" text-anchor="middle">8-second video clips for SELVA datasets</text>
+  <text x="640" y="310" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="26" fill="#777" text-anchor="middle">8-second video clips for foley datasets</text>
 
   <!-- ===== Timeline ===== -->
 

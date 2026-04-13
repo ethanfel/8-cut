@@ -83,7 +83,7 @@
   </g>
 
   <!-- Tagline -->
-  <text x="400" y="72" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" fill="#777">8-second clips for SELVA datasets</text>
+  <text x="400" y="72" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="14" fill="#777">8-second clips for foley datasets</text>
 
   <!-- Duration label in selection -->
   <text x="310" y="130" font-family="'Courier New', monospace" font-size="13" fill="#aad4ff" text-anchor="middle" opacity="0.9">8.0s</text>

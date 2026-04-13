@@ -1,20 +1,20 @@
 # 8-cut
 
 <p align="center">
-  <img src="assets/logo.svg" alt="8-cut — 8-second clips for SELVA datasets" width="720">
+  <img src="assets/logo.svg" alt="8-cut — 8-second clips for foley datasets" width="720">
 </p>
 
 <p align="center">
   <a href="https://github.com/ethanfel/8-cut/blob/master/LICENSE"><img src="https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3"></a>
 </p>
 
-A desktop tool for cutting 8-second clips from video files, designed for building [SELVA](https://github.com/google-deepmind/selva) datasets.
+A desktop tool for cutting 8-second clips from video files, designed for building foley datasets.
 
 ## Overview
 
 8-cut lets you scrub through a video, mark a cut point, and export a batch of overlapping 8-second clips with one keypress. It tracks every export in a local SQLite database so you can resume a session or switch between resolution variants of the same source without duplicating work.
 
-All clips are exactly 8 seconds — a hard constraint of the SELVA format.
+All clips are exactly 8 seconds — the standard length for foley sound datasets.
 
 ## Features
 
@@ -24,7 +24,7 @@ All clips are exactly 8 seconds — a hard constraint of the SELVA format.
 - **Portrait crop** — crop to 9:16, 4:5, or 1:1 before export; click the video or crop bar to reposition
 - **Random portrait** — optionally apply a random portrait crop to a subset of each batch
 - **Resize** — scale short side to a fixed pixel size (e.g. 512)
-- **SELVA annotation** — label and category fields saved to `dataset.json` and the clip database
+- **Sound annotation** — label and category fields saved to `dataset.json` and the clip database
 - **Export history** — timeline markers show previously exported clips; double-click to enter overwrite mode; right-click to delete
 - **Fuzzy matching** — detects resolution variants of the same file (`_2160p` vs `_1080p`) and shares markers between them
 - **End-frame preview** — floating window shows the last frame of the selection region
@@ -103,7 +103,7 @@ output/
     clip_001_0.wav
 ```
 
-### SELVA annotation
+### Sound annotation
 
 Set a **Label** (e.g. "dog barking") and **Category** (Human / Animal / Vehicle / Tool / Music / Nature / Sport / Other) before exporting. These are saved to:
 
