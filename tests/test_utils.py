@@ -344,3 +344,71 @@ def test_db_get_group_disabled():
 def test_db_delete_group_disabled():
     db = ProcessedDB("/no/such/directory/8cut.db")
     assert db.delete_group("/out/clip_001.mp4") == []
+
+
+# --- Profiles ---
+
+def test_db_markers_isolated_by_profile():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    try:
+        db = ProcessedDB(path)
+        db.add("video.mp4", 10.0, "/out/a_001.mp4", profile="landscape")
+        db.add("video.mp4", 20.0, "/out/b_001.mp4", profile="portrait")
+        land = db.get_markers("video.mp4", profile="landscape")
+        port = db.get_markers("video.mp4", profile="portrait")
+        assert len(land) == 1
+        assert land[0][0] == 10.0
+        assert len(port) == 1
+        assert port[0][0] == 20.0
+    finally:
+        os.unlink(path)
+
+
+def test_db_find_similar_isolated_by_profile():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    try:
+        db = ProcessedDB(path)
+        db.add("episode_2160p.mkv", 0.0, "/out/a.mp4", profile="hires")
+        # Same normalized name but different profile → no match
+        assert db.find_similar("episode_1080p.mkv", profile="lores") is None
+        # Same profile → match
+        assert db.find_similar("episode_1080p.mkv", profile="hires") == "episode_2160p.mkv"
+    finally:
+        os.unlink(path)
+
+
+def test_db_get_profiles():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    try:
+        db = ProcessedDB(path)
+        assert db.get_profiles() == []
+        db.add("a.mp4", 0.0, "/out/a.mp4", profile="beta")
+        db.add("b.mp4", 0.0, "/out/b.mp4", profile="alpha")
+        db.add("c.mp4", 0.0, "/out/c.mp4", profile="beta")
+        profiles = db.get_profiles()
+        assert profiles == ["alpha", "beta"]
+    finally:
+        os.unlink(path)
+
+
+def test_db_get_profiles_disabled():
+    db = ProcessedDB("/no/such/directory/8cut.db")
+    assert db.get_profiles() == []
+
+
+def test_db_default_profile_backward_compat():
+    """Existing tests pass without explicit profile — defaults to 'default'."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    try:
+        db = ProcessedDB(path)
+        db.add("video.mp4", 5.0, "/out/clip.mp4")
+        markers = db.get_markers("video.mp4")  # no profile arg
+        assert len(markers) == 1
+        assert markers[0][0] == 5.0
+        assert db.get_profiles() == ["default"]
+    finally:
+        os.unlink(path)

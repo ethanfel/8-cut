@@ -31,6 +31,7 @@ All clips are exactly 8 seconds — the standard length for foley sound datasets
 - **Playlist** — drag-and-drop or use the Open Files button; right-click to remove items
 - **Playback loop** — plays the exact selection region on loop so you can preview what will be exported
 - **Group operations** — delete or overwrite acts on all sub-clips in a batch, not just one
+- **Profiles** — switch between independent marker sets (e.g. "landscape" vs "portrait") for the same video
 
 ## Keyboard shortcuts
 
@@ -128,7 +129,7 @@ Export history is stored in `~/.8cut.db` (SQLite). The database records filename
 pytest tests/ -v
 ```
 
-49 unit tests covering path builders, ffmpeg command generation, time formatting, database operations, group queries, and annotation handling.
+54 unit tests covering path builders, ffmpeg command generation, time formatting, database operations, group queries, profile isolation, and annotation handling.
 
 ## License
 

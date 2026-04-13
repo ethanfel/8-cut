@@ -234,6 +234,7 @@ class ProcessedDB:
                 "  format          TEXT    NOT NULL DEFAULT 'MP4',"
                 "  clip_count      INTEGER NOT NULL DEFAULT 3,"
                 "  spread          REAL    NOT NULL DEFAULT 3.0,"
+                "  profile         TEXT    NOT NULL DEFAULT 'default',"
                 "  processed_at    TEXT    NOT NULL"
                 ")"
             )
@@ -248,6 +249,7 @@ class ProcessedDB:
                 "format":         "TEXT NOT NULL DEFAULT 'MP4'",
                 "clip_count":     "INTEGER NOT NULL DEFAULT 3",
                 "spread":         "REAL NOT NULL DEFAULT 3.0",
+                "profile":        "TEXT NOT NULL DEFAULT 'default'",
             }
             for col, typedef in new_cols.items():
                 if col not in cols:
@@ -263,18 +265,19 @@ class ProcessedDB:
             label: str = "", category: str = "",
             short_side: int | None = None, portrait_ratio: str = "",
             crop_center: float = 0.5, fmt: str = "MP4",
-            clip_count: int = 3, spread: float = 3.0) -> None:
+            clip_count: int = 3, spread: float = 3.0,
+            profile: str = "default") -> None:
         if not self._enabled:
             return
         self._con.execute(
             "INSERT INTO processed"
             " (filename, start_time, output_path, label, category,"
             "  short_side, portrait_ratio, crop_center, format,"
-            "  clip_count, spread, processed_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  clip_count, spread, profile, processed_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (filename, start_time, output_path, label, category,
              short_side, portrait_ratio, crop_center, fmt,
-             clip_count, spread,
+             clip_count, spread, profile,
              datetime.now(timezone.utc).isoformat()),
         )
         self._con.commit()
@@ -357,11 +360,12 @@ class ProcessedDB:
         self._con.commit()
         return paths
 
-    def find_similar(self, filename: str) -> str | None:
+    def find_similar(self, filename: str, profile: str = "default") -> str | None:
         if not self._enabled:
             return None
         rows = self._con.execute(
-            "SELECT DISTINCT filename FROM processed"
+            "SELECT DISTINCT filename FROM processed WHERE profile = ?",
+            (profile,),
         ).fetchall()
         norm_new = _normalize_filename(filename)
         best_ratio, best_match = 0.0, None
@@ -373,11 +377,11 @@ class ProcessedDB:
                 best_ratio, best_match = ratio, stored
         return best_match
 
-    def _get_markers_for(self, match: str) -> list[tuple[float, int, str]]:
+    def _get_markers_for(self, match: str, profile: str = "default") -> list[tuple[float, int, str]]:
         rows = self._con.execute(
             "SELECT start_time, output_path FROM processed"
-            " WHERE filename = ? ORDER BY start_time",
-            (match,),
+            " WHERE filename = ? AND profile = ? ORDER BY start_time",
+            (match, profile),
         ).fetchall()
         # Deduplicate by start_time — batch exports share the same cursor.
         seen_times: dict[float, tuple[float, int, str]] = {}
@@ -388,30 +392,40 @@ class ProcessedDB:
                 seen_times[t] = (t, n, p)
         return list(seen_times.values())
 
-    def get_markers(self, filename: str) -> list[tuple[float, int, str]]:
+    def get_markers(self, filename: str, profile: str = "default") -> list[tuple[float, int, str]]:
         """Return [(start_time, marker_number, output_path), ...] for the best
         fuzzy match of filename, sorted by start_time. Empty list if no match."""
         if not self._enabled:
             return []
-        match = self.find_similar(filename)
+        match = self.find_similar(filename, profile)
         if match is None:
             return []
-        return self._get_markers_for(match)
+        return self._get_markers_for(match, profile)
+
+    def get_profiles(self) -> list[str]:
+        """Return distinct profile names, ordered alphabetically."""
+        if not self._enabled:
+            return []
+        rows = self._con.execute(
+            "SELECT DISTINCT profile FROM processed ORDER BY profile"
+        ).fetchall()
+        return [r[0] for r in rows]
 
 
 class _DBWorker(QThread):
     """Runs ProcessedDB fuzzy-match lookup off the main thread."""
     result = pyqtSignal(str, object, list)  # (queried_filename, match|None, markers)
 
-    def __init__(self, db: "ProcessedDB", filename: str):
+    def __init__(self, db: "ProcessedDB", filename: str, profile: str = "default"):
         super().__init__()
         self._db = db
         self._filename = filename
+        self._profile = profile
 
     def run(self):
         try:
-            match = self._db.find_similar(self._filename)
-            markers = self._db._get_markers_for(match) if match else []
+            match = self._db.find_similar(self._filename, self._profile)
+            markers = self._db._get_markers_for(match, self._profile) if match else []
         except Exception:
             match, markers = None, []
         self.result.emit(self._filename, match, markers)
@@ -1391,9 +1405,24 @@ class MainWindow(QMainWindow):
         self._btn_delete.setToolTip("Delete last export or selected marker from disk and DB")
         self._btn_delete.clicked.connect(self._on_delete_export)
 
+        self._cmb_profile = QComboBox()
+        self._cmb_profile.setEditable(True)
+        self._cmb_profile.setToolTip("Export profile — each profile has its own set of markers")
+        self._cmb_profile.setMinimumWidth(100)
+        existing = self._db.get_profiles()
+        if existing:
+            self._cmb_profile.addItems(existing)
+        else:
+            self._cmb_profile.addItem("default")
+        saved_profile = self._settings.value("profile", "default")
+        self._cmb_profile.setCurrentText(saved_profile)
+        self._cmb_profile.currentTextChanged.connect(self._on_profile_changed)
+
         # Right-side layout (video + controls)
         top_bar = QHBoxLayout()
         top_bar.addWidget(self._lbl_file, stretch=1)
+        top_bar.addWidget(QLabel("Profile:"))
+        top_bar.addWidget(self._cmb_profile)
 
         # Row 1 — transport + export actions
         transport_row = QHBoxLayout()
@@ -1502,6 +1531,16 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("M"), self, context=ctx).activated.connect(self._jump_to_next_marker)
         QShortcut(QKeySequence("N"), self, context=ctx).activated.connect(self._playlist.advance)
 
+    @property
+    def _profile(self) -> str:
+        return self._cmb_profile.currentText().strip() or "default"
+
+    def _on_profile_changed(self, text: str) -> None:
+        self._settings.setValue("profile", text)
+        if self._file_path:
+            self._refresh_markers()
+            self.statusBar().showMessage(f"Profile: {text}", 3000)
+
     def _on_open_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Open video files", "",
@@ -1510,7 +1549,7 @@ class MainWindow(QMainWindow):
         if paths:
             self._playlist.add_files(paths)
             for p in paths:
-                if self._db.get_markers(os.path.basename(p)):
+                if self._db.get_markers(os.path.basename(p), self._profile):
                     self._playlist.mark_done(p)
 
     def _load_file(self, path: str):
@@ -1546,7 +1585,7 @@ class MainWindow(QMainWindow):
 
         # Run DB fuzzy match off the main thread — can be slow on large databases.
         filename = os.path.basename(self._file_path)
-        self._db_worker = _DBWorker(self._db, filename)
+        self._db_worker = _DBWorker(self._db, filename, self._profile)
         self._db_worker.result.connect(self._on_db_result)
         self._db_worker.start()
 
@@ -1562,13 +1601,14 @@ class MainWindow(QMainWindow):
 
     def _refresh_markers(self) -> None:
         filename = os.path.basename(self._file_path)
+        profile = self._profile
         # After an export we already know the exact stored filename, so skip
         # the expensive fuzzy match and query directly.
         if self._db._enabled:
-            markers = self._db._get_markers_for(filename)
+            markers = self._db._get_markers_for(filename, profile)
             if not markers:
                 # First export for this file — fall back to fuzzy match once.
-                markers = self._db.get_markers(filename)
+                markers = self._db.get_markers(filename, profile)
         else:
             markers = []
         self._timeline.set_markers(markers)
@@ -1942,6 +1982,7 @@ class MainWindow(QMainWindow):
             fmt=self._export_format,
             clip_count=self._export_clip_count,
             spread=self._export_spread,
+            profile=self._profile,
         )
         folder = self._txt_folder.text()
         upsert_clip_annotation(folder, path, label)
@@ -1966,6 +2007,13 @@ class MainWindow(QMainWindow):
         self._txt_label.addItems(self._db.get_labels())
         self._txt_label.setCurrentText(current)
         self._txt_label.blockSignals(False)
+        # Refresh profile list so newly typed profiles appear in the dropdown.
+        cur_profile = self._cmb_profile.currentText()
+        self._cmb_profile.blockSignals(True)
+        self._cmb_profile.clear()
+        self._cmb_profile.addItems(self._db.get_profiles() or ["default"])
+        self._cmb_profile.setCurrentText(cur_profile)
+        self._cmb_profile.blockSignals(False)
 
     def _on_export_error(self, msg: str):
         self._btn_export.setEnabled(True)
@@ -1993,7 +2041,7 @@ class MainWindow(QMainWindow):
         if paths:
             self._playlist.add_files(paths)
             for p in paths:
-                if self._db.get_markers(os.path.basename(p)):
+                if self._db.get_markers(os.path.basename(p), self._profile):
                     self._playlist.mark_done(p)
 
 if __name__ == "__main__":
