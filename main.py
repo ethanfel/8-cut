@@ -2213,6 +2213,10 @@ class MainWindow(QMainWindow):
         self._lbl_file.setText(os.path.basename(path))
         self.setWindowTitle(f"8-cut — {os.path.basename(path)}")
         _log(f"Loading: {os.path.basename(path)}")
+        # Stash playlist scroll — video load triggers layout changes that
+        # cause Qt to recalculate the scrollbar.
+        sb = self._playlist.verticalScrollBar()
+        self._playlist_scroll_stash = sb.value() if sb else 0
         self._mpv.load(path)
         # _after_load triggered by MpvWidget.file_loaded signal
 
@@ -2242,6 +2246,10 @@ class MainWindow(QMainWindow):
         self._spn_spread.setValue(float(self._settings.value("spread", "3.0")))
         self._preview_win.show()
         self._preview_timer.start()
+        # Restore playlist scroll that video load disturbed.
+        sb = self._playlist.verticalScrollBar()
+        if sb and hasattr(self, '_playlist_scroll_stash'):
+            sb.setValue(self._playlist_scroll_stash)
 
         # Run DB fuzzy match off the main thread — can be slow on large databases.
         filename = os.path.basename(self._file_path)
