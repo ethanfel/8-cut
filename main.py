@@ -400,6 +400,13 @@ class ProcessedDB:
         self._con.execute(
             "CREATE INDEX IF NOT EXISTS idx_filename ON processed(filename)"
         )
+        self._con.execute(
+            "CREATE TABLE IF NOT EXISTS hidden_files ("
+            "  filename  TEXT NOT NULL,"
+            "  profile   TEXT NOT NULL DEFAULT 'default',"
+            "  PRIMARY KEY (filename, profile)"
+            ")"
+        )
         self._con.commit()
 
     def add(self, filename: str, start_time: float, output_path: str,
@@ -531,6 +538,32 @@ class ProcessedDB:
             "SELECT DISTINCT profile FROM processed ORDER BY profile"
         ).fetchall()
         return [r[0] for r in rows]
+
+    def hide_file(self, filename: str, profile: str = "default") -> None:
+        if not self._enabled:
+            return
+        self._con.execute(
+            "INSERT OR IGNORE INTO hidden_files (filename, profile) VALUES (?, ?)",
+            (filename, profile),
+        )
+        self._con.commit()
+
+    def unhide_file(self, filename: str, profile: str = "default") -> None:
+        if not self._enabled:
+            return
+        self._con.execute(
+            "DELETE FROM hidden_files WHERE filename = ? AND profile = ?",
+            (filename, profile),
+        )
+        self._con.commit()
+
+    def get_hidden_files(self, profile: str = "default") -> set[str]:
+        if not self._enabled:
+            return set()
+        rows = self._con.execute(
+            "SELECT filename FROM hidden_files WHERE profile = ?", (profile,)
+        ).fetchall()
+        return {r[0] for r in rows}
 
 
 class _DBWorker(QThread):
@@ -1362,23 +1395,29 @@ class PlaylistWidget(QListWidget):
         self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self._paths: list[str] = []
         self._path_set: set[str] = set()  # O(1) duplicate check
+        self._done_set: set[str] = set()  # paths with exported clips
+        self._hide_exported = False
         self.itemClicked.connect(self._on_item_clicked)
 
     def add_files(self, paths: list[str]) -> None:
         """Append paths not already in queue; auto-select first if queue was empty."""
         was_empty = len(self._paths) == 0
+        self.setUpdatesEnabled(False)
         for path in paths:
             if path not in self._path_set and os.path.isfile(path):
                 self._paths.append(path)
                 self._path_set.add(path)
                 self.addItem(os.path.basename(path))
+        self.setUpdatesEnabled(True)
         if was_empty and self._paths:
             self._select(0)
+            self.scrollToItem(self.item(0))
 
     def mark_done(self, path: str, n_clips: int = 0) -> None:
         """Gray out and show clip count on the queue item for path."""
         if path not in self._path_set:
             return
+        self._done_set.add(path)
         row = self._paths.index(path)
         item = self.item(row)
         if item is None:
@@ -1387,23 +1426,46 @@ class PlaylistWidget(QListWidget):
         tag = f"[{n_clips}]" if n_clips else "✓"
         item.setText(f"{tag} {name}")
         item.setForeground(QColor(100, 180, 100))
+        if self._hide_exported:
+            item.setHidden(True)
 
     def unmark_done(self, path: str) -> None:
-        """Remove the ✓ prefix and restore default color."""
+        """Remove the done mark and restore default color."""
         if path not in self._path_set:
             return
+        self._done_set.discard(path)
         row = self._paths.index(path)
         item = self.item(row)
         if item is None:
             return
         item.setText(os.path.basename(path))
         item.setForeground(QColor(200, 200, 200))
+        if self._hide_exported:
+            item.setHidden(False)
+
+    def hide_paths(self, basenames: set[str]) -> None:
+        """Hide items whose basename is in the set (profile-based hiding)."""
+        for i, path in enumerate(self._paths):
+            if os.path.basename(path) in basenames:
+                item = self.item(i)
+                if item:
+                    item.setHidden(True)
+
+    def set_hide_exported(self, hide: bool) -> None:
+        self._hide_exported = hide
+        for i, path in enumerate(self._paths):
+            item = self.item(i)
+            if item:
+                item.setHidden(hide and path in self._done_set)
 
     def advance(self) -> None:
-        """Move to next item in queue. Does nothing if at end or nothing selected."""
+        """Move to next visible item in queue."""
         row = self.currentRow()
-        if row >= 0 and row < self.count() - 1:
-            self._select(row + 1)
+        for r in range(row + 1, self.count()):
+            item = self.item(r)
+            if item and not item.isHidden():
+                self._select(r)
+                return
 
     def current_path(self) -> str | None:
         row = self.currentRow()
@@ -1416,8 +1478,15 @@ class PlaylistWidget(QListWidget):
             self._refresh_item_text(prev)
         if self.item(row):
             item = self.item(row)
-            prefix = "✓ " if item.foreground().color() == QColor(100, 180, 100) else ""
-            item.setText(f"▶ {prefix}{os.path.basename(self._paths[row])}")
+            cur = item.text()
+            # Preserve [N] tag from mark_done.
+            if cur.startswith("[") and "] " in cur:
+                tag = cur[:cur.index("] ") + 2]
+            elif item.foreground().color() == QColor(100, 180, 100):
+                tag = "✓ "
+            else:
+                tag = ""
+            item.setText(f"▶ {tag}{os.path.basename(self._paths[row])}")
         self.file_selected.emit(self._paths[row])
 
     def _refresh_item_text(self, row: int) -> None:
@@ -1425,13 +1494,20 @@ class PlaylistWidget(QListWidget):
         if item is None:
             return
         name = os.path.basename(self._paths[row])
-        if item.foreground().color() == QColor(100, 180, 100):
+        # Preserve the [N] prefix from mark_done if present.
+        cur = item.text()
+        if cur.startswith("[") and "] " in cur:
+            prefix = cur[:cur.index("] ") + 2]
+            item.setText(f"{prefix}{name}")
+        elif item.foreground().color() == QColor(100, 180, 100):
             item.setText(f"✓ {name}")
         else:
             item.setText(name)
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         self._select(self.row(item))
+
+    hide_requested = pyqtSignal(str)  # emits full path to hide in current profile
 
     def contextMenuEvent(self, event) -> None:
         item = self.itemAt(event.pos())
@@ -1440,11 +1516,20 @@ class PlaylistWidget(QListWidget):
         row = self.row(item)
         from PyQt6.QtWidgets import QMenu
         menu = QMenu(self)
-        action = menu.addAction(f"Remove: {os.path.basename(self._paths[row])}")
-        if menu.exec(event.globalPos()) == action:
+        name = os.path.basename(self._paths[row])
+        act_remove = menu.addAction(f"Remove: {name}")
+        act_hide = menu.addAction(f"Hide in profile: {name}")
+        chosen = menu.exec(event.globalPos())
+        if chosen == act_remove:
             path = self._paths.pop(row)
             self._path_set.discard(path)
+            self._done_set.discard(path)
             self.takeItem(row)
+        elif chosen == act_hide:
+            path = self._paths[row]
+            self.hide_requested.emit(path)
+            # Visually hide the item immediately.
+            item.setHidden(True)
 
 
 class _KeyFilter(QObject):
@@ -1527,6 +1612,7 @@ class MainWindow(QMainWindow):
         # Widgets
         self._playlist = PlaylistWidget()
         self._playlist.file_selected.connect(self._load_file)
+        self._playlist.hide_requested.connect(self._on_hide_file)
 
         self._mpv = MpvWidget()
         self._mpv.file_loaded.connect(self._after_load)
@@ -1847,10 +1933,21 @@ class MainWindow(QMainWindow):
         self._btn_open = QPushButton("+ Open Files")
         self._btn_open.setToolTip("Add video files to the queue")
         self._btn_open.clicked.connect(self._on_open_files)
+
+        self._chk_hide_exported = QCheckBox("Hide exported")
+        self._chk_hide_exported.setToolTip("Hide files that already have exported clips")
+        self._chk_hide_exported.setChecked(
+            self._settings.value("hide_exported", "false") == "true"
+        )
+        self._chk_hide_exported.toggled.connect(self._on_hide_exported_toggled)
+
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(4, 4, 4, 4)
-        left_layout.addWidget(self._btn_open)
+        left_top = QHBoxLayout()
+        left_top.addWidget(self._btn_open)
+        left_top.addWidget(self._chk_hide_exported)
+        left_layout.addLayout(left_top)
         left_layout.addWidget(self._playlist)
 
         # Root: horizontal splitter
@@ -1898,6 +1995,15 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("G"), self, context=ctx).activated.connect(self._btn_lock.toggle)
         for key in ("?", "F1"):
             QShortcut(QKeySequence(key), self, context=ctx).activated.connect(self._show_shortcuts)
+
+        # Resume last session: reload previous playlist files.
+        session_files = self._settings.value("session_files", [])
+        if session_files:
+            valid = [p for p in session_files if os.path.isfile(p)]
+            if valid:
+                self._playlist.add_files(valid)
+                self._apply_playlist_filters()
+                _log(f"Resumed session: {len(valid)} file(s)")
 
     def _show_shortcuts(self) -> None:
         text = (
@@ -1975,11 +2081,29 @@ class MainWindow(QMainWindow):
             if not self._last_export_path:
                 self._btn_delete.setEnabled(False)
         self._update_next_label()
-        self._refresh_playlist_checks()
+        self._apply_playlist_filters()
         if self._file_path:
             self._refresh_markers()
             _log(f"Profile switched: {text}")
             self.statusBar().showMessage(f"Profile: {text}", 3000)
+
+    def _on_hide_exported_toggled(self, hide: bool) -> None:
+        self._settings.setValue("hide_exported", "true" if hide else "false")
+        self._playlist.set_hide_exported(hide)
+
+    def _on_hide_file(self, path: str) -> None:
+        """Persistently hide a file in the current profile."""
+        self._db.hide_file(os.path.basename(path), self._profile)
+        _log(f"Hidden file: {os.path.basename(path)} in profile {self._profile}")
+
+    def _apply_playlist_filters(self) -> None:
+        """Apply profile-hidden files, export marks, and hide-exported filter."""
+        self._refresh_playlist_checks()
+        hidden = self._db.get_hidden_files(self._profile)
+        if hidden:
+            self._playlist.hide_paths(hidden)
+        if self._chk_hide_exported.isChecked():
+            self._playlist.set_hide_exported(True)
 
     def _on_open_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -1988,10 +2112,7 @@ class MainWindow(QMainWindow):
         )
         if paths:
             self._playlist.add_files(paths)
-            for p in paths:
-                markers = self._db.get_markers(os.path.basename(p), self._profile)
-                if markers:
-                    self._playlist.mark_done(p, len(markers))
+            self._apply_playlist_filters()
 
     def _load_file(self, path: str):
         self._file_path = path
@@ -2593,6 +2714,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         _log("Shutting down…")
+        # Save session playlist for resume.
+        self._settings.setValue("session_files", self._playlist._paths)
         # Stop timers first to prevent callbacks into dead objects.
         self._preview_timer.stop()
         self._mpv._render_timer.stop()
@@ -2636,10 +2759,7 @@ class MainWindow(QMainWindow):
         ]
         if paths:
             self._playlist.add_files(paths)
-            for p in paths:
-                markers = self._db.get_markers(os.path.basename(p), self._profile)
-                if markers:
-                    self._playlist.mark_done(p, len(markers))
+            self._apply_playlist_filters()
 
 if __name__ == "__main__":
     main()
