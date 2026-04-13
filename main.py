@@ -1277,8 +1277,8 @@ class PlaylistWidget(QListWidget):
         if was_empty and self._paths:
             self._select(0)
 
-    def mark_done(self, path: str) -> None:
-        """Gray out and prefix ✓ on the queue item for path."""
+    def mark_done(self, path: str, n_clips: int = 0) -> None:
+        """Gray out and show clip count on the queue item for path."""
         if path not in self._path_set:
             return
         row = self._paths.index(path)
@@ -1286,7 +1286,8 @@ class PlaylistWidget(QListWidget):
         if item is None:
             return
         name = os.path.basename(path)
-        item.setText(f"✓ {name}")
+        tag = f"[{n_clips}]" if n_clips else "✓"
+        item.setText(f"{tag} {name}")
         item.setForeground(QColor(100, 180, 100))
 
     def unmark_done(self, path: str) -> None:
@@ -1393,7 +1394,12 @@ def main():
     """)
     win = MainWindow()
     win.show()
-    sys.exit(app.exec())
+    ret = app.exec()
+    # Prevent SEGV: ensure the MainWindow (and its child C++ objects) is
+    # destroyed while QApplication is still alive, before Python's GC
+    # tears down wrappers in arbitrary order.
+    del win
+    sys.exit(ret)
 
 
 class MainWindow(QMainWindow):
@@ -1862,8 +1868,9 @@ class MainWindow(QMainWindow):
         if paths:
             self._playlist.add_files(paths)
             for p in paths:
-                if self._db.get_markers(os.path.basename(p), self._profile):
-                    self._playlist.mark_done(p)
+                markers = self._db.get_markers(os.path.basename(p), self._profile)
+                if markers:
+                    self._playlist.mark_done(p, len(markers))
 
     def _load_file(self, path: str):
         self._file_path = path
@@ -1931,11 +1938,12 @@ class MainWindow(QMainWindow):
         self._timeline.set_markers(markers)
 
     def _refresh_playlist_checks(self) -> None:
-        """Re-evaluate ✓ marks on every playlist item for the current profile."""
+        """Re-evaluate marks on every playlist item for the current profile."""
         profile = self._profile
         for path in self._playlist._paths:
-            if self._db.get_markers(os.path.basename(path), profile):
-                self._playlist.mark_done(path)
+            markers = self._db.get_markers(os.path.basename(path), profile)
+            if markers:
+                self._playlist.mark_done(path, len(markers))
             else:
                 self._playlist.unmark_done(path)
 
@@ -1944,6 +1952,8 @@ class MainWindow(QMainWindow):
         if not deleted:
             self._db.delete_by_output_path(output_path)
         self._refresh_markers()
+        self._refresh_playlist_checks()
+        self._update_next_label()
         n = len(deleted) if deleted else 1
         _log(f"Deleted marker: {n} clip(s) from DB")
         self.statusBar().showMessage(
@@ -2054,11 +2064,11 @@ class MainWindow(QMainWindow):
             self._overwrite_group = []
         if self._last_export_path in all_paths:
             self._last_export_path = ""
-            self._export_counter = max(1, self._export_counter - 1)
         self._btn_delete.setEnabled(False)
         self._btn_delete.setText("Delete")
         self._update_next_label()
         self._refresh_markers()
+        self._refresh_playlist_checks()
         self.statusBar().showMessage(f"Deleted {n} clip{'s' if n != 1 else ''}: {group_dir}")
 
     def _on_portrait_ratio_changed(self, text: str) -> None:
@@ -2203,16 +2213,14 @@ class MainWindow(QMainWindow):
             self._txt_folder.setText(folder)  # textChanged fires _reset_counter
 
     def _reset_counter(self):
-        # Counter resets to 1 when name or folder changes. ffmpeg's -y flag
-        # will silently overwrite if the same name+folder is reused later.
-        self._export_counter = 1
         self._update_next_label()
 
     def _update_next_label(self):
         folder = self._txt_folder.text()
         name = self._txt_name.text() or "clip"
         is_seq = self._cmb_format.currentText() == "WebP sequence"
-        # Advance past any counter whose sub-clip _0 already exists on disk.
+        # Find the first counter whose sub-clip _0 does not exist on disk.
+        self._export_counter = 1
         while True:
             if is_seq:
                 path = build_sequence_dir(folder, name, self._export_counter, sub=0)
@@ -2365,7 +2373,8 @@ class MainWindow(QMainWindow):
         self._btn_delete.setEnabled(True)
         self._btn_delete.setText("Delete")
         self._refresh_markers()
-        self._playlist.mark_done(self._file_path)
+        markers = self._db.get_markers(os.path.basename(self._file_path), self._profile)
+        self._playlist.mark_done(self._file_path, len(markers))
         # Refresh label history so the new label is immediately selectable.
         current = self._txt_label.currentText()
         self._txt_label.blockSignals(True)
@@ -2430,8 +2439,9 @@ class MainWindow(QMainWindow):
         if paths:
             self._playlist.add_files(paths)
             for p in paths:
-                if self._db.get_markers(os.path.basename(p), self._profile):
-                    self._playlist.mark_done(p)
+                markers = self._db.get_markers(os.path.basename(p), self._profile)
+                if markers:
+                    self._playlist.mark_done(p, len(markers))
 
 if __name__ == "__main__":
     main()
