@@ -2178,6 +2178,7 @@ class MainWindow(QMainWindow):
     def _apply_playlist_filters(self) -> None:
         """Apply profile-hidden files, export marks, and hide-exported filter."""
         self._refresh_playlist_checks()
+        self._playlist._hide_exported = self._chk_hide_exported.isChecked()
         self._playlist.set_hidden_basenames(self._db.get_hidden_files(self._profile))
 
     def _on_open_files(self) -> None:
