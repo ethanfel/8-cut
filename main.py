@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QFileDialog, QFrame, QStatusBar,
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
     QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox,
-    QMessageBox, QInputDialog,
+    QMessageBox, QInputDialog, QScrollBar,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QRect, QSize, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
@@ -1497,11 +1497,25 @@ class SnapPreviewWindow(QWidget):
         self._in_dock = False
 
 
+class _LockedScrollBar(QScrollBar):
+    """Vertical scrollbar that ignores programmatic setValue when locked."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.locked = False
+
+    def setValue(self, v: int) -> None:
+        if not self.locked:
+            super().setValue(v)
+
+
 class PlaylistWidget(QListWidget):
     file_selected = pyqtSignal(str)  # emits full path of selected file
 
     def __init__(self):
         super().__init__()
+        self._locked_sb = _LockedScrollBar(Qt.Orientation.Vertical, self)
+        self.setVerticalScrollBar(self._locked_sb)
         self.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
         self.setMinimumWidth(200)
         self.setAlternatingRowColors(True)
@@ -1511,13 +1525,7 @@ class PlaylistWidget(QListWidget):
         self._done_set: set[str] = set()  # paths with exported clips
         self._hidden_basenames: set[str] = set()  # profile-hidden basenames
         self._hide_exported = False
-        self._scroll_locked = False
         self.itemClicked.connect(self._on_item_clicked)
-
-    def scrollTo(self, index, hint=QAbstractItemView.ScrollHint.EnsureVisible):
-        """Block Qt's internal auto-scroll when the scroll is locked."""
-        if not self._scroll_locked:
-            super().scrollTo(index, hint)
 
     def add_files(self, paths: list[str]) -> None:
         """Append paths not already in queue; auto-select first if queue was empty."""
@@ -1569,7 +1577,7 @@ class PlaylistWidget(QListWidget):
 
     def _apply_visibility(self) -> None:
         """Centralized: item is hidden if profile-hidden OR (hide_exported AND done)."""
-        self._scroll_locked = True
+        self._locked_sb.locked = True
         self.setUpdatesEnabled(False)
         for i, path in enumerate(self._paths):
             item = self.item(i)
@@ -1579,7 +1587,7 @@ class PlaylistWidget(QListWidget):
                       or (self._hide_exported and path in self._done_set))
             item.setHidden(hidden)
         self.setUpdatesEnabled(True)
-        self._scroll_locked = False
+        self._locked_sb.locked = False
 
     def advance(self) -> None:
         """Move to next visible item in queue."""
@@ -1607,9 +1615,9 @@ class PlaylistWidget(QListWidget):
 
     def _select(self, row: int) -> None:
         prev = self.currentRow()
-        self._scroll_locked = True
+        self._locked_sb.locked = True
         self.setCurrentRow(row)
-        self._scroll_locked = False
+        self._locked_sb.locked = False
         if prev >= 0 and prev != row and self.item(prev):
             self._refresh_item_text(prev)
         item = self.item(row)
@@ -2258,7 +2266,7 @@ class MainWindow(QMainWindow):
         self._lbl_file.setText(os.path.basename(path))
         self.setWindowTitle(f"8-cut — {os.path.basename(path)}")
         _log(f"Loading: {os.path.basename(path)}")
-        self._playlist._scroll_locked = True
+        self._playlist._locked_sb.locked = True
         self._mpv.load(path)
         # _after_load triggered by MpvWidget.file_loaded signal
 
@@ -2288,7 +2296,8 @@ class MainWindow(QMainWindow):
         self._spn_spread.setValue(float(self._settings.value("spread", "3.0")))
         self._preview_win.show()
         self._preview_timer.start()
-        self._playlist._scroll_locked = False
+        # Unlock scrollbar after Qt finishes processing layout events from load.
+        QTimer.singleShot(200, lambda: setattr(self._playlist._locked_sb, 'locked', False))
 
         # Run DB fuzzy match off the main thread — can be slow on large databases.
         filename = os.path.basename(self._file_path)
@@ -2314,7 +2323,7 @@ class MainWindow(QMainWindow):
     def _refresh_playlist_checks(self) -> None:
         """Re-evaluate marks on every playlist item for the current profile."""
         profile = self._profile
-        self._playlist._scroll_locked = True
+        self._playlist._locked_sb.locked = True
         self._playlist.setUpdatesEnabled(False)
         for path in self._playlist._paths:
             markers = self._db.get_markers(os.path.basename(path), profile)
@@ -2323,7 +2332,7 @@ class MainWindow(QMainWindow):
             else:
                 self._playlist.unmark_done(path)
         self._playlist.setUpdatesEnabled(True)
-        self._playlist._scroll_locked = False
+        self._playlist._locked_sb.locked = False
 
     def _on_delete_marker(self, output_path: str) -> None:
         deleted = self._db.delete_group(output_path)
