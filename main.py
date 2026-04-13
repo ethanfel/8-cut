@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox,
     QMessageBox, QInputDialog,
 )
-from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QRect, pyqtSignal, QSettings
+from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QRect, QSize, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
 import mpv
 
@@ -1307,6 +1307,73 @@ class CropBarWidget(QWidget):
         self.crop_changed.emit(self._crop_center)
 
 
+class PreviewLabel(QWidget):
+    """Displays a pixmap with optional crop region overlay lines."""
+
+    def __init__(self):
+        super().__init__()
+        self._pixmap: QPixmap | None = None
+        self._portrait_ratio: tuple[int, int] | None = None
+        self._source_ratio: float = 16 / 9
+        self._crop_center: float = 0.5
+        self.setMinimumSize(160, 120)
+
+    def setPixmap(self, px: QPixmap) -> None:
+        self._pixmap = px
+        self.update()
+
+    def set_crop(self, portrait_ratio: tuple[int, int] | None,
+                 source_ratio: float, crop_center: float) -> None:
+        self._portrait_ratio = portrait_ratio
+        self._source_ratio = source_ratio
+        self._crop_center = crop_center
+        self.update()
+
+    def sizeHint(self):
+        if self._pixmap:
+            return self._pixmap.size()
+        return QSize(320, 240)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        try:
+            w, h = self.width(), self.height()
+            p.fillRect(0, 0, w, h, QColor(26, 26, 26))
+            if self._pixmap and not self._pixmap.isNull():
+                # Scale pixmap to fit, centered.
+                scaled = self._pixmap.scaled(
+                    w, h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                ix = (w - scaled.width()) // 2
+                iy = (h - scaled.height()) // 2
+                p.drawPixmap(ix, iy, scaled)
+                # Draw crop lines if portrait mode is active.
+                if self._portrait_ratio is not None:
+                    num, den = self._portrait_ratio
+                    crop_ar = num / den
+                    win_frac = crop_ar / self._source_ratio
+                    if win_frac < 1.0:
+                        iw = scaled.width()
+                        win_px = iw * win_frac
+                        max_x = iw - win_px
+                        cx = ix + int(max_x * self._crop_center)
+                        cw = int(win_px)
+                        # Dim outside crop region.
+                        dim = QColor(0, 0, 0, 120)
+                        p.fillRect(ix, iy, int(cx - ix), scaled.height(), dim)
+                        p.fillRect(cx + cw, iy, ix + iw - cx - cw, scaled.height(), dim)
+                        # Crop border lines.
+                        pen = QPen(QColor(100, 160, 240, 200))
+                        pen.setWidth(1)
+                        p.setPen(pen)
+                        p.drawLine(cx, iy, cx, iy + scaled.height())
+                        p.drawLine(cx + cw, iy, cx + cw, iy + scaled.height())
+        finally:
+            p.end()
+
+
 class SnapPreviewWindow(QWidget):
     """Floating preview window that snaps and docks to the main window edges."""
 
@@ -1633,10 +1700,7 @@ class MainWindow(QMainWindow):
         self._mpv = MpvWidget()
         self._mpv.file_loaded.connect(self._after_load)
 
-        self._end_preview = QLabel()
-        self._end_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._end_preview.setStyleSheet("background: #1a1a1a;")
-        self._end_preview.setScaledContents(False)
+        self._end_preview = PreviewLabel()
 
         self._preview_win = SnapPreviewWindow(self)
         self._preview_win.setWindowTitle("End frame")
@@ -2332,6 +2396,7 @@ class MainWindow(QMainWindow):
             # Fall back to random overlay guides (or hide)
             self._update_rand_overlays()
         self._settings.setValue("portrait_ratio", text)
+        self._update_preview_crop()
 
     def _on_rand_toggle(self, _checked: bool = False) -> None:
         ratio_text = self._cmb_portrait.currentText()
@@ -2381,6 +2446,7 @@ class MainWindow(QMainWindow):
             self._crop_bar.set_crop_center(frac)
             if ratio != "Off":
                 self._mpv.set_crop_overlay(_RATIOS[ratio], frac)
+            self._update_preview_crop()
             return
         self._crop_center = frac
         self._settings.setValue("crop_center", str(self._crop_center))
@@ -2389,6 +2455,7 @@ class MainWindow(QMainWindow):
             self._mpv.set_crop_overlay(_RATIOS[ratio], self._crop_center)
         else:
             self._update_rand_overlays()
+        self._update_preview_crop()
 
     # --- End-frame preview ---
 
@@ -2411,13 +2478,15 @@ class MainWindow(QMainWindow):
         px = QPixmap()
         px.loadFromData(png_data)
         if not px.isNull():
-            scaled = px.scaled(
-                320, 240,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            self._end_preview.setPixmap(scaled)
-            self._preview_win.adjustSize()
+            self._end_preview.setPixmap(px)
+            self._update_preview_crop()
+
+    def _update_preview_crop(self) -> None:
+        self._end_preview.set_crop(
+            self._crop_bar._portrait_ratio,
+            self._crop_bar._source_ratio,
+            self._crop_bar._crop_center,
+        )
 
     # --- Playback ---
 
