@@ -1584,8 +1584,6 @@ class PlaylistWidget(QListWidget):
             else:
                 tag = ""
             item.setText(f"▶ {tag}{os.path.basename(self._paths[row])}")
-            # If the item is off-screen, scroll just enough to show it.
-            self.scrollToItem(item, QListWidget.ScrollHint.EnsureVisible)
         self.file_selected.emit(self._paths[row])
 
     def _refresh_item_text(self, row: int) -> None:
