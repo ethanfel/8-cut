@@ -1287,7 +1287,7 @@ class SnapPreviewWindow(QWidget):
     _SNAP_DIST = 20  # pixels within which snapping activates
 
     def __init__(self, main_win: QMainWindow):
-        super().__init__(None, Qt.WindowType.Tool)
+        super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.WindowStaysOnTopHint)
         self._main_win = main_win
         self._dock_edge: str | None = None  # "left", "right", "top", "bottom" or None
         self._dock_offset: int = 0  # offset along the docked edge
@@ -2525,6 +2525,12 @@ class MainWindow(QMainWindow):
         self._btn_export.setStyleSheet("")
         self._refresh_markers()  # remove stale pending marker
         self.statusBar().showMessage(f"Export error: {msg}")
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == event.Type.ActivationChange and self.isActiveWindow():
+            if self._preview_win.isVisible():
+                self._preview_win.raise_()
 
     def closeEvent(self, event):
         _log("Shutting down…")
