@@ -2246,10 +2246,9 @@ class MainWindow(QMainWindow):
         self._spn_spread.setValue(float(self._settings.value("spread", "3.0")))
         self._preview_win.show()
         self._preview_timer.start()
-        # Restore playlist scroll that video load disturbed.
-        sb = self._playlist.verticalScrollBar()
-        if sb and hasattr(self, '_playlist_scroll_stash'):
-            sb.setValue(self._playlist_scroll_stash)
+        # Restore playlist scroll after Qt processes pending layout events.
+        if hasattr(self, '_playlist_scroll_stash'):
+            QTimer.singleShot(0, self._restore_playlist_scroll)
 
         # Run DB fuzzy match off the main thread — can be slow on large databases.
         filename = os.path.basename(self._file_path)
@@ -2266,6 +2265,11 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().clearMessage()
         self._timeline.set_markers(markers)
+
+    def _restore_playlist_scroll(self) -> None:
+        sb = self._playlist.verticalScrollBar()
+        if sb:
+            sb.setValue(self._playlist_scroll_stash)
 
     def _refresh_markers(self) -> None:
         filename = os.path.basename(self._file_path)
