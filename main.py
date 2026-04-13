@@ -1538,6 +1538,16 @@ class MainWindow(QMainWindow):
 
     def _on_profile_changed(self, text: str) -> None:
         self._settings.setValue("profile", text)
+        # Clear overwrite state — the selected marker belongs to the old profile
+        if self._overwrite_path:
+            self._overwrite_path = ""
+            self._overwrite_group = []
+            self._btn_export.setText("Export")
+            self._btn_export.setStyleSheet("")
+            self._btn_delete.setText("Delete")
+            if not self._last_export_path:
+                self._btn_delete.setEnabled(False)
+        self._update_next_label()
         if self._file_path:
             self._refresh_markers()
             self.statusBar().showMessage(f"Profile: {text}", 3000)
