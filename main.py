@@ -1473,7 +1473,13 @@ class PlaylistWidget(QListWidget):
         self._done_set: set[str] = set()  # paths with exported clips
         self._hidden_basenames: set[str] = set()  # profile-hidden basenames
         self._hide_exported = False
+        self._scroll_locked = False
         self.itemClicked.connect(self._on_item_clicked)
+
+    def scrollTo(self, index, hint=QAbstractItemView.ScrollHint.EnsureVisible):
+        """Block Qt's internal auto-scroll when the scroll is locked."""
+        if not self._scroll_locked:
+            super().scrollTo(index, hint)
 
     def add_files(self, paths: list[str]) -> None:
         """Append paths not already in queue; auto-select first if queue was empty."""
@@ -1525,8 +1531,7 @@ class PlaylistWidget(QListWidget):
 
     def _apply_visibility(self) -> None:
         """Centralized: item is hidden if profile-hidden OR (hide_exported AND done)."""
-        sb = self.verticalScrollBar()
-        pos = sb.value() if sb else 0
+        self._scroll_locked = True
         self.setUpdatesEnabled(False)
         for i, path in enumerate(self._paths):
             item = self.item(i)
@@ -1536,8 +1541,7 @@ class PlaylistWidget(QListWidget):
                       or (self._hide_exported and path in self._done_set))
             item.setHidden(hidden)
         self.setUpdatesEnabled(True)
-        if sb:
-            sb.setValue(pos)
+        self._scroll_locked = False
 
     def advance(self) -> None:
         """Move to next visible item in queue."""
@@ -1565,12 +1569,9 @@ class PlaylistWidget(QListWidget):
 
     def _select(self, row: int) -> None:
         prev = self.currentRow()
-        # Save scroll position — setCurrentRow triggers Qt internal scroll.
-        sb = self.verticalScrollBar()
-        scroll_pos = sb.value() if sb else 0
+        self._scroll_locked = True
         self.setCurrentRow(row)
-        if sb:
-            sb.setValue(scroll_pos)
+        self._scroll_locked = False
         if prev >= 0 and prev != row and self.item(prev):
             self._refresh_item_text(prev)
         item = self.item(row)
@@ -2213,10 +2214,7 @@ class MainWindow(QMainWindow):
         self._lbl_file.setText(os.path.basename(path))
         self.setWindowTitle(f"8-cut — {os.path.basename(path)}")
         _log(f"Loading: {os.path.basename(path)}")
-        # Stash playlist scroll — video load triggers layout changes that
-        # cause Qt to recalculate the scrollbar.
-        sb = self._playlist.verticalScrollBar()
-        self._playlist_scroll_stash = sb.value() if sb else 0
+        self._playlist._scroll_locked = True
         self._mpv.load(path)
         # _after_load triggered by MpvWidget.file_loaded signal
 
@@ -2246,11 +2244,7 @@ class MainWindow(QMainWindow):
         self._spn_spread.setValue(float(self._settings.value("spread", "3.0")))
         self._preview_win.show()
         self._preview_timer.start()
-        # Restore playlist scroll — layout events from video load trickle in
-        # across several event loop cycles, so restore multiple times.
-        if hasattr(self, '_playlist_scroll_stash'):
-            for delay in (0, 50, 150):
-                QTimer.singleShot(delay, self._restore_playlist_scroll)
+        self._playlist._scroll_locked = False
 
         # Run DB fuzzy match off the main thread — can be slow on large databases.
         filename = os.path.basename(self._file_path)
@@ -2268,11 +2262,6 @@ class MainWindow(QMainWindow):
             self.statusBar().clearMessage()
         self._timeline.set_markers(markers)
 
-    def _restore_playlist_scroll(self) -> None:
-        sb = self._playlist.verticalScrollBar()
-        if sb:
-            sb.setValue(self._playlist_scroll_stash)
-
     def _refresh_markers(self) -> None:
         filename = os.path.basename(self._file_path)
         markers = self._db.get_markers(filename, self._profile)
@@ -2281,8 +2270,7 @@ class MainWindow(QMainWindow):
     def _refresh_playlist_checks(self) -> None:
         """Re-evaluate marks on every playlist item for the current profile."""
         profile = self._profile
-        sb = self._playlist.verticalScrollBar()
-        pos = sb.value() if sb else 0
+        self._playlist._scroll_locked = True
         self._playlist.setUpdatesEnabled(False)
         for path in self._playlist._paths:
             markers = self._db.get_markers(os.path.basename(path), profile)
@@ -2291,8 +2279,7 @@ class MainWindow(QMainWindow):
             else:
                 self._playlist.unmark_done(path)
         self._playlist.setUpdatesEnabled(True)
-        if sb:
-            sb.setValue(pos)
+        self._playlist._scroll_locked = False
 
     def _on_delete_marker(self, output_path: str) -> None:
         deleted = self._db.delete_group(output_path)
