@@ -63,10 +63,12 @@ def build_ffmpeg_command(
 ) -> list[str]:
     # -ss before -i: fast input-seeking. Safe here because we always re-encode,
     # so there is no keyframe-alignment issue from pre-input seek.
+    # Image sequences always use libwebp, so skip HW encoder setup.
+    use_hw_vaapi = encoder == "h264_vaapi" and not image_sequence
     cmd = ["ffmpeg", "-y"]
 
     # VAAPI needs a device for hardware context.
-    if encoder == "h264_vaapi":
+    if use_hw_vaapi:
         cmd += ["-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi",
                 "-vaapi_device", "/dev/dri/renderD128"]
 
@@ -88,15 +90,14 @@ def build_ffmpeg_command(
             f"scale='if(lt(iw,ih),{short_side},-2)':'if(lt(iw,ih),-2,{short_side})':flags=lanczos"
         )
 
-    # VAAPI filters need upload to hw surface; crop/scale must happen on CPU
-    # first, then upload back to VAAPI.
-    if encoder == "h264_vaapi":
+    # VAAPI: decoded frames are GPU surfaces.  CPU filters (crop/scale) need
+    # hwdownload first, then re-upload for the HW encoder.
+    if use_hw_vaapi:
         if filters:
-            filters.append("format=nv12")
-            filters.append("hwupload")
-        else:
-            filters.append("format=nv12")
-            filters.append("hwupload")
+            filters.insert(0, "hwdownload")
+            filters.insert(1, "format=nv12")
+        filters.append("format=nv12")
+        filters.append("hwupload")
 
     if filters:
         cmd += ["-vf", ",".join(filters)]
@@ -1086,7 +1087,9 @@ class MpvWidget(QWidget):
         if self._render_ctx:
             self._render_ctx.free()
             self._render_ctx = None
-        self._player.terminate()
+        if self._player:
+            self._player.terminate()
+            self._player = None
         self._fbo = None
         super().closeEvent(event)
 
@@ -1183,10 +1186,11 @@ class SnapPreviewWindow(QWidget):
         self._main_win = main_win
         self._dock_edge: str | None = None  # "left", "right", "top", "bottom" or None
         self._dock_offset: int = 0  # offset along the docked edge
+        self._in_dock = False  # recursion guard for move → dock → move
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        if not self._main_win.isVisible():
+        if self._in_dock or not self._main_win.isVisible():
             return
         mg = self._main_win.frameGeometry()
         pg = self.frameGeometry()
@@ -1212,6 +1216,7 @@ class SnapPreviewWindow(QWidget):
 
     def _dock(self, edge: str, mg, pg) -> None:
         self._dock_edge = edge
+        self._in_dock = True
         if edge == "left":
             x = mg.left() - pg.width()
             self._dock_offset = pg.top() - mg.top()
@@ -1228,11 +1233,13 @@ class SnapPreviewWindow(QWidget):
             y = mg.bottom()
             self._dock_offset = pg.left() - mg.left()
             self.move(pg.left(), y)
+        self._in_dock = False
 
     def follow_main(self) -> None:
         """Called by main window on move/resize to keep docked position."""
         if self._dock_edge is None:
             return
+        self._in_dock = True
         mg = self._main_win.frameGeometry()
         pw, ph = self.frameGeometry().width(), self.frameGeometry().height()
         if self._dock_edge == "left":
@@ -1243,6 +1250,7 @@ class SnapPreviewWindow(QWidget):
             self.move(mg.left() + self._dock_offset, mg.top() - ph)
         elif self._dock_edge == "bottom":
             self.move(mg.left() + self._dock_offset, mg.bottom())
+        self._in_dock = False
 
 
 class PlaylistWidget(QListWidget):
@@ -1975,10 +1983,16 @@ class MainWindow(QMainWindow):
             idx = self._cmb_format.findText(fmt)
             if idx >= 0:
                 self._cmb_format.setCurrentIndex(idx)
-            if meta["clip_count"]:
+            if meta["clip_count"] is not None:
                 self._spn_clips.setValue(meta["clip_count"])
-            if meta["spread"]:
+            if meta["spread"] is not None:
                 self._spn_spread.setValue(meta["spread"])
+            if meta["crop_center"] is not None:
+                self._crop_center = meta["crop_center"]
+                self._settings.setValue("crop_center", str(self._crop_center))
+                self._crop_bar.set_crop_center(self._crop_center)
+                if ratio != "Off":
+                    self._mpv.set_crop_overlay(_RATIOS[ratio], self._crop_center)
         self.statusBar().showMessage(
             f"Overwrite mode: {group_dir} ({n} clip{'s' if n != 1 else ''}) — export to replace", 5000
         )
@@ -2232,8 +2246,11 @@ class MainWindow(QMainWindow):
         base_center = self._crop_center
 
         if self._overwrite_path:
-            # Group overwrite mode — re-export all sub-clips at this marker
+            # Group overwrite mode — re-export all sub-clips at this marker.
+            # Delete old DB rows first to avoid duplicates on re-insert.
             group_paths = sorted(self._overwrite_group) if self._overwrite_group else [self._overwrite_path]
+            for path in group_paths:
+                self._db.delete_by_output_path(path)
             jobs = []
             for i, path in enumerate(group_paths):
                 start = self._cursor + i * spread
@@ -2275,7 +2292,9 @@ class MainWindow(QMainWindow):
 
         short_side = self._spn_resize.value() or None
 
-        # Stash export config for _on_clip_done DB writes
+        # Stash export config for _on_clip_done DB writes.
+        # Cursor is frozen here — user may move it during async export.
+        self._export_cursor = self._cursor
         self._export_short_side = short_side
         self._export_portrait = self._cmb_portrait.currentText()
         self._export_format = fmt
@@ -2317,7 +2336,7 @@ class MainWindow(QMainWindow):
         portrait = self._export_portrait if self._export_portrait != "Off" else ""
         self._db.add(
             os.path.basename(self._file_path),
-            self._cursor,
+            self._export_cursor,
             path,
             label=label,
             category=category,
@@ -2362,6 +2381,7 @@ class MainWindow(QMainWindow):
         self._btn_export.setEnabled(True)
         self._btn_export.setText("Export")
         self._btn_export.setStyleSheet("")
+        self._refresh_markers()  # remove stale pending marker
         self.statusBar().showMessage(f"Export error: {msg}")
 
     def closeEvent(self, event):
@@ -2374,7 +2394,9 @@ class MainWindow(QMainWindow):
             self._mpv._render_ctx.free()
             self._mpv._render_ctx = None
         # Terminate the mpv player (joins its background threads).
-        self._mpv._player.terminate()
+        if self._mpv._player:
+            self._mpv._player.terminate()
+            self._mpv._player = None
         self._mpv._fbo = None
         self._preview_win.close()
         _log("Shutdown complete")
