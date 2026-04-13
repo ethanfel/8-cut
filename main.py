@@ -1360,11 +1360,6 @@ class PreviewLabel(QWidget):
                         max_x = iw - win_px
                         cx = ix + int(max_x * self._crop_center)
                         cw = int(win_px)
-                        # Dim outside crop region.
-                        dim = QColor(0, 0, 0, 120)
-                        p.fillRect(ix, iy, int(cx - ix), scaled.height(), dim)
-                        p.fillRect(cx + cw, iy, ix + iw - cx - cw, scaled.height(), dim)
-                        # Crop border lines.
                         pen = QPen(QColor(100, 160, 240, 200))
                         pen.setWidth(1)
                         p.setPen(pen)
@@ -2422,6 +2417,7 @@ class MainWindow(QMainWindow):
         else:
             self._crop_bar.setVisible(False)
             self._mpv.set_crop_overlays([])
+        self._update_preview_crop()
 
     def _on_crop_click(self, frac: float) -> None:
         ratio = self._cmb_portrait.currentText()
