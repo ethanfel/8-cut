@@ -1503,6 +1503,7 @@ class PlaylistWidget(QListWidget):
     def __init__(self):
         super().__init__()
         self.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setMinimumWidth(200)
         self.setAlternatingRowColors(True)
         self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
@@ -1637,32 +1638,43 @@ class PlaylistWidget(QListWidget):
             item.setText(name)
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
+        # Only load file when it's a plain click (no Ctrl/Shift for multi-select).
+        mods = QApplication.keyboardModifiers()
+        if mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier):
+            return
         self._select(self.row(item))
 
-    hide_requested = pyqtSignal(str)  # emits full path to hide in current profile
+    hide_requested = pyqtSignal(list)  # emits list of full paths to hide
+
+    def _selected_paths(self) -> list[str]:
+        return [self._visible[self.row(it)]
+                for it in self.selectedItems()
+                if self.row(it) < len(self._visible)]
 
     def contextMenuEvent(self, event) -> None:
-        item = self.itemAt(event.pos())
-        if item is None:
+        sel = self._selected_paths()
+        if not sel:
             return
-        row = self.row(item)
-        if row >= len(self._visible):
-            return
-        path = self._visible[row]
         from PyQt6.QtWidgets import QMenu
         menu = QMenu(self)
-        name = os.path.basename(path)
-        act_remove = menu.addAction(f"Remove: {name}")
-        act_hide = menu.addAction(f"Hide in profile: {name}")
+        if len(sel) == 1:
+            name = os.path.basename(sel[0])
+            act_remove = menu.addAction(f"Remove: {name}")
+            act_hide = menu.addAction(f"Hide in profile: {name}")
+        else:
+            act_remove = menu.addAction(f"Remove {len(sel)} files")
+            act_hide = menu.addAction(f"Hide {len(sel)} files in profile")
         chosen = menu.exec(event.globalPos())
         if chosen == act_remove:
-            self._paths.remove(path)
-            self._path_set.discard(path)
-            self._done_set.discard(path)
-            self._done_counts.pop(path, None)
+            for path in sel:
+                if path in self._path_set:
+                    self._paths.remove(path)
+                    self._path_set.discard(path)
+                    self._done_set.discard(path)
+                    self._done_counts.pop(path, None)
             self._rebuild()
         elif chosen == act_hide:
-            self.hide_requested.emit(path)
+            self.hide_requested.emit(sel)
 
 
 class _KeyFilter(QObject):
@@ -1745,7 +1757,7 @@ class MainWindow(QMainWindow):
         # Widgets
         self._playlist = PlaylistWidget()
         self._playlist.file_selected.connect(self._load_file)
-        self._playlist.hide_requested.connect(self._on_hide_file)
+        self._playlist.hide_requested.connect(self._on_hide_files)
 
         self._mpv = MpvWidget()
         self._mpv.file_loaded.connect(self._after_load)
@@ -2230,13 +2242,14 @@ class MainWindow(QMainWindow):
         self._settings.setValue("hide_exported", "true" if hide else "false")
         self._playlist.set_hide_exported(hide)
 
-    def _on_hide_file(self, path: str) -> None:
-        """Persistently hide a file in the current profile."""
-        basename = os.path.basename(path)
-        self._db.hide_file(basename, self._profile)
-        self._playlist._hidden_basenames.add(basename)
+    def _on_hide_files(self, paths: list[str]) -> None:
+        """Persistently hide files in the current profile."""
+        for path in paths:
+            basename = os.path.basename(path)
+            self._db.hide_file(basename, self._profile)
+            self._playlist._hidden_basenames.add(basename)
         self._playlist._rebuild()
-        _log(f"Hidden file: {basename} in profile {self._profile}")
+        _log(f"Hidden {len(paths)} file(s) in profile {self._profile}")
 
     def _apply_playlist_filters(self) -> None:
         """Apply profile-hidden files, export marks, and hide-exported filter."""
