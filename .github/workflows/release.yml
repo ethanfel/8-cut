@@ -44,8 +44,8 @@ jobs:
           Invoke-WebRequest $ffUrl -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
           $bin = Get-ChildItem -Path ffmpeg-tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1
-          Copy-Item $bin.DirectoryName\ffmpeg.exe .
-          Copy-Item $bin.DirectoryName\ffprobe.exe .
+          Copy-Item "$($bin.DirectoryName)\ffmpeg.exe" .
+          Copy-Item "$($bin.DirectoryName)\ffprobe.exe" .
 
       - name: Fetch libmpv (Windows)
         if: runner.os == 'Windows'
