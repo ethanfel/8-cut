@@ -3119,11 +3119,12 @@ class MainWindow(QMainWindow):
 
     def moveEvent(self, event):
         super().moveEvent(event)
-        self._preview_win.follow_main()
+        # Defer follow_main so the window manager has committed the new geometry.
+        QTimer.singleShot(0, self._preview_win.follow_main)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._preview_win.follow_main()
+        QTimer.singleShot(0, self._preview_win.follow_main)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if event.mimeData().hasUrls():
