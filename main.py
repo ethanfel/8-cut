@@ -1580,13 +1580,14 @@ class PlaylistWidget(QListWidget):
         self._done_counts: dict[str, int] = {}  # path → clip count
         self._hidden_basenames: set[str] = set()
         self._hide_exported = False
+        self._show_hidden = False
         self._visible: list[str] = []         # paths currently shown in widget
         self._selected_path: str | None = None
         self.itemClicked.connect(self._on_item_clicked)
 
     def _is_visible(self, path: str) -> bool:
         if os.path.basename(path) in self._hidden_basenames:
-            return False
+            return self._show_hidden
         if self._hide_exported and path in self._done_set:
             return False
         return True
@@ -1598,7 +1599,14 @@ class PlaylistWidget(QListWidget):
         self._visible = [p for p in self._paths if self._is_visible(p)]
         for path in self._visible:
             name = os.path.basename(path)
-            if path in self._done_set:
+            is_hidden = os.path.basename(path) in self._hidden_basenames
+            if is_hidden:
+                item = QListWidgetItem(f"[hidden] {name}")
+                item.setForeground(QColor(120, 120, 120))
+                font = item.font()
+                font.setItalic(True)
+                item.setFont(font)
+            elif path in self._done_set:
                 n = self._done_counts.get(path, 0)
                 tag = f"[{n}]" if n else "✓"
                 item = QListWidgetItem(f"{tag} {name}")
@@ -1652,6 +1660,10 @@ class PlaylistWidget(QListWidget):
 
     def set_hidden_basenames(self, basenames: set[str]) -> None:
         self._hidden_basenames = basenames
+        self._rebuild()
+
+    def set_show_hidden(self, show: bool) -> None:
+        self._show_hidden = show
         self._rebuild()
 
     def set_hide_exported(self, hide: bool) -> None:
@@ -1712,6 +1724,7 @@ class PlaylistWidget(QListWidget):
         self._select(self.row(item))
 
     hide_requested = pyqtSignal(list)  # emits list of full paths to hide
+    unhide_requested = pyqtSignal(list)  # emits list of full paths to unhide
 
     def _selected_paths(self) -> list[str]:
         return [self._visible[self.row(it)]
@@ -1724,14 +1737,26 @@ class PlaylistWidget(QListWidget):
             return
         from PyQt6.QtWidgets import QMenu
         menu = QMenu(self)
+        # Check if any selected files are hidden.
+        hidden_sel = [p for p in sel if os.path.basename(p) in self._hidden_basenames]
+        act_remove = act_hide = act_unhide = None
         if len(sel) == 1:
             name = os.path.basename(sel[0])
             act_remove = menu.addAction(f"Remove: {name}")
-            act_hide = menu.addAction(f"Hide in profile: {name}")
+            if hidden_sel:
+                act_unhide = menu.addAction(f"Unhide: {name}")
+            else:
+                act_hide = menu.addAction(f"Hide in profile: {name}")
         else:
             act_remove = menu.addAction(f"Remove {len(sel)} files")
-            act_hide = menu.addAction(f"Hide {len(sel)} files in profile")
+            if hidden_sel:
+                act_unhide = menu.addAction(f"Unhide {len(hidden_sel)} file(s)")
+            non_hidden = [p for p in sel if p not in hidden_sel]
+            if non_hidden:
+                act_hide = menu.addAction(f"Hide {len(non_hidden)} file(s) in profile")
         chosen = menu.exec(event.globalPos())
+        if chosen is None:
+            return
         if chosen == act_remove:
             for path in sel:
                 if path in self._path_set:
@@ -1742,6 +1767,8 @@ class PlaylistWidget(QListWidget):
             self._rebuild()
         elif chosen == act_hide:
             self.hide_requested.emit(sel)
+        elif chosen == act_unhide:
+            self.unhide_requested.emit(hidden_sel)
 
 
 class _KeyFilter(QObject):
@@ -1825,6 +1852,7 @@ class MainWindow(QMainWindow):
         self._playlist = PlaylistWidget()
         self._playlist.file_selected.connect(self._load_file)
         self._playlist.hide_requested.connect(self._on_hide_files)
+        self._playlist.unhide_requested.connect(self._on_unhide_files)
 
         self._mpv = MpvWidget()
         self._mpv.file_loaded.connect(self._after_load)
@@ -2157,12 +2185,18 @@ class MainWindow(QMainWindow):
         )
         self._chk_hide_exported.toggled.connect(self._on_hide_exported_toggled)
 
+        self._btn_show_hidden = QPushButton("Show Hidden")
+        self._btn_show_hidden.setCheckable(True)
+        self._btn_show_hidden.setToolTip("Reveal hidden files so you can right-click to unhide them")
+        self._btn_show_hidden.toggled.connect(self._on_show_hidden_toggled)
+
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(4, 4, 4, 4)
         left_top = QHBoxLayout()
         left_top.addWidget(self._btn_open)
         left_top.addWidget(self._chk_hide_exported)
+        left_top.addWidget(self._btn_show_hidden)
         left_layout.addLayout(left_top)
         left_layout.addWidget(self._playlist)
 
@@ -2308,6 +2342,18 @@ class MainWindow(QMainWindow):
     def _on_hide_exported_toggled(self, hide: bool) -> None:
         self._settings.setValue("hide_exported", "true" if hide else "false")
         self._playlist.set_hide_exported(hide)
+
+    def _on_show_hidden_toggled(self, show: bool) -> None:
+        self._playlist.set_show_hidden(show)
+
+    def _on_unhide_files(self, paths: list[str]) -> None:
+        """Remove files from the hidden list in the current profile."""
+        for path in paths:
+            basename = os.path.basename(path)
+            self._db.unhide_file(basename, self._profile)
+            self._playlist._hidden_basenames.discard(basename)
+        self._playlist._rebuild()
+        _log(f"Unhid {len(paths)} file(s) in profile {self._profile}")
 
     def _on_hide_files(self, paths: list[str]) -> None:
         """Persistently hide files in the current profile."""
