@@ -36,11 +36,9 @@ jobs:
       - name: Fetch libmpv
         shell: pwsh
         run: |
-          $apiUrl = "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest"
-          $release = Invoke-RestMethod $apiUrl
-          $tag = $release.tag_name
-          $dlUrl = "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/$tag/mpv-dev-x86_64-v3-${tag}.7z"
-          Invoke-WebRequest $dlUrl -OutFile mpv-dev.7z
+          $release = Invoke-RestMethod "https://api.github.com/repos/shinchiro/mpv-winbuild-cmake/releases/latest"
+          $asset = $release.assets | Where-Object { $_.name -like "mpv-dev-x86_64-v3-*" } | Select-Object -First 1
+          Invoke-WebRequest $asset.browser_download_url -OutFile mpv-dev.7z
           7z x mpv-dev.7z -ompv-dev
           Copy-Item mpv-dev\libmpv-2.dll .
 
