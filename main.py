@@ -747,7 +747,7 @@ class TimelineWidget(QWidget):
         self._clip_span = 14.0  # 8 + 2*spread, updated from MainWindow
         self._play_pos: float | None = None  # current playback position (seconds)
         self._locked = False                 # when True, clicks scrub playback, not cursor
-        self._crop_keyframes: list[tuple[float, float]] = []  # [(time, center)]
+        self._crop_keyframes: list[tuple[float, float, str | None, bool, bool]] = []
         self._markers: list[tuple[float, int, str]] = []
         self._hover_cache: list[tuple[float, str]] = []  # (t/duration, path)
 
@@ -798,7 +798,7 @@ class TimelineWidget(QWidget):
         self._play_pos = t
         self.update()
 
-    def set_crop_keyframes(self, kfs: list[tuple[float, float]]) -> None:
+    def set_crop_keyframes(self, kfs: list[tuple[float, float, str | None, bool, bool]]) -> None:
         self._crop_keyframes = kfs
         self.update()
 
@@ -1767,7 +1767,7 @@ class MainWindow(QMainWindow):
         self._db_worker: _DBWorker | None = None
         self._frame_grabber: FrameGrabber | None = None
         self._fps: float = 25.0  # cached on file load via get_fps()
-        self._crop_keyframes: list[tuple[float, float]] = []  # [(time, center), ...] sorted
+        self._crop_keyframes: list[tuple[float, float, str | None, bool, bool]] = []  # sorted by time
 
         # Widgets
         self._playlist = PlaylistWidget()
