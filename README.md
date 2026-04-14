@@ -12,7 +12,7 @@ A desktop tool for cutting 8-second clips from video files, designed for buildin
 
 ## Overview
 
-8-cut lets you scrub through a video, mark a cut point, and export a batch of overlapping 8-second clips with one keypress. It tracks every export in a local SQLite database so you can resume a session or switch between resolution variants of the same source without duplicating work.
+8-cut lets you scrub through a video, mark a cut point, and export a batch of overlapping 8-second clips with one keypress. It tracks every export in a local SQLite database so you can resume a session without duplicating work.
 
 All clips are exactly 8 seconds — the standard length for foley sound datasets.
 
@@ -28,9 +28,8 @@ All clips are exactly 8 seconds — the standard length for foley sound datasets
 - **Portrait crop** — crop to 9:16, 4:5, or 1:1 before export; click the video or crop bar to reposition
 - **Random portrait** — optionally apply a random portrait crop to a subset of each batch
 - **Resize** — scale short side to a fixed pixel size (e.g. 512)
-- **Sound annotation** — label and category fields saved to `dataset.json` and the clip database
+- **Sound annotation** — label and category fields saved to the clip database; label also written to `dataset.json`
 - **Export history** — timeline markers show previously exported clips; double-click to enter overwrite mode; right-click to delete
-- **Fuzzy matching** — detects resolution variants of the same file (`_2160p` vs `_1080p`) and shares markers between them
 - **End-frame preview** — floating window shows the last frame of the selection region
 - **Playlist** — drag-and-drop or use the Open Files button; right-click to remove items
 - **Playback loop** — plays the exact selection region on loop so you can preview what will be exported
@@ -50,6 +49,8 @@ All clips are exactly 8 seconds — the standard length for foley sound datasets
 | `E` | Export |
 | `M` | Jump to next marker (wraps) |
 | `N` | Next file in playlist |
+| `G` | Toggle cursor lock |
+| `?` / `F1` | Show keyboard shortcuts |
 
 Shortcuts are suppressed when a text field has focus.
 
@@ -113,7 +114,7 @@ output/
 Set a **Label** (e.g. "dog barking") and **Category** (Human / Animal / Vehicle / Tool / Music / Nature / Sport / Other) before exporting. These are saved to:
 
 - `dataset.json` in the export folder — one entry per clip with `path` and `label`
-- The SQLite database — for recall when you revisit a marker
+- The SQLite database — label and category, for recall when you revisit a marker
 
 Labels persist between exports so you can cut many clips of the same class without retyping.
 
@@ -125,7 +126,7 @@ Labels persist between exports so you can cut many clips of the same class witho
 
 ## Database
 
-Export history is stored in `~/.8cut.db` (SQLite). The database records filename, start time, output path, label, category, and all encoding settings for every clip. When you open a file, 8-cut fuzzy-matches the filename (stripping resolution tags like `_2160p`, codec tags, etc.) and pre-populates the timeline with existing markers.
+Export history is stored in `~/.8cut.db` (SQLite). The database records filename, start time, output path, label, category, and all encoding settings for every clip. When you open a file, 8-cut matches the filename and pre-populates the timeline with existing markers.
 
 ## Testing
 
@@ -133,7 +134,7 @@ Export history is stored in `~/.8cut.db` (SQLite). The database records filename
 pytest tests/ -v
 ```
 
-54 unit tests covering path builders, ffmpeg command generation, time formatting, database operations, group queries, profile isolation, and annotation handling.
+46 unit tests covering path builders, ffmpeg command generation, time formatting, database operations, group queries, profile isolation, and annotation handling.
 
 ## License
 
