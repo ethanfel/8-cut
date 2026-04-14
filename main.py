@@ -2552,10 +2552,42 @@ class MainWindow(QMainWindow):
         self._update_preview_crop()
 
     def _on_rand_toggle(self, _checked: bool = False) -> None:
+        if self._btn_lock.isChecked():
+            self._set_or_remove_crop_keyframe()
         ratio_text = self._cmb_portrait.currentText()
         if ratio_text != "Off":
             return  # manual portrait already controls the overlay
         self._update_rand_overlays()
+
+    def _set_or_remove_crop_keyframe(self) -> None:
+        """In lock mode, create a keyframe at the current playback position.
+
+        If the resulting keyframe carries no crop modifications (no ratio,
+        no random flags), remove it instead — this handles the undo case
+        where the user toggles back to the default state.
+        """
+        play_t = self._timeline._play_pos
+        if play_t is None:
+            play_t = self._cursor
+        ratio_text = self._cmb_portrait.currentText()
+        kf_ratio = None if ratio_text == "Off" else ratio_text
+        kf_rand_p = self._chk_rand_portrait.isChecked()
+        kf_rand_s = self._chk_rand_square.isChecked()
+        # Remove any existing keyframe at this time.
+        self._crop_keyframes = [
+            kf for kf in self._crop_keyframes
+            if abs(kf[0] - play_t) > 0.05
+        ]
+        # Only insert if the keyframe carries crop modifications.
+        if kf_ratio is not None or kf_rand_p or kf_rand_s:
+            center = self._crop_center
+            self._crop_keyframes.append(
+                (play_t, center, kf_ratio, kf_rand_p, kf_rand_s))
+            self._crop_keyframes.sort()
+            _log(f"Auto keyframe: t={play_t:.2f}s ratio={kf_ratio} rp={kf_rand_p} rs={kf_rand_s}")
+        else:
+            _log(f"Removed keyframe @ {format_time(play_t)} (no crop modifications)")
+        self._timeline.set_crop_keyframes(self._crop_keyframes)
 
     def _update_rand_overlays(self) -> None:
         """Show lines-only overlay guides for whichever random crop options are on."""
