@@ -2805,6 +2805,15 @@ class MainWindow(QMainWindow):
                 jobs.append((start, path, base_ratio, base_center))
             self._overwrite_path = ""
             self._overwrite_group = []
+            rand_portrait = self._chk_rand_portrait.isChecked()
+            rand_square = self._chk_rand_square.isChecked()
+            if self._crop_keyframes:
+                widened = apply_keyframes_to_jobs(
+                    jobs, self._crop_keyframes,
+                    base_center=base_center, base_ratio=base_ratio,
+                    base_rand_p=rand_portrait, base_rand_s=rand_square,
+                )
+                jobs = [(s, o, r, c) for s, o, r, c, _rp, _rs in widened]
         else:
             name = self._txt_name.text() or "clip"
             n_clips = self._spn_clips.value()
