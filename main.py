@@ -2682,12 +2682,15 @@ class MainWindow(QMainWindow):
         if self._crop_keyframes:
             kf = resolve_keyframe(self._crop_keyframes, t)
             if kf is not None:
-                _, center, ratio, rp, rs = kf
+                _, center, ratio, _rp, _rs = kf
                 self._crop_bar.set_crop_center(center)
                 if ratio is not None:
                     self._mpv.set_crop_overlay(_RATIOS[ratio], center)
                 else:
                     self._update_rand_overlays()
+            else:
+                self._crop_bar.set_crop_center(self._crop_center)
+                self._update_rand_overlays()
 
     def _on_cursor_changed(self, t: float):
         self._cursor = t
@@ -2813,6 +2816,8 @@ class MainWindow(QMainWindow):
                     base_center=base_center, base_ratio=base_ratio,
                     base_rand_p=rand_portrait, base_rand_s=rand_square,
                 )
+                # Overwrite re-exports use the keyframe's ratio directly
+                # (no random sampling) to reproduce the original output.
                 jobs = [(s, o, r, c) for s, o, r, c, _rp, _rs in widened]
         else:
             name = self._txt_name.text() or "clip"
