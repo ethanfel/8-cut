@@ -2262,6 +2262,12 @@ class MainWindow(QMainWindow):
         # _after_load triggered by MpvWidget.file_loaded signal
 
     def _after_load(self):
+        # Disengage lock and clear keyframes for the new file.
+        if self._btn_lock.isChecked():
+            self._btn_lock.setChecked(False)
+        self._crop_keyframes.clear()
+        self._timeline.set_crop_keyframes([])
+
         dur = self._mpv.get_duration()
         self._timeline.set_duration(dur)
         self._cursor = 0.0
