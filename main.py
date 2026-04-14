@@ -2369,8 +2369,8 @@ class MainWindow(QMainWindow):
 
     def _on_delete_keyframe(self, time: float) -> None:
         self._crop_keyframes = [
-            (t, c) for t, c in self._crop_keyframes
-            if abs(t - time) > 0.05
+            kf for kf in self._crop_keyframes
+            if abs(kf[0] - time) > 0.05
         ]
         self._timeline.set_crop_keyframes(self._crop_keyframes)
         _log(f"Deleted crop keyframe @ {format_time(time)} ({len(self._crop_keyframes)} remaining)")
@@ -2537,14 +2537,18 @@ class MainWindow(QMainWindow):
             if play_t is None:
                 play_t = self._cursor
             # Replace existing keyframe at same time, or insert sorted.
+            ratio_text = self._cmb_portrait.currentText()
+            kf_ratio = None if ratio_text == "Off" else ratio_text
+            kf_rand_p = self._chk_rand_portrait.isChecked()
+            kf_rand_s = self._chk_rand_square.isChecked()
             self._crop_keyframes = [
-                (t, c) for t, c in self._crop_keyframes
-                if abs(t - play_t) > 0.05
+                kf for kf in self._crop_keyframes
+                if abs(kf[0] - play_t) > 0.05
             ]
-            self._crop_keyframes.append((play_t, frac))
+            self._crop_keyframes.append((play_t, frac, kf_ratio, kf_rand_p, kf_rand_s))
             self._crop_keyframes.sort()
             self._timeline.set_crop_keyframes(self._crop_keyframes)
-            _log(f"Crop keyframe: t={play_t:.2f}s center={frac:.3f} ({len(self._crop_keyframes)} total)")
+            _log(f"Crop keyframe: t={play_t:.2f}s center={frac:.3f} ratio={kf_ratio} rp={kf_rand_p} rs={kf_rand_s} ({len(self._crop_keyframes)} total)")
             self._crop_center = frac
             self._crop_bar.set_crop_center(frac)
             if ratio != "Off":
