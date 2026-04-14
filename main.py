@@ -1027,7 +1027,7 @@ class TimelineWidget(QWidget):
 
     def _emit_seek(self):
         if self._locked:
-            self.seek_changed.emit(self._play_pos or 0.0)
+            self.seek_changed.emit(self._play_pos if self._play_pos is not None else self._cursor)
         else:
             self.cursor_changed.emit(self._cursor)
 
