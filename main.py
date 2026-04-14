@@ -53,6 +53,21 @@ def format_time(seconds: float) -> str:
     return f"{m}:{s:04.1f}"
 
 
+def resolve_keyframe(
+    keyframes: list[tuple[float, float, str | None, bool, bool]],
+    t: float,
+    tolerance: float = 0.05,
+) -> tuple[float, float, str | None, bool, bool] | None:
+    """Return the latest keyframe at or before *t*, or None."""
+    result = None
+    for kf in keyframes:
+        if kf[0] <= t + tolerance:
+            result = kf
+        else:
+            break
+    return result
+
+
 def build_ffmpeg_command(
     input_path: str, start: float, output_path: str,
     short_side: int | None = None,

@@ -1,5 +1,5 @@
 import tempfile, os, json
-from main import build_export_path, format_time, build_ffmpeg_command, build_sequence_dir, build_audio_extract_command, build_annotation_json_path, upsert_clip_annotation
+from main import build_export_path, format_time, resolve_keyframe, build_ffmpeg_command, build_sequence_dir, build_audio_extract_command, build_annotation_json_path, upsert_clip_annotation
 from main import ProcessedDB
 
 
@@ -369,3 +369,35 @@ def test_db_default_profile_backward_compat():
         assert db.get_profiles() == ["default"]
     finally:
         os.unlink(path)
+
+
+# --- resolve_keyframe ---
+
+def test_resolve_keyframe_empty():
+    assert resolve_keyframe([], 5.0) is None
+
+def test_resolve_keyframe_before_first():
+    kfs = [(3.0, 0.5, None, False, False)]
+    assert resolve_keyframe(kfs, 1.0) is None
+
+def test_resolve_keyframe_exact():
+    kfs = [(2.0, 0.3, "9:16", True, False)]
+    assert resolve_keyframe(kfs, 2.0) == (2.0, 0.3, "9:16", True, False)
+
+def test_resolve_keyframe_between():
+    kfs = [
+        (1.0, 0.2, None, False, False),
+        (5.0, 0.8, "1:1", False, True),
+    ]
+    assert resolve_keyframe(kfs, 3.0) == (1.0, 0.2, None, False, False)
+
+def test_resolve_keyframe_after_last():
+    kfs = [
+        (1.0, 0.2, None, False, False),
+        (5.0, 0.8, "1:1", False, True),
+    ]
+    assert resolve_keyframe(kfs, 10.0) == (5.0, 0.8, "1:1", False, True)
+
+def test_resolve_keyframe_tolerance():
+    kfs = [(4.0, 0.5, None, True, True)]
+    assert resolve_keyframe(kfs, 3.96) == (4.0, 0.5, None, True, True)
