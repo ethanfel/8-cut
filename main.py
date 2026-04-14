@@ -2680,16 +2680,14 @@ class MainWindow(QMainWindow):
         self._mpv.seek(t)
         # Update crop bar to show the effective center at this time.
         if self._crop_keyframes:
-            center = self._crop_center
-            for kt, kc in self._crop_keyframes:
-                if kt <= t + 0.05:
-                    center = kc
+            kf = resolve_keyframe(self._crop_keyframes, t)
+            if kf is not None:
+                _, center, ratio, rp, rs = kf
+                self._crop_bar.set_crop_center(center)
+                if ratio is not None:
+                    self._mpv.set_crop_overlay(_RATIOS[ratio], center)
                 else:
-                    break
-            self._crop_bar.set_crop_center(center)
-            ratio = self._cmb_portrait.currentText()
-            if ratio != "Off":
-                self._mpv.set_crop_overlay(_RATIOS[ratio], center)
+                    self._update_rand_overlays()
 
     def _on_cursor_changed(self, t: float):
         self._cursor = t
