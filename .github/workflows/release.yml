@@ -3,25 +3,16 @@ name: Build & Release
 on:
   push:
     tags:
-      - "v*"          # trigger on version tags like v1.0.0
-  workflow_dispatch:   # allow manual trigger
+      - "v*"
+  workflow_dispatch:
 
 permissions:
-  contents: write      # needed to create releases
+  contents: write
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            artifact: 8cut-windows
-          - os: macos-latest      # Apple Silicon
-            artifact: 8cut-macos-arm64
-
-    runs-on: ${{ matrix.os }}
-
+  # ── Windows ────────────────────────────────────────────────
+  windows:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -29,17 +20,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      # ── Install Python deps ──────────────────────────────────
       - name: Install Python dependencies
-        run: |
-          pip install pyinstaller PyQt6 python-mpv
+        run: pip install pyinstaller PyQt6 python-mpv
 
-      # ── Windows: fetch ffmpeg + libmpv ───────────────────────
-      - name: Fetch ffmpeg (Windows)
-        if: runner.os == 'Windows'
+      - name: Fetch ffmpeg
         shell: pwsh
         run: |
-          # ffmpeg static build
           $ffUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
           Invoke-WebRequest $ffUrl -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg-tmp
@@ -47,13 +33,10 @@ jobs:
           Copy-Item "$($bin.DirectoryName)\ffmpeg.exe" .
           Copy-Item "$($bin.DirectoryName)\ffprobe.exe" .
 
-      - name: Fetch libmpv (Windows)
-        if: runner.os == 'Windows'
+      - name: Fetch libmpv
         shell: pwsh
         run: |
-          # shinchiro libmpv dev build
           $mpvUrl = "https://github.com/shinchiro/mpv-winbuild-cmake/releases/latest"
-          # Get redirect URL to find latest tag
           $release = Invoke-WebRequest $mpvUrl -MaximumRedirection 0 -ErrorAction SilentlyContinue
           $tag = ($release.Headers.Location -split '/')[-1]
           $dlUrl = "https://github.com/shinchiro/mpv-winbuild-cmake/releases/download/$tag/mpv-dev-x86_64-v3-${tag}.7z"
@@ -61,56 +44,65 @@ jobs:
           7z x mpv-dev.7z -ompv-dev
           Copy-Item mpv-dev\libmpv-2.dll .
 
-      # ── macOS: install via Homebrew ──────────────────────────
-      - name: Install native deps (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install mpv ffmpeg
-          # Copy dylibs so PyInstaller bundles them
-          MPV_LIB=$(brew --prefix mpv)/lib/libmpv.2.dylib
-          cp "$MPV_LIB" .
-          cp "$(brew --prefix ffmpeg)/bin/ffmpeg" .
-          cp "$(brew --prefix ffmpeg)/bin/ffprobe" .
-
-      # ── Build ────────────────────────────────────────────────
       - name: Build with PyInstaller
         run: pyinstaller 8cut.spec
 
-      # ── Fix macOS dylib paths ────────────────────────────────
-      - name: Fix dylib rpaths (macOS)
-        if: runner.os == 'macOS'
+      - name: Package
+        shell: pwsh
+        run: Compress-Archive -Path dist\8cut\* -DestinationPath 8cut-windows.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 8cut-windows
+          path: 8cut-windows.zip
+
+  # ── macOS (Apple Silicon) ──────────────────────────────────
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install pyinstaller PyQt6 python-mpv
+
+      - name: Install native deps
         run: |
-          # Rewrite libmpv load path to be relative
+          brew install mpv ffmpeg
+          cp "$(brew --prefix mpv)/lib/libmpv.2.dylib" .
+          cp "$(brew --prefix ffmpeg)/bin/ffmpeg" .
+          cp "$(brew --prefix ffmpeg)/bin/ffprobe" .
+
+      - name: Build with PyInstaller
+        run: pyinstaller 8cut.spec
+
+      - name: Fix dylib rpaths
+        run: |
           DYLIB="dist/8cut/libmpv.2.dylib"
           if [ -f "$DYLIB" ]; then
             install_name_tool -id @executable_path/libmpv.2.dylib "$DYLIB"
           fi
 
-      # ── Package ──────────────────────────────────────────────
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Compress-Archive -Path dist\8cut\* -DestinationPath ${{ matrix.artifact }}.zip
-
-      - name: Package (macOS)
-        if: runner.os == 'macOS'
+      - name: Package
         run: |
           cd dist
-          zip -r ../${{ matrix.artifact }}.zip 8cut.app
+          zip -r ../8cut-macos-arm64.zip 8cut.app
 
-      # ── Upload artifact ──────────────────────────────────────
-      - name: Upload build artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.zip
+          name: 8cut-macos-arm64
+          path: 8cut-macos-arm64.zip
 
   # ── Create GitHub Release ──────────────────────────────────
   release:
-    needs: build
+    needs: [windows, macos]
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/v') && (needs.windows.result == 'success' || needs.macos.result == 'success') }}
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
