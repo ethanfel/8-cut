@@ -3046,9 +3046,9 @@ class MainWindow(QMainWindow):
         self._btn_export.setStyleSheet("")
         if self._last_export_path:
             group = os.path.basename(os.path.dirname(self._last_export_path))
-            self._show_status(f"Export complete: {group}", 5000)
+            self._show_status(f"Export complete: {group}")
         else:
-            self._show_status("Export complete", 5000)
+            self._show_status("Export complete")
         self._btn_delete.setEnabled(True)
         self._btn_delete.setText("Delete")
         self._refresh_markers()
