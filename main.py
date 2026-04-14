@@ -935,17 +935,45 @@ class TimelineWidget(QWidget):
 
             # ── crop keyframe diamonds ────────────────────────────────────
             if self._crop_keyframes and self._duration > 0:
-                for (kt, _kc) in self._crop_keyframes:
+                _KF_GOLD = QColor(255, 180, 0)
+                _KF_RED = QColor(220, 60, 60)
+                _KF_BLUE = QColor(60, 180, 220)
+                for kf in self._crop_keyframes:
+                    kt = kf[0]
+                    rp = kf[3] if len(kf) > 3 else False
+                    rs = kf[4] if len(kf) > 4 else False
                     kx = int(kt / self._duration * w)
                     d = 4  # half-size of diamond
                     ky = h - d - 2  # near bottom of track
-                    diamond = QPolygon([
-                        QPoint(kx, ky - d), QPoint(kx + d, ky),
-                        QPoint(kx, ky + d), QPoint(kx - d, ky),
-                    ])
-                    p.setBrush(QColor(255, 180, 0))
-                    p.setPen(Qt.PenStyle.NoPen)
-                    p.drawPolygon(diamond)
+                    if rp and rs:
+                        # Split diamond: left half red, right half blue
+                        left = QPolygon([
+                            QPoint(kx, ky - d), QPoint(kx, ky + d),
+                            QPoint(kx - d, ky),
+                        ])
+                        right = QPolygon([
+                            QPoint(kx, ky - d), QPoint(kx + d, ky),
+                            QPoint(kx, ky + d),
+                        ])
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.setBrush(_KF_RED)
+                        p.drawPolygon(left)
+                        p.setBrush(_KF_BLUE)
+                        p.drawPolygon(right)
+                    else:
+                        diamond = QPolygon([
+                            QPoint(kx, ky - d), QPoint(kx + d, ky),
+                            QPoint(kx, ky + d), QPoint(kx - d, ky),
+                        ])
+                        if rp:
+                            color = _KF_RED
+                        elif rs:
+                            color = _KF_BLUE
+                        else:
+                            color = _KF_GOLD
+                        p.setPen(Qt.PenStyle.NoPen)
+                        p.setBrush(color)
+                        p.drawPolygon(diamond)
 
             # ── playhead ──────────────────────────────────────────────────
             p.setPen(self._cursor_pen)
@@ -1015,7 +1043,8 @@ class TimelineWidget(QWidget):
         w = self.width()
         # Check keyframe diamonds first.
         hit_kf_time = None
-        for (kt, _kc) in self._crop_keyframes:
+        for kf in self._crop_keyframes:
+            kt = kf[0]
             kx = kt / self._duration * w
             if abs(x - kx) <= 8:
                 hit_kf_time = kt
