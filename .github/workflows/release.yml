@@ -17,8 +17,6 @@ jobs:
         include:
           - os: windows-latest
             artifact: 8cut-windows
-          - os: macos-13          # Intel Mac
-            artifact: 8cut-macos-x86_64
           - os: macos-latest      # Apple Silicon
             artifact: 8cut-macos-arm64
 
