@@ -1,5 +1,5 @@
 import tempfile, os, json
-from main import build_export_path, format_time, resolve_keyframe, build_ffmpeg_command, build_sequence_dir, build_audio_extract_command, build_annotation_json_path, upsert_clip_annotation
+from main import build_export_path, format_time, build_ffmpeg_command, build_sequence_dir, build_audio_extract_command, build_annotation_json_path, upsert_clip_annotation, resolve_keyframe, apply_keyframes_to_jobs
 from main import ProcessedDB
 
 
@@ -401,3 +401,40 @@ def test_resolve_keyframe_after_last():
 def test_resolve_keyframe_tolerance():
     kfs = [(4.0, 0.5, None, True, True)]
     assert resolve_keyframe(kfs, 3.96) == (4.0, 0.5, None, True, True)
+
+
+# --- apply_keyframes_to_jobs ---
+
+def test_apply_keyframes_no_keyframes():
+    jobs = [(0.0, "/out/a", None, 0.5), (3.0, "/out/b", None, 0.5)]
+    result = apply_keyframes_to_jobs(jobs, [], base_center=0.5, base_ratio=None,
+                                     base_rand_p=True, base_rand_s=False)
+    assert result == [
+        (0.0, "/out/a", None, 0.5, True, False),
+        (3.0, "/out/b", None, 0.5, True, False),
+    ]
+
+def test_apply_keyframes_with_keyframes():
+    kfs = [
+        (0.0, 0.3, "9:16", True, False),
+        (4.0, 0.7, None, False, True),
+    ]
+    jobs = [
+        (0.0, "/out/a", None, 0.5),
+        (3.0, "/out/b", None, 0.5),
+        (6.0, "/out/c", None, 0.5),
+    ]
+    result = apply_keyframes_to_jobs(jobs, kfs, base_center=0.5, base_ratio=None,
+                                     base_rand_p=False, base_rand_s=False)
+    assert result == [
+        (0.0, "/out/a", "9:16", 0.3, True, False),
+        (3.0, "/out/b", "9:16", 0.3, True, False),
+        (6.0, "/out/c", None, 0.7, False, True),
+    ]
+
+def test_apply_keyframes_before_first_uses_base():
+    kfs = [(5.0, 0.8, "1:1", False, True)]
+    jobs = [(1.0, "/out/a", None, 0.5)]
+    result = apply_keyframes_to_jobs(jobs, kfs, base_center=0.5, base_ratio="4:5",
+                                     base_rand_p=True, base_rand_s=False)
+    assert result == [(1.0, "/out/a", "4:5", 0.5, True, False)]

@@ -68,6 +68,29 @@ def resolve_keyframe(
     return result
 
 
+def apply_keyframes_to_jobs(
+    jobs: list[tuple[float, str, str | None, float]],
+    keyframes: list[tuple[float, float, str | None, bool, bool]],
+    base_center: float,
+    base_ratio: str | None,
+    base_rand_p: bool,
+    base_rand_s: bool,
+) -> list[tuple[float, str, str | None, float, bool, bool]]:
+    """Resolve each job's crop state from keyframes, returning widened tuples.
+
+    Returns list of (start, path, ratio, center, rand_portrait, rand_square).
+    """
+    result = []
+    for s, o, _r, _c in jobs:
+        kf = resolve_keyframe(keyframes, s)
+        if kf is not None:
+            _, center, ratio, rp, rs = kf
+        else:
+            center, ratio, rp, rs = base_center, base_ratio, base_rand_p, base_rand_s
+        result.append((s, o, ratio, center, rp, rs))
+    return result
+
+
 def build_ffmpeg_command(
     input_path: str, start: float, output_path: str,
     short_side: int | None = None,
