@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QPushButton, QLineEdit, QFileDialog, QFrame, QStatusBar,
+    QLabel, QPushButton, QLineEdit, QFileDialog, QFrame,
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
     QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox,
     QMessageBox, QInputDialog,
@@ -1808,7 +1808,6 @@ def main():
         QComboBox QAbstractItemView { background: #2a2a2a; border: 1px solid #555; selection-background-color: #3a6ea8; }
         QSpinBox, QDoubleSpinBox { background: #2a2a2a; border: 1px solid #555; padding: 3px; border-radius: 3px; }
         QCheckBox::indicator { width: 14px; height: 14px; }
-        QStatusBar { color: #aaa; }
         QListWidget { background: #252525; alternate-background-color: #2a2a2a; }
         QListWidget::item { padding: 4px; color: #ccc; }
         QListWidget::item:alternate { color: #ddd; }
@@ -2160,6 +2159,13 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(self._chk_rand_square)
         settings_row.addWidget(self._chk_track)
         settings_row.addStretch()
+        self._lbl_status = QLabel()
+        self._lbl_status.setStyleSheet("color: #888; font-size: 11px;")
+        self._lbl_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._status_timer = QTimer(self)
+        self._status_timer.setSingleShot(True)
+        self._status_timer.timeout.connect(lambda: self._lbl_status.clear())
+        settings_row.addWidget(self._lbl_status)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -2209,7 +2215,7 @@ class MainWindow(QMainWindow):
         splitter.setCollapsible(1, False)
 
         self.setCentralWidget(splitter)
-        self.setStatusBar(QStatusBar())
+        self.setStatusBar(None)
         if saved_ratio != "Off":
             self._crop_bar.setVisible(True)
             self._mpv.set_crop_overlay(_RATIOS[saved_ratio], self._crop_center)
@@ -2337,7 +2343,15 @@ class MainWindow(QMainWindow):
         if self._file_path:
             self._refresh_markers()
             _log(f"Profile switched: {text}")
-            self.statusBar().showMessage(f"Profile: {text}", 3000)
+            self._show_status(f"Profile: {text}", 3000)
+
+    def _show_status(self, msg: str, timeout: int = 0) -> None:
+        """Show a message in the inline status label. Timeout in ms (0 = sticky)."""
+        self._lbl_status.setText(msg)
+        if timeout > 0:
+            self._status_timer.start(timeout)
+        else:
+            self._status_timer.stop()
 
     def _on_hide_exported_toggled(self, hide: bool) -> None:
         self._settings.setValue("hide_exported", "true" if hide else "false")
@@ -2432,9 +2446,9 @@ class MainWindow(QMainWindow):
         if os.path.basename(self._file_path) != queried:
             return
         if match:
-            self.statusBar().showMessage(f"⚠ Similar to already processed: {match}")
+            self._show_status(f"⚠ Similar to already processed: {match}")
         else:
-            self.statusBar().clearMessage()
+            self._lbl_status.clear()
         self._timeline.set_markers(markers)
 
     def _refresh_markers(self) -> None:
@@ -2461,7 +2475,7 @@ class MainWindow(QMainWindow):
         self._update_next_label()
         n = len(deleted) if deleted else 1
         _log(f"Deleted marker: {n} clip(s) from DB")
-        self.statusBar().showMessage(
+        self._show_status(
             f"Deleted marker ({n} clip{'s' if n != 1 else ''})", 4000
         )
 
@@ -2472,7 +2486,7 @@ class MainWindow(QMainWindow):
         ]
         self._timeline.set_crop_keyframes(self._crop_keyframes)
         _log(f"Deleted crop keyframe @ {format_time(time)} ({len(self._crop_keyframes)} remaining)")
-        self.statusBar().showMessage(f"Deleted keyframe @ {format_time(time)}", 3000)
+        self._show_status(f"Deleted keyframe @ {format_time(time)}", 3000)
 
     def _on_marker_clicked(self, start_time: float, output_path: str) -> None:
         self._overwrite_path = output_path
@@ -2517,7 +2531,7 @@ class MainWindow(QMainWindow):
                 self._crop_bar.set_crop_center(self._crop_center)
                 if ratio != "Off":
                     self._mpv.set_crop_overlay(_RATIOS[ratio], self._crop_center)
-        self.statusBar().showMessage(
+        self._show_status(
             f"Overwrite mode: {group_dir} ({n} clip{'s' if n != 1 else ''}) — export to replace", 5000
         )
 
@@ -2583,7 +2597,7 @@ class MainWindow(QMainWindow):
         self._update_next_label()
         self._refresh_markers()
         self._refresh_playlist_checks()
-        self.statusBar().showMessage(f"Deleted {n} clip{'s' if n != 1 else ''}: {group_dir}")
+        self._show_status(f"Deleted {n} clip{'s' if n != 1 else ''}: {group_dir}")
 
     def _on_portrait_ratio_changed(self, text: str) -> None:
         ratio = None if text == "Off" else text
@@ -2861,7 +2875,7 @@ class MainWindow(QMainWindow):
         if not self._file_path:
             return
         if self._export_worker and self._export_worker.isRunning():
-            self.statusBar().showMessage("Export already running…")
+            self._show_status("Export already running…")
             return
 
         fmt = self._cmb_format.currentText()
@@ -2944,7 +2958,7 @@ class MainWindow(QMainWindow):
         # Subject tracking: re-detect crop center per sub-clip.
         if self._chk_track.isChecked() and any(j[2] for j in jobs):
             starts = [j[0] for j in jobs]
-            self.statusBar().showMessage(f"Tracking subject across {len(jobs)} clip(s)…")
+            self._show_status(f"Tracking subject across {len(jobs)} clip(s)…")
             QApplication.processEvents()
             centers = track_centers_for_jobs(
                 self._file_path, self._cursor, base_center, starts,
@@ -2966,7 +2980,7 @@ class MainWindow(QMainWindow):
         self._export_spread = self._spn_spread.value()
 
         self._btn_export.setEnabled(False)
-        self.statusBar().showMessage(f"Exporting {len(jobs)} clip(s)…")
+        self._show_status(f"Exporting {len(jobs)} clip(s)…")
 
         # Show one pending marker at the cursor position for the whole batch.
         first_out = jobs[0][1]
@@ -3018,7 +3032,7 @@ class MainWindow(QMainWindow):
         upsert_clip_annotation(folder, path, label)
         self._last_export_path = path
         _log(f"  clip done: {os.path.basename(path)}")
-        self.statusBar().showMessage(f"Exported: {os.path.basename(path)}")
+        self._show_status(f"Exported: {os.path.basename(path)}")
 
     def _on_batch_done(self):
         """Called once after all clips in the batch are done."""
@@ -3029,6 +3043,11 @@ class MainWindow(QMainWindow):
         self._btn_export.setEnabled(True)
         self._btn_export.setText("Export")
         self._btn_export.setStyleSheet("")
+        if self._last_export_path:
+            group = os.path.basename(os.path.dirname(self._last_export_path))
+            self._show_status(f"Export complete: {group}", 5000)
+        else:
+            self._show_status("Export complete", 5000)
         self._btn_delete.setEnabled(True)
         self._btn_delete.setText("Delete")
         self._refresh_markers()
@@ -3051,13 +3070,13 @@ class MainWindow(QMainWindow):
         self._btn_export.setText("Export")
         self._btn_export.setStyleSheet("")
         self._refresh_markers()  # remove stale pending marker
-        self.statusBar().showMessage(f"Export error: {msg}")
+        self._show_status(f"Export error: {msg}")
 
     def _on_cancel_export(self):
         if self._export_worker and self._export_worker.isRunning():
             self._btn_cancel.setEnabled(False)
             self._export_worker.cancel()
-            self.statusBar().showMessage("Cancelling export…")
+            self._show_status("Cancelling export…")
 
     def _on_export_cancelled(self):
         _log("Export cancelled")
@@ -3069,7 +3088,7 @@ class MainWindow(QMainWindow):
         markers = self._db.get_markers(os.path.basename(self._file_path), self._profile)
         if markers:
             self._playlist.mark_done(self._file_path, len(markers))
-        self.statusBar().showMessage("Export cancelled", 4000)
+        self._show_status("Export cancelled", 4000)
 
     def changeEvent(self, event):
         super().changeEvent(event)
