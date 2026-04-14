@@ -2793,35 +2793,34 @@ class MainWindow(QMainWindow):
                     out = build_export_path(folder, name, self._export_counter, sub=sub)
                 jobs.append((start, out, base_ratio, base_center))
 
-            # Apply crop keyframes: each sub-clip uses the latest keyframe
-            # at or before its start time (keyframes set in lock mode).
-            if self._crop_keyframes:
-                for i, (s, o, r, c) in enumerate(jobs):
-                    center = base_center
-                    for kt, kc in self._crop_keyframes:
-                        if kt <= s + 0.05:
-                            center = kc
-                        else:
-                            break
-                    jobs[i] = (s, o, r, center)
-
-            # Random crop: ~1 per 3 clips gets a random crop + random position.
-            # When both portrait and square are on, they share the quota.
+            # Apply crop keyframes (or fall back to base state).
             rand_portrait = self._chk_rand_portrait.isChecked()
             rand_square = self._chk_rand_square.isChecked()
-            if (rand_portrait or rand_square) and n_clips > 1:
-                n_random = max(1, n_clips // 3)
-                indices = random.sample(range(n_clips), n_random)
-                # Build pool of ratios to assign
-                if rand_portrait and rand_square:
-                    ratios = ["9:16", "1:1"]
-                elif rand_portrait:
-                    ratios = ["9:16"]
-                else:
-                    ratios = ["1:1"]
-                for idx in indices:
-                    s, o, _, c = jobs[idx]
-                    jobs[idx] = (s, o, random.choice(ratios), c)
+            widened = apply_keyframes_to_jobs(
+                jobs, self._crop_keyframes,
+                base_center=base_center, base_ratio=base_ratio,
+                base_rand_p=rand_portrait, base_rand_s=rand_square,
+            )
+
+            # Random crop: eligible clips (per their keyframe flags) have
+            # ~1 in 3 chance of getting a random ratio applied.
+            portrait_eligible = [i for i, w in enumerate(widened) if w[4]]
+            square_eligible = [i for i, w in enumerate(widened) if w[5]]
+            rand_indices: dict[int, list[str]] = {}
+            if portrait_eligible and n_clips > 1:
+                n = max(1, len(portrait_eligible) // 3)
+                for i in random.sample(portrait_eligible, min(n, len(portrait_eligible))):
+                    rand_indices.setdefault(i, []).append("9:16")
+            if square_eligible and n_clips > 1:
+                n = max(1, len(square_eligible) // 3)
+                for i in random.sample(square_eligible, min(n, len(square_eligible))):
+                    rand_indices.setdefault(i, []).append("1:1")
+
+            jobs = []
+            for i, (s, o, ratio, center, _rp, _rs) in enumerate(widened):
+                if i in rand_indices:
+                    ratio = random.choice(rand_indices[i])
+                jobs.append((s, o, ratio, center))
 
         # Subject tracking: re-detect crop center per sub-clip.
         if self._chk_track.isChecked() and any(j[2] for j in jobs):
