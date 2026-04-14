@@ -16,6 +16,10 @@ A desktop tool for cutting 8-second clips from video files, designed for buildin
 
 All clips are exactly 8 seconds — the standard length for foley sound datasets.
 
+<p align="center">
+  <img src="assets/segment-diagram.svg" alt="Batch export diagram — 3 overlapping 8-second clips offset by a 3-second spread" width="720">
+</p>
+
 ## Features
 
 - **Frame-accurate scrubbing** — click or drag the timeline; arrow keys and J/L for frame-by-frame, Shift for 1-second steps

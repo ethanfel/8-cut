@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 260">
+  <defs>
+    <marker id="al" markerWidth="6" markerHeight="4" refX="0" refY="2" orient="auto">
+      <path d="M6,0 L0,2 L6,4" fill="#777"/>
+    </marker>
+    <marker id="ar" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto">
+      <path d="M0,0 L6,2 L0,4" fill="#777"/>
+    </marker>
+    <marker id="gl" markerWidth="6" markerHeight="4" refX="0" refY="2" orient="auto">
+      <path d="M6,0 L0,2 L6,4" fill="#e6a800"/>
+    </marker>
+    <marker id="gr" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto">
+      <path d="M0,0 L6,2 L0,4" fill="#e6a800"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="720" height="260" rx="12" fill="#161616"/>
+
+  <!-- Cursor / playhead -->
+  <text x="110" y="32" font-family="'Courier New', monospace" font-size="11" fill="#e6a800" text-anchor="middle">cursor</text>
+  <polygon points="104,38 116,38 110,46" fill="#ffd230"/>
+  <line x1="110" y1="46" x2="110" y2="195" stroke="#ffd230" stroke-width="1.5" stroke-dasharray="4,3"/>
+
+  <!-- Dashed guide lines at clip start offsets -->
+  <line x1="212" y1="56" x2="212" y2="195" stroke="#444" stroke-width="1" stroke-dasharray="2,4"/>
+  <line x1="314" y1="56" x2="314" y2="195" stroke="#444" stroke-width="1" stroke-dasharray="2,4"/>
+
+  <!-- Clip 0 -->
+  <text x="20" y="74" font-family="'Courier New', monospace" font-size="10" fill="#999">clip_001_0</text>
+  <rect x="110" y="56" width="272" height="28" rx="4" fill="#3c82dc" opacity="0.9"/>
+  <text x="246" y="74" font-family="'Courier New', monospace" font-size="11" fill="white" text-anchor="middle" opacity="0.9">8s</text>
+
+  <!-- Spread annotation 1 -->
+  <line x1="110" y1="88" x2="110" y2="104" stroke="#666" stroke-width="1"/>
+  <line x1="212" y1="88" x2="212" y2="104" stroke="#666" stroke-width="1"/>
+  <line x1="114" y1="96" x2="208" y2="96" stroke="#777" stroke-width="1" marker-start="url(#al)" marker-end="url(#ar)"/>
+  <text x="161" y="93" font-family="'Courier New', monospace" font-size="9" fill="#999" text-anchor="middle">spread 3s</text>
+
+  <!-- Clip 1 -->
+  <text x="20" y="126" font-family="'Courier New', monospace" font-size="10" fill="#999">clip_001_1</text>
+  <rect x="212" y="108" width="272" height="28" rx="4" fill="#5a9be6" opacity="0.85"/>
+  <text x="348" y="126" font-family="'Courier New', monospace" font-size="11" fill="white" text-anchor="middle" opacity="0.9">8s</text>
+
+  <!-- Spread annotation 2 -->
+  <line x1="212" y1="140" x2="212" y2="156" stroke="#666" stroke-width="1"/>
+  <line x1="314" y1="140" x2="314" y2="156" stroke="#666" stroke-width="1"/>
+  <line x1="216" y1="148" x2="310" y2="148" stroke="#777" stroke-width="1" marker-start="url(#al)" marker-end="url(#ar)"/>
+  <text x="263" y="145" font-family="'Courier New', monospace" font-size="9" fill="#999" text-anchor="middle">spread 3s</text>
+
+  <!-- Clip 2 -->
+  <text x="20" y="178" font-family="'Courier New', monospace" font-size="10" fill="#999">clip_001_2</text>
+  <rect x="314" y="160" width="272" height="28" rx="4" fill="#78b4f0" opacity="0.8"/>
+  <text x="450" y="178" font-family="'Courier New', monospace" font-size="11" fill="white" text-anchor="middle" opacity="0.9">8s</text>
+
+  <!-- Total span annotation -->
+  <line x1="110" y1="198" x2="110" y2="218" stroke="#e6a800" stroke-width="1"/>
+  <line x1="586" y1="198" x2="586" y2="218" stroke="#e6a800" stroke-width="1"/>
+  <line x1="114" y1="210" x2="582" y2="210" stroke="#e6a800" stroke-width="1" marker-start="url(#gl)" marker-end="url(#gr)"/>
+  <text x="348" y="235" font-family="'Courier New', monospace" font-size="12" fill="#e6a800" text-anchor="middle">total span: 14s</text>
+  <text x="348" y="250" font-family="'Courier New', monospace" font-size="10" fill="#666" text-anchor="middle">8 + (n&#x2212;1) &#xd7; spread</text>
+</svg>
