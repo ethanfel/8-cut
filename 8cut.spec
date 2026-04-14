@@ -86,7 +86,7 @@ a = Analysis(
         "pytest",
         "hypothesis",
     ],
-    noarchive=False,
+    noarchive=True,
     cipher=block_cipher,
 )
 
@@ -102,7 +102,7 @@ exe_kwargs = dict(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=False,  # GUI app
+    console=True,  # temporary: show errors on launch
 )
 
 if system == "Darwin":
