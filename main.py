@@ -24,7 +24,29 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QRect, QSize, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
+if getattr(sys, "frozen", False):
+    # In frozen builds, help ctypes find bundled libmpv
+    _bundle = Path(sys._MEIPASS)
+    if sys.platform == "win32":
+        os.add_dll_directory(str(_bundle))
+    elif sys.platform == "darwin":
+        os.environ.setdefault("DYLD_LIBRARY_PATH", str(_bundle))
 import mpv
+
+
+def _frozen_path() -> Path:
+    """Return the directory containing bundled binaries in a PyInstaller build."""
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS)
+    return Path(__file__).parent
+
+
+def _bin(name: str) -> str:
+    """Resolve a binary name (e.g. 'ffmpeg') to its full path in frozen builds."""
+    p = _frozen_path() / name
+    if p.exists():
+        return str(p)
+    return name  # fall back to PATH
 
 
 def _log(*args) -> None:
@@ -103,7 +125,7 @@ def build_ffmpeg_command(
     # so there is no keyframe-alignment issue from pre-input seek.
     # Image sequences always use libwebp, so skip HW encoder setup.
     use_hw_vaapi = encoder == "h264_vaapi" and not image_sequence
-    cmd = ["ffmpeg", "-y"]
+    cmd = [_bin("ffmpeg"), "-y"]
 
     # VAAPI needs a device for hardware context.
     if use_hw_vaapi:
@@ -157,7 +179,7 @@ def build_audio_extract_command(input_path: str, start: float, sequence_dir: str
     """Return an ffmpeg command that extracts audio to <sequence_dir>.wav."""
     audio_path = sequence_dir + ".wav"
     return [
-        "ffmpeg", "-y",
+        _bin("ffmpeg"), "-y",
         "-ss", str(start),
         "-i", input_path,
         "-t", "8",
@@ -229,7 +251,7 @@ def detect_hw_encoders() -> list[str]:
     _HW_ENCODERS = ["h264_nvenc", "h264_vaapi", "h264_qsv", "h264_amf", "h264_videotoolbox"]
     try:
         result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
+            [_bin("ffmpeg"), "-hide_banner", "-encoders"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode != 0:
@@ -304,7 +326,7 @@ def extract_frame_cv(video_path: str, time: float):
     fd, tmp = tempfile.mkstemp(suffix=".png")
     os.close(fd)
     try:
-        cmd = ["ffmpeg", "-y", "-ss", str(time), "-i", video_path,
+        cmd = [_bin("ffmpeg"), "-y", "-ss", str(time), "-i", video_path,
                "-frames:v", "1", tmp]
         result = subprocess.run(cmd, capture_output=True, timeout=10)
         if result.returncode != 0:
@@ -737,7 +759,7 @@ class FrameGrabber(QThread):
     def run(self):
         try:
             cmd = [
-                "ffmpeg", "-ss", str(self._time),
+                _bin("ffmpeg"), "-ss", str(self._time),
                 "-i", self._input,
                 "-frames:v", "1",
                 "-f", "image2pipe", "-vcodec", "png",
