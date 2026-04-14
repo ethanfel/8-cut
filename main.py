@@ -2630,6 +2630,8 @@ class MainWindow(QMainWindow):
         play_t = self._timeline._play_pos
         if play_t is None:
             play_t = self._cursor
+        if play_t < 0.1:
+            return
         ratio_text = self._cmb_portrait.currentText()
         kf_ratio = None if ratio_text == "Off" else ratio_text
         kf_rand_p = self._chk_rand_portrait.isChecked()
@@ -2681,6 +2683,8 @@ class MainWindow(QMainWindow):
             play_t = self._timeline._play_pos
             if play_t is None:
                 play_t = self._cursor
+            if play_t < 0.1:
+                return
             # Replace existing keyframe at same time, or insert sorted.
             ratio_text = self._cmb_portrait.currentText()
             kf_ratio = None if ratio_text == "Off" else ratio_text
