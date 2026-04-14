@@ -2169,7 +2169,7 @@ class MainWindow(QMainWindow):
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setContentsMargins(0, 0, 4, 0)
         right_layout.setSpacing(4)
         right_layout.addLayout(top_bar)
         right_layout.addWidget(self._mpv, stretch=1)
@@ -2184,7 +2184,8 @@ class MainWindow(QMainWindow):
         self._btn_open.setToolTip("Add video files to the queue")
         self._btn_open.clicked.connect(self._on_open_files)
 
-        self._chk_hide_exported = QCheckBox("Hide exported")
+        self._chk_hide_exported = QPushButton("Hide exported")
+        self._chk_hide_exported.setCheckable(True)
         self._chk_hide_exported.setToolTip("Hide files that already have exported clips")
         self._chk_hide_exported.setChecked(
             self._settings.value("hide_exported", "false") == "true"
