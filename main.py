@@ -24,13 +24,12 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QRect, QSize, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
-if getattr(sys, "frozen", False):
-    # In frozen builds, help ctypes find bundled libmpv
-    _bundle = Path(sys._MEIPASS)
-    if sys.platform == "win32":
-        os.add_dll_directory(str(_bundle))
-    elif sys.platform == "darwin":
-        os.environ.setdefault("DYLD_LIBRARY_PATH", str(_bundle))
+if sys.platform == "win32":
+    # Help ctypes find libmpv-2.dll next to main.py or in frozen bundle
+    _dll_dir = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent
+    os.add_dll_directory(str(_dll_dir))
+elif sys.platform == "darwin" and getattr(sys, "frozen", False):
+    os.environ.setdefault("DYLD_LIBRARY_PATH", str(Path(sys._MEIPASS)))
 import mpv
 
 
