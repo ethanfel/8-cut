@@ -839,6 +839,10 @@ class TimelineWidget(QWidget):
         self.update()
 
     def set_play_position(self, t: float | None) -> None:
+        # In lock mode, ignore mpv position updates while the user is dragging
+        # — the async seek hasn't caught up yet, so mpv reports stale values.
+        if self._locked and self._play_pos is not None and self._seek_timer.isActive():
+            return
         self._play_pos = t
         self.update()
 
@@ -1867,6 +1871,15 @@ class MainWindow(QMainWindow):
         self._frame_grabber: FrameGrabber | None = None
         self._fps: float = 25.0  # cached on file load via get_fps()
         self._crop_keyframes: list[tuple[float, float, str | None, bool, bool]] = []  # sorted by time
+        self._export_folder: str = ""  # actual folder used for current export (may include suffix)
+        self._export_folder_suffix: str = ""
+
+        # Subprofiles — lightweight export variants that append a suffix to the
+        # export folder.  Stored in QSettings only (no DB impact).
+        _raw = self._settings.value("subprofiles", [])
+        if isinstance(_raw, str):
+            _raw = [_raw] if _raw else []
+        self._subprofiles: list[str] = _raw or []
 
         # Widgets
         self._playlist = PlaylistWidget()
@@ -2005,6 +2018,7 @@ class MainWindow(QMainWindow):
         )
         self._spn_clips.valueChanged.connect(lambda: self._update_next_label())
         self._spn_clips.valueChanged.connect(lambda: self._preview_timer.start())
+        self._spn_clips.valueChanged.connect(self._update_play_loop)
 
         self._spn_spread = QDoubleSpinBox()
         self._spn_spread.setRange(2.0, 8.0)
@@ -2020,6 +2034,7 @@ class MainWindow(QMainWindow):
             lambda: self._timeline.set_clip_span(self._clip_span)
         )
         self._spn_spread.valueChanged.connect(lambda: self._preview_timer.start())
+        self._spn_spread.valueChanged.connect(self._update_play_loop)
 
         self._chk_rand_portrait = QCheckBox("1 random portrait")
         self._chk_rand_portrait.setToolTip(
@@ -2147,9 +2162,19 @@ class MainWindow(QMainWindow):
         transport_row.addStretch()
         transport_row.addWidget(self._lbl_next)
         transport_row.addWidget(self._btn_export)
+        # Subprofile export buttons sit right after Export
+        self._subprofile_btns: list[QPushButton] = []
+        self._sub_insert_anchor = self._btn_cancel  # buttons inserted before this
+        self._btn_add_sub = QPushButton("+")
+        self._btn_add_sub.setFixedWidth(28)
+        self._btn_add_sub.setToolTip("Add a subprofile — exports to folder_suffix")
+        self._btn_add_sub.clicked.connect(self._add_subprofile)
+        transport_row.addWidget(self._btn_add_sub)
         transport_row.addWidget(self._btn_cancel)
         transport_row.addWidget(self._spn_workers)
         transport_row.addWidget(self._btn_delete)
+        self._transport_row = transport_row
+        self._rebuild_subprofile_buttons()
 
         # Row 2 — annotation + output path
         path_row = QHBoxLayout()
@@ -2367,6 +2392,54 @@ class MainWindow(QMainWindow):
             _log(f"Profile switched: {text}")
             self._show_status(f"Profile: {text}", 3000)
 
+    # ── Subprofiles ──────────────────────────────────────────
+
+    def _rebuild_subprofile_buttons(self):
+        """Recreate the per-subprofile export buttons in the transport row."""
+        for btn in self._subprofile_btns:
+            self._transport_row.removeWidget(btn)
+            btn.deleteLater()
+        self._subprofile_btns.clear()
+        # Find where to insert: right after the main Export button.
+        anchor = self._transport_row.indexOf(self._btn_add_sub)
+        has_file = bool(self._file_path)
+        for i, name in enumerate(self._subprofiles):
+            btn = QPushButton(f"▸ {name}")
+            btn.setToolTip(f"Export to folder_{name}  (right-click to remove)")
+            btn.setEnabled(has_file)
+            btn.clicked.connect(lambda _, s=name: self._on_export(folder_suffix=s))
+            self._transport_row.insertWidget(anchor + i, btn)
+            self._subprofile_btns.append(btn)
+
+    def _add_subprofile(self):
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        for name in self._subprofiles:
+            menu.addAction(f"Remove '{name}'", lambda n=name: self._remove_subprofile(n))
+        if self._subprofiles:
+            menu.addSeparator()
+        menu.addAction("Add new…", self._new_subprofile)
+        menu.exec(self._btn_add_sub.mapToGlobal(self._btn_add_sub.rect().bottomLeft()))
+
+    def _new_subprofile(self):
+        name, ok = QInputDialog.getText(self, "New subprofile", "Suffix name:")
+        if ok and name.strip():
+            name = name.strip().replace(" ", "_")
+            if name not in self._subprofiles:
+                self._subprofiles.append(name)
+                self._settings.setValue("subprofiles", self._subprofiles)
+                self._rebuild_subprofile_buttons()
+
+    def _remove_subprofile(self, name: str):
+        if name in self._subprofiles:
+            self._subprofiles.remove(name)
+            self._settings.setValue("subprofiles", self._subprofiles)
+            self._rebuild_subprofile_buttons()
+
+    def _set_subprofile_btns_enabled(self, enabled: bool):
+        for btn in self._subprofile_btns:
+            btn.setEnabled(enabled)
+
     def _show_status(self, msg: str, timeout: int = 0) -> None:
         """Show a message in the inline status label. Timeout in ms (0 = sticky)."""
         self._lbl_status.setText(msg)
@@ -2437,6 +2510,7 @@ class MainWindow(QMainWindow):
         self._btn_play.setEnabled(True)
         self._btn_pause.setEnabled(True)
         self._btn_export.setEnabled(True)
+        self._set_subprofile_btns_enabled(True)
         # Reset stale state from previous file
         self._overwrite_path = ""
         self._overwrite_group = []
@@ -2838,6 +2912,10 @@ class MainWindow(QMainWindow):
             return
         self._mpv.play_loop(self._cursor, self._cursor + self._clip_span)
 
+    def _update_play_loop(self):
+        if self._file_path and self._mpv.is_playing():
+            self._mpv.play_loop(self._cursor, self._cursor + self._clip_span)
+
     def _on_pause(self):
         self._mpv.stop_loop()
         self._mpv.seek(self._cursor)
@@ -2897,7 +2975,7 @@ class MainWindow(QMainWindow):
         else:
             self._lbl_next.setText(f"→ {base}_0..{n - 1}")
 
-    def _on_export(self):
+    def _on_export(self, _=None, folder_suffix: str = ""):
         if not self._file_path:
             return
         if self._export_worker and self._export_worker.isRunning():
@@ -2907,12 +2985,15 @@ class MainWindow(QMainWindow):
         fmt = self._cmb_format.currentText()
         image_sequence = fmt == "WebP sequence"
         folder = self._txt_folder.text()
+        if folder_suffix:
+            folder = folder.rstrip(os.sep) + "_" + folder_suffix
         os.makedirs(folder, exist_ok=True)
         spread = self._spn_spread.value()
 
         ratio_text = self._cmb_portrait.currentText()
         base_ratio = None if ratio_text == "Off" else ratio_text
         base_center = self._crop_center
+        counter = self._export_counter
 
         if self._overwrite_path:
             # Group overwrite mode — re-export all sub-clips at this marker.
@@ -2940,16 +3021,29 @@ class MainWindow(QMainWindow):
         else:
             name = self._txt_name.text() or "clip"
             n_clips = self._spn_clips.value()
+            # For subprofile exports, calculate counter independently.
+            if folder_suffix:
+                counter = 1
+                while True:
+                    if image_sequence:
+                        p = build_sequence_dir(folder, name, counter, sub=0)
+                    else:
+                        p = build_export_path(folder, name, counter, sub=0)
+                    if not os.path.exists(p):
+                        break
+                    counter += 1
+            else:
+                counter = self._export_counter
             # Create the group subfolder
-            group_dir = os.path.join(folder, f"{name}_{self._export_counter:03d}")
+            group_dir = os.path.join(folder, f"{name}_{counter:03d}")
             os.makedirs(group_dir, exist_ok=True)
             jobs = []
             for sub in range(n_clips):
                 start = self._cursor + sub * spread
                 if image_sequence:
-                    out = build_sequence_dir(folder, name, self._export_counter, sub=sub)
+                    out = build_sequence_dir(folder, name, counter, sub=sub)
                 else:
-                    out = build_export_path(folder, name, self._export_counter, sub=sub)
+                    out = build_export_path(folder, name, counter, sub=sub)
                 jobs.append((start, out, base_ratio, base_center))
 
             # Apply crop keyframes (or fall back to base state).
@@ -3004,14 +3098,18 @@ class MainWindow(QMainWindow):
         self._export_format = fmt
         self._export_clip_count = self._spn_clips.value()
         self._export_spread = self._spn_spread.value()
+        self._export_folder = folder
+        self._export_folder_suffix = folder_suffix
 
         self._btn_export.setEnabled(False)
-        self._show_status(f"Exporting {len(jobs)} clip(s)…")
+        self._set_subprofile_btns_enabled(False)
+        suffix_tag = f" [{folder_suffix}]" if folder_suffix else ""
+        self._show_status(f"Exporting {len(jobs)} clip(s){suffix_tag}…")
 
         # Show one pending marker at the cursor position for the whole batch.
         first_out = jobs[0][1]
         pending = list(self._timeline._markers)
-        pending.append((self._cursor, self._export_counter, first_out))
+        pending.append((self._cursor, counter, first_out))
         self._timeline.set_markers(pending)
 
         hw_on = self._chk_hw.isChecked() and self._hw_encoders
@@ -3054,8 +3152,7 @@ class MainWindow(QMainWindow):
             spread=self._export_spread,
             profile=self._profile,
         )
-        folder = self._txt_folder.text()
-        upsert_clip_annotation(folder, path, label)
+        upsert_clip_annotation(self._export_folder, path, label)
         self._last_export_path = path
         _log(f"  clip done: {os.path.basename(path)}")
         self._show_status(f"Exported: {os.path.basename(path)}")
@@ -3064,9 +3161,9 @@ class MainWindow(QMainWindow):
         """Called once after all clips in the batch are done."""
         _log("Batch complete")
         self._btn_cancel.setEnabled(False)
-        self._export_counter += 1
         self._update_next_label()
         self._btn_export.setEnabled(True)
+        self._set_subprofile_btns_enabled(True)
         self._btn_export.setText("Export")
         self._btn_export.setStyleSheet("")
         if self._last_export_path:
@@ -3093,6 +3190,7 @@ class MainWindow(QMainWindow):
         _log(f"Export error: {msg}")
         self._btn_cancel.setEnabled(False)
         self._btn_export.setEnabled(True)
+        self._set_subprofile_btns_enabled(True)
         self._btn_export.setText("Export")
         self._btn_export.setStyleSheet("")
         self._refresh_markers()  # remove stale pending marker
@@ -3107,6 +3205,7 @@ class MainWindow(QMainWindow):
     def _on_export_cancelled(self):
         _log("Export cancelled")
         self._btn_export.setEnabled(True)
+        self._set_subprofile_btns_enabled(True)
         self._btn_export.setText("Export")
         self._btn_export.setStyleSheet("")
         self._update_next_label()
