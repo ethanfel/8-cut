@@ -3,7 +3,7 @@ import re
 import shutil
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from core.export import ExportRunner
@@ -17,6 +17,14 @@ router = APIRouter()
 _jobs: dict[str, dict] = {}
 
 _VALID_ENCODERS = {"libx264", "h264_nvenc", "h264_vaapi", "h264_qsv", "h264_amf", "h264_videotoolbox"}
+
+
+class CropKeyframe(BaseModel):
+    time: float
+    center: float
+    ratio: str | None = None
+    rand_portrait: bool = False
+    rand_square: bool = False
 
 
 class ExportRequest(BaseModel):
@@ -33,7 +41,7 @@ class ExportRequest(BaseModel):
     category: str = ""
     profile: str = "default"
     folder_suffix: str = ""
-    crop_keyframes: list | None = None
+    crop_keyframes: list[CropKeyframe] | None = None
     rand_portrait: bool = False
     rand_square: bool = False
     encoder: str = "libx264"
@@ -101,8 +109,12 @@ def start_export(req: ExportRequest):
 
     # Apply keyframes if provided — returns 6-tuples, strip back to 4
     if req.crop_keyframes:
+        kf_tuples = [
+            (kf.time, kf.center, kf.ratio, kf.rand_portrait, kf.rand_square)
+            for kf in req.crop_keyframes
+        ]
         widened = apply_keyframes_to_jobs(
-            jobs, req.crop_keyframes,
+            jobs, kf_tuples,
             req.crop_center, req.portrait_ratio,
             req.rand_portrait, req.rand_square,
         )
@@ -176,8 +188,8 @@ def get_export_status(job_id: str):
     }
 
 
-@router.delete("/export/{output_path:path}")
-def delete_export(output_path: str):
+@router.delete("/export")
+def delete_export(output_path: str = Query(...)):
     from ..app import db
     # Validate path is under EXPORT_DIR
     real = os.path.realpath(output_path)
