@@ -1,0 +1,17 @@
+services:
+  8cut:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - /path/to/videos:/videos:ro
+      - /path/to/exports:/exports
+      - 8cut-data:/data
+    environment:
+      MEDIA_DIRS: /videos
+      EXPORT_DIR: /exports
+      DB_PATH: /data/8cut.db
+      CACHE_DIR: /data/cache
+
+volumes:
+  8cut-data:
