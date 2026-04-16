@@ -6,7 +6,7 @@
   import ProfileBar from "../components/ProfileBar.svelte";
   import { mpvStart, mpvLoad, mpvSeek, mpvPause, mpvResume, mpvSetLoop, mpvClearLoop, mpvTimePos, mpvDuration } from "$lib/mpv";
   import { streamUrl, audioUrl, deleteExport, getMarkers } from "$lib/api";
-  import { connectExportWs } from "$lib/ws";
+  import { connectExportWs, disconnectExportWs } from "$lib/ws";
   import { loadSettings, saveSettings } from "$lib/settings";
   import {
     currentFile, cursor, duration, playPos, playing, quality,
@@ -44,6 +44,7 @@
 
   onDestroy(() => {
     clearInterval(pollInterval);
+    disconnectExportWs();
   });
 
   // Load file into mpv when currentFile OR quality changes

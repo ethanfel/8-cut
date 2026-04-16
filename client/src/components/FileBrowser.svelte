@@ -16,6 +16,14 @@
     }
   });
 
+  // Reload hidden files when profile changes
+  $effect(() => {
+    void $profile;
+    if (selectedRoot) {
+      loadFiles();
+    }
+  });
+
   async function loadFiles() {
     $files = await getFiles(selectedRoot);
     const hidden = await getHidden($profile);
