@@ -1,4 +1,5 @@
 from fastapi import FastAPI, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
 
 from core.db import ProcessedDB
 from .config import DB_PATH
@@ -6,6 +7,13 @@ from .routes import files, stream, markers, export, hidden
 from . import ws
 
 app = FastAPI(title="8-cut Server")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 db = ProcessedDB(DB_PATH)
 
