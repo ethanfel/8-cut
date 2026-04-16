@@ -1030,7 +1030,8 @@ class TimelineWidget(QWidget):
                     if abs(x - frac * w) <= 10:
                         t = frac * self._duration
                         self.marker_clicked.emit(t, output_path)
-                        self._seek(x)
+                        if not self._locked:
+                            self._seek(x)
                         return
             self.marker_deselected.emit()
             self._seek(x)
@@ -1336,11 +1337,16 @@ class MpvWidget(QWidget):
         except SystemError:
             pass
 
-    def play_loop(self, a: float, b: float):
+    def play_loop(self, a: float, b: float, resume: bool = False):
         self._player["ab-loop-a"] = a
         self._player["ab-loop-b"] = min(b, self._player.duration or b)
-        self._player.seek(a, "absolute")
+        if not resume:
+            self._player.seek(a, "absolute")
         self._player.pause = False
+
+    def update_loop_end(self, b: float):
+        """Adjust the B point of the current loop without seeking."""
+        self._player["ab-loop-b"] = min(b, self._player.duration or b)
 
     def stop_loop(self):
         self._player["ab-loop-a"] = "no"
@@ -1797,12 +1803,20 @@ class PlaylistWidget(QListWidget):
 
 
 class _KeyFilter(QObject):
-    """Suppress global keyboard shortcuts when a text input widget has focus."""
+    """Suppress global keyboard shortcuts when a text input widget has focus,
+    and release focus from input widgets on click-away."""
+    _INPUT_TYPES = (QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox)
+
     def eventFilter(self, obj, event):
         from PyQt6.QtCore import QEvent
         if event.type() == QEvent.Type.ShortcutOverride and isinstance(obj, QLineEdit):
             event.accept()
             return True
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if not isinstance(obj, self._INPUT_TYPES):
+                focused = QApplication.focusWidget()
+                if isinstance(focused, self._INPUT_TYPES):
+                    focused.clearFocus()
         return super().eventFilter(obj, event)
 
 
@@ -2293,9 +2307,14 @@ class MainWindow(QMainWindow):
             )
         QShortcut(QKeySequence("K"), self, context=ctx).activated.connect(self._on_pause)
         QShortcut(QKeySequence("E"), self, context=ctx).activated.connect(self._on_export)
+        for i in range(1, 10):
+            QShortcut(QKeySequence(str(i)), self, context=ctx).activated.connect(
+                lambda _, idx=i - 1: self._export_subprofile(idx)
+            )
         QShortcut(QKeySequence("M"), self, context=ctx).activated.connect(self._jump_to_next_marker)
         QShortcut(QKeySequence("N"), self, context=ctx).activated.connect(self._playlist.advance)
         QShortcut(QKeySequence("G"), self, context=ctx).activated.connect(self._btn_lock.toggle)
+        QShortcut(QKeySequence("A"), self, context=ctx).activated.connect(self._autoclip)
         for key in ("?", "F1"):
             QShortcut(QKeySequence(key), self, context=ctx).activated.connect(self._show_shortcuts)
 
@@ -2320,12 +2339,14 @@ class MainWindow(QMainWindow):
             "<tr><td><b>Space / P</b></td><td>Play / Pause</td></tr>"
             "<tr><td><b>K</b></td><td>Pause and snap to cursor</td></tr>"
             "<tr><td><b>E</b></td><td>Export</td></tr>"
+            "<tr><td><b>1–9</b></td><td>Export to subprofile 1–9</td></tr>"
             "<tr><td><b>M</b></td><td>Jump to next marker</td></tr>"
             "<tr><td><b>N</b></td><td>Next file in playlist</td></tr>"
             "<tr><td><b>G</b></td><td>Toggle cursor lock</td></tr>"
+            "<tr><td><b>A</b></td><td>Autoclip — fit clip count to pause position</td></tr>"
             "<tr><td><b>? / F1</b></td><td>This help</td></tr>"
             "<tr><td colspan='2'><hr></td></tr>"
-            "<tr><td><b>Double-click marker</b></td><td>Enter overwrite mode</td></tr>"
+            "<tr><td><b>Double-click marker</b></td><td>Enter overwrite mode (locked: jump to end of clip span)</td></tr>"
             "<tr><td><b>Right-click marker</b></td><td>Delete clip group</td></tr>"
             "<tr><td><b>Click video / crop bar</b></td><td>Reposition portrait crop</td></tr>"
             "</table>"
@@ -2429,6 +2450,10 @@ class MainWindow(QMainWindow):
                 self._subprofiles.append(name)
                 self._settings.setValue("subprofiles", self._subprofiles)
                 self._rebuild_subprofile_buttons()
+
+    def _export_subprofile(self, idx: int):
+        if idx < len(self._subprofiles):
+            self._on_export(folder_suffix=self._subprofiles[idx])
 
     def _remove_subprofile(self, name: str):
         if name in self._subprofiles:
@@ -2585,6 +2610,20 @@ class MainWindow(QMainWindow):
         self._show_status(f"Deleted keyframe @ {format_time(time)}", 3000)
 
     def _on_marker_clicked(self, start_time: float, output_path: str) -> None:
+        # In lock mode, move cursor to the end of this marker's span.
+        if self._btn_lock.isChecked():
+            meta = self._db.get_by_output_path(output_path)
+            clip_count = meta["clip_count"] or self._spn_clips.value() if meta else self._spn_clips.value()
+            spread = meta["spread"] or self._spn_spread.value() if meta else self._spn_spread.value()
+            next_pos = start_time + 8.0 + (clip_count - 1) * spread
+            self._cursor = next_pos
+            self._timeline.set_cursor(next_pos)
+            self._mpv.seek(next_pos)
+            self._lbl_time.setText(f"{format_time(next_pos)} / {format_time(self._mpv.get_duration())}")
+            self._update_next_label()
+            self._preview_timer.start()
+            self._show_status(f"Cursor → end of {os.path.basename(os.path.dirname(output_path))}", 3000)
+            return
         self._overwrite_path = output_path
         self._overwrite_group = self._db.get_group(output_path)
         n = len(self._overwrite_group)
@@ -2900,26 +2939,38 @@ class MainWindow(QMainWindow):
         if self._mpv.is_playing():
             self._on_pause()
         else:
-            self._on_play()
+            self._on_play(resume=True)
 
     @property
     def _clip_span(self) -> float:
         """Total time covered by the overlapping clips."""
         return 8.0 + (self._spn_clips.value() - 1) * self._spn_spread.value()
 
-    def _on_play(self):
+    def _on_play(self, resume: bool = False):
         if not self._file_path:
             return
-        self._mpv.play_loop(self._cursor, self._cursor + self._clip_span)
+        self._mpv.play_loop(self._cursor, self._cursor + self._clip_span, resume=resume)
 
     def _update_play_loop(self):
         if self._file_path and self._mpv.is_playing():
-            self._mpv.play_loop(self._cursor, self._cursor + self._clip_span)
+            self._mpv.update_loop_end(self._cursor + self._clip_span)
 
     def _on_pause(self):
         self._mpv.stop_loop()
-        self._mpv.seek(self._cursor)
-        self._timeline.set_play_position(None)
+
+    def _autoclip(self):
+        """Set clip count to fit the current pause position."""
+        if not self._file_path:
+            return
+        play_t = self._timeline._play_pos
+        if play_t is None or play_t <= self._cursor:
+            return
+        elapsed = play_t - self._cursor
+        spread = self._spn_spread.value()
+        # n clips span 8 + (n-1)*spread seconds
+        n = int((elapsed - 8.0) / spread) + 1
+        n = max(1, n)
+        self._spn_clips.setValue(n)
 
     def _step_cursor(self, delta: float) -> None:
         if not self._file_path:
