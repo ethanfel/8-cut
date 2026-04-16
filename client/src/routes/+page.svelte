@@ -7,6 +7,7 @@
   import { mpvStart, mpvLoad, mpvSeek, mpvPause, mpvResume, mpvSetLoop, mpvClearLoop, mpvTimePos, mpvDuration } from "$lib/mpv";
   import { streamUrl, audioUrl, deleteExport, getMarkers } from "$lib/api";
   import { connectExportWs } from "$lib/ws";
+  import { loadSettings, saveSettings } from "$lib/settings";
   import {
     currentFile, cursor, duration, playPos, playing, quality,
     clips, spread, locked, markers, profile, clipSpan, subprofiles
@@ -16,6 +17,8 @@
   let exportPanelRef: ExportPanel;
 
   onMount(async () => {
+    loadSettings();
+
     await mpvStart();
     connectExportWs();
 
@@ -27,6 +30,16 @@
         } catch { /* mpv not ready */ }
       }
     }, 50);
+
+    // Auto-save settings on changes
+    const unsubs = [
+      quality.subscribe(() => saveSettings()),
+      clips.subscribe(() => saveSettings()),
+      spread.subscribe(() => saveSettings()),
+      profile.subscribe(() => saveSettings()),
+      subprofiles.subscribe(() => saveSettings()),
+    ];
+    return () => unsubs.forEach(u => u());
   });
 
   onDestroy(() => {
