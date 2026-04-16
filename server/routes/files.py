@@ -1,6 +1,6 @@
 import os
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from ..config import MEDIA_DIRS, VIDEO_EXTENSIONS
@@ -38,11 +38,19 @@ def list_roots():
     return MEDIA_DIRS
 
 
+def _safe_resolve(path: str, root: str) -> str:
+    """Join path to root and verify it stays within the root directory."""
+    if root not in MEDIA_DIRS:
+        raise HTTPException(status_code=400, detail="invalid root")
+    full = os.path.realpath(os.path.join(root, path))
+    if not full.startswith(os.path.realpath(root) + os.sep):
+        raise HTTPException(status_code=403, detail="path outside media root")
+    return full
+
+
 @router.get("/video/{path:path}")
 def serve_video(path: str, root: str = Query(...)):
-    if root not in MEDIA_DIRS:
-        return {"error": "invalid root"}
-    full = os.path.join(root, path)
+    full = _safe_resolve(path, root)
     if not os.path.isfile(full):
-        return {"error": "not found"}
+        raise HTTPException(status_code=404, detail="not found")
     return FileResponse(full, media_type="video/mp4")

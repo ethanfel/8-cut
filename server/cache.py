@@ -130,6 +130,13 @@ def _audio_extract_worker(source_path: str) -> None:
             os.unlink(tmp)
 
 
+def _prune_dead_jobs() -> None:
+    """Remove finished threads from _active_jobs. Must be called under _jobs_lock."""
+    dead = [k for k, t in _active_jobs.items() if not t.is_alive()]
+    for k in dead:
+        del _active_jobs[k]
+
+
 def ensure_transcode(source_path: str, quality: str) -> CacheStatus:
     """Start transcode if not cached. Returns current status."""
     status = get_status(source_path, quality)
@@ -138,6 +145,7 @@ def ensure_transcode(source_path: str, quality: str) -> CacheStatus:
 
     job_key = f"{source_path}:{quality}"
     with _jobs_lock:
+        _prune_dead_jobs()
         if job_key in _active_jobs and _active_jobs[job_key].is_alive():
             return CacheStatus.TRANSCODING
         t = threading.Thread(target=_transcode_worker, args=(source_path, quality), daemon=True)
@@ -154,6 +162,7 @@ def ensure_audio(source_path: str) -> CacheStatus:
 
     job_key = f"{source_path}:audio"
     with _jobs_lock:
+        _prune_dead_jobs()
         if job_key in _active_jobs and _active_jobs[job_key].is_alive():
             return CacheStatus.TRANSCODING
         t = threading.Thread(target=_audio_extract_worker, args=(source_path,), daemon=True)

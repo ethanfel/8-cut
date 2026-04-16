@@ -1,6 +1,6 @@
 import os
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 
 from ..config import MEDIA_DIRS, QUALITY_PRESETS
@@ -9,20 +9,23 @@ from .. import cache
 router = APIRouter()
 
 
-def _resolve_source(path: str, root: str) -> str | None:
+def _resolve_source(path: str, root: str) -> str:
+    """Join path to root, verify it stays within root, and exists."""
     if root not in MEDIA_DIRS:
-        return None
-    full = os.path.join(root, path)
-    return full if os.path.isfile(full) else None
+        raise HTTPException(status_code=400, detail="invalid root")
+    full = os.path.realpath(os.path.join(root, path))
+    if not full.startswith(os.path.realpath(root) + os.sep):
+        raise HTTPException(status_code=403, detail="path outside media root")
+    if not os.path.isfile(full):
+        raise HTTPException(status_code=404, detail="not found")
+    return full
 
 
 @router.get("/stream/{path:path}")
 def stream_video(path: str, root: str = Query(...), quality: str = Query("low")):
     if quality not in QUALITY_PRESETS:
-        return JSONResponse({"error": f"invalid quality: {quality}"}, status_code=400)
+        raise HTTPException(status_code=400, detail=f"invalid quality: {quality}")
     source = _resolve_source(path, root)
-    if source is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
 
     status = cache.ensure_transcode(source, quality)
     if status == cache.CacheStatus.READY:
@@ -33,8 +36,6 @@ def stream_video(path: str, root: str = Query(...), quality: str = Query("low"))
 @router.get("/audio/{path:path}")
 def stream_audio(path: str, root: str = Query(...)):
     source = _resolve_source(path, root)
-    if source is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
 
     status = cache.ensure_audio(source)
     if status == cache.CacheStatus.READY:
@@ -45,6 +46,4 @@ def stream_audio(path: str, root: str = Query(...)):
 @router.get("/cache/status/{path:path}")
 def cache_status(path: str, root: str = Query(...)):
     source = _resolve_source(path, root)
-    if source is None:
-        return JSONResponse({"error": "not found"}, status_code=404)
     return cache.get_all_statuses(source)

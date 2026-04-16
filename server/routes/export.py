@@ -1,8 +1,9 @@
 import os
+import re
 import shutil
 import uuid
 
-from fastapi import APIRouter, WebSocket
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from core.export import ExportRunner
@@ -36,20 +37,34 @@ class ExportRequest(BaseModel):
     encoder: str = "libx264"
 
 
+def _next_counter(folder: str, basename: str) -> int:
+    """Scan folder for existing {basename}_NNN dirs and return max + 1."""
+    pattern = re.compile(rf'^{re.escape(basename)}_(\d{{3}})$')
+    highest = 0
+    if os.path.isdir(folder):
+        for entry in os.listdir(folder):
+            m = pattern.match(entry)
+            if m:
+                highest = max(highest, int(m.group(1)))
+    return highest + 1
+
+
 @router.post("/export")
 def start_export(req: ExportRequest):
+    from ..app import db
+
     job_id = str(uuid.uuid4())[:8]
     folder = EXPORT_DIR
     if req.folder_suffix:
         folder = folder + req.folder_suffix
 
     image_sequence = req.format == "WebP"
+    counter = _next_counter(folder, req.name)
 
     # Build job list: (start, output_path, portrait_ratio, crop_center)
     jobs = []
     for i in range(req.clips):
         start = req.cursor + i * req.spread
-        counter = 1  # server uses simple incrementing
         if image_sequence:
             out = build_sequence_dir(folder, req.name, counter, sub=i if req.clips > 1 else None)
         else:
@@ -57,18 +72,34 @@ def start_export(req: ExportRequest):
         os.makedirs(os.path.dirname(out), exist_ok=True)
         jobs.append((start, out, req.portrait_ratio, req.crop_center))
 
-    # Apply keyframes if provided
+    # Apply keyframes if provided — returns 6-tuples, strip back to 4
     if req.crop_keyframes:
-        jobs = apply_keyframes_to_jobs(
+        widened = apply_keyframes_to_jobs(
             jobs, req.crop_keyframes,
             req.crop_center, req.portrait_ratio,
             req.rand_portrait, req.rand_square,
         )
+        jobs = [(s, o, r, c) for s, o, r, c, _rp, _rs in widened]
 
     completed = []
 
     def on_clip_done(path: str):
         completed.append(path)
+        # Record in DB so markers show up
+        db.add(
+            filename=os.path.basename(req.input_path),
+            start_time=req.cursor,
+            output_path=path,
+            label=req.label,
+            category=req.category,
+            short_side=req.short_side,
+            portrait_ratio=req.portrait_ratio or "",
+            crop_center=req.crop_center,
+            fmt=req.format,
+            clip_count=req.clips,
+            spread=req.spread,
+            profile=req.profile,
+        )
         ws_module.broadcast({"type": "clip_done", "job_id": job_id, "path": path})
 
     def on_all_done():
@@ -106,7 +137,7 @@ def start_export(req: ExportRequest):
 def get_export_status(job_id: str):
     job = _jobs.get(job_id)
     if job is None:
-        return {"error": "job not found"}
+        raise HTTPException(status_code=404, detail="job not found")
     return {
         "status": job["status"],
         "total": job["total"],
@@ -119,14 +150,13 @@ def get_export_status(job_id: str):
 @router.delete("/export/{output_path:path}")
 def delete_export(output_path: str):
     from ..app import db
+    # Validate path is under EXPORT_DIR
+    real = os.path.realpath(output_path)
+    if not real.startswith(os.path.realpath(EXPORT_DIR) + os.sep):
+        raise HTTPException(status_code=403, detail="path outside export directory")
     db.delete_by_output_path(output_path)
     if os.path.isfile(output_path):
         os.unlink(output_path)
     elif os.path.isdir(output_path):
         shutil.rmtree(output_path)
     return {"deleted": output_path}
-
-
-@router.websocket("/ws/export")
-async def export_ws(websocket: WebSocket):
-    await ws_module.connect(websocket)
