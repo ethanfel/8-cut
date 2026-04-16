@@ -1,16 +1,7 @@
 name: Docker Image
 
 on:
-  push:
-    branches: [server]
-    tags: ["v*"]
-    paths:
-      - "core/**"
-      - "server/**"
-      - "Dockerfile"
-      - "docker-compose.yml"
-      - ".github/workflows/docker.yml"
-  workflow_dispatch:
+  workflow_dispatch:  # manual only — build locally and push to ghcr.io
 
 permissions:
   contents: read
