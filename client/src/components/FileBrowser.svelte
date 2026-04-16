@@ -7,6 +7,7 @@
   } from "$lib/stores";
 
   let selectedRoot = $state("");
+  let currentFolder = $state("");
 
   onMount(async () => {
     $roots = await getRoots();
@@ -30,9 +31,42 @@
     $hiddenFiles = new Set(hidden);
   }
 
+  // Derive subfolders and files at current folder level
+  let subfolders = $derived.by(() => {
+    const prefix = currentFolder ? currentFolder + "/" : "";
+    const folderSet = new Set<string>();
+    for (const f of $visibleFiles) {
+      if (!f.path.startsWith(prefix)) continue;
+      const rest = f.path.slice(prefix.length);
+      const slashIdx = rest.indexOf("/");
+      if (slashIdx !== -1) {
+        folderSet.add(rest.slice(0, slashIdx));
+      }
+    }
+    return [...folderSet].sort();
+  });
+
+  let currentFiles = $derived.by(() => {
+    const prefix = currentFolder ? currentFolder + "/" : "";
+    return $visibleFiles.filter(f => {
+      if (!f.path.startsWith(prefix)) return false;
+      const rest = f.path.slice(prefix.length);
+      return !rest.includes("/"); // only direct children
+    });
+  });
+
   async function selectFile(file: typeof $files[0]) {
     $currentFile = file;
     $markers = await getMarkers(file.name, $profile);
+  }
+
+  function navigateToFolder(name: string) {
+    currentFolder = currentFolder ? currentFolder + "/" + name : name;
+  }
+
+  function navigateUp() {
+    const idx = currentFolder.lastIndexOf("/");
+    currentFolder = idx === -1 ? "" : currentFolder.slice(0, idx);
   }
 
   function formatSize(bytes: number): string {
@@ -53,15 +87,24 @@
 
 <div class="file-browser">
   <div class="controls">
-    <select bind:value={selectedRoot} onchange={loadFiles}>
+    <select bind:value={selectedRoot} onchange={() => { currentFolder = ""; loadFiles(); }}>
       {#each $roots as root}
         <option value={root}>{root}</option>
       {/each}
     </select>
     <label><input type="checkbox" bind:checked={$showHidden} /> Hidden</label>
   </div>
+  {#if currentFolder}
+    <div class="breadcrumb" onclick={navigateUp}>.. / {currentFolder}</div>
+  {/if}
   <ul class="file-list">
-    {#each $visibleFiles as file}
+    {#each subfolders as folder}
+      <li class="folder" onclick={() => navigateToFolder(folder)}>
+        <span class="name">{folder}/</span>
+        <span class="badge">dir</span>
+      </li>
+    {/each}
+    {#each currentFiles as file}
       <li
         class:selected={$currentFile?.path === file.path}
         onclick={() => selectFile(file)}
@@ -94,6 +137,18 @@
     border: 1px solid #444;
     padding: 2px;
   }
+  .breadcrumb {
+    padding: 3px 8px;
+    font-size: 11px;
+    color: #88aaff;
+    cursor: pointer;
+    background: #252525;
+    border-bottom: 1px solid #333;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .breadcrumb:hover { background: #2a2a2a; }
   .file-list {
     list-style: none;
     padding: 0;
@@ -110,5 +165,7 @@
   }
   .file-list li:hover { background: #333; }
   .file-list li.selected { background: #0066cc; }
+  .file-list li.folder { color: #88aaff; }
   .size { color: #888; font-size: 11px; }
+  .badge { color: #666; font-size: 10px; }
 </style>
