@@ -24,7 +24,7 @@
 
 **Step 2: Create core/paths.py**
 
-Extract from main.py lines 38-74: `_frozen_path`, `_bin`, `_log`, `build_export_path`, `build_sequence_dir`, `format_time`.
+Extract from main.py lines 36-74: `_frozen_path`, `_bin`, `_log`, `build_export_path`, `build_sequence_dir`, `format_time`.
 
 ```python
 import os
@@ -85,7 +85,7 @@ git commit -m "feat: create core/paths module with shared path helpers"
 
 **Step 1: Create core/ffmpeg.py**
 
-Extract from main.py lines 77-289: `_RATIOS`, `_portrait_crop_filter`, `resolve_keyframe`, `apply_keyframes_to_jobs`, `build_ffmpeg_command`, `build_audio_extract_command`, `detect_hw_encoders`.
+Extract from main.py lines 77-112 and 244-289: `_RATIOS`, `_portrait_crop_filter`, `resolve_keyframe`, `apply_keyframes_to_jobs`, `build_ffmpeg_command`, `build_audio_extract_command`, `detect_hw_encoders`. (Lines 115-188 are also ffmpeg-related. Lines 191-241 are annotations — extracted separately in Task 4.)
 
 ```python
 import os
@@ -592,30 +592,38 @@ git commit -m "feat: create core/tracking module with YOLO subject tracking"
 At the top of main.py, after the existing stdlib imports (line 17), add:
 
 ```python
-from core.paths import _frozen_path, _bin, _log, build_export_path, build_sequence_dir, format_time
+from core.paths import _bin, _log, build_export_path, build_sequence_dir, format_time
 from core.ffmpeg import (
     _RATIOS, resolve_keyframe, apply_keyframes_to_jobs,
     build_ffmpeg_command, build_audio_extract_command, detect_hw_encoders,
 )
 from core.db import ProcessedDB
-from core.annotations import build_annotation_json_path, remove_clip_annotation, upsert_clip_annotation
+from core.annotations import remove_clip_annotation, upsert_clip_annotation
 from core.tracking import track_centers_for_jobs
 ```
 
-**Step 2: Delete the extracted function definitions**
+**Step 2: Delete the extracted function definitions and dead imports**
 
-Remove from main.py:
-- Lines 38-74: `_frozen_path`, `_bin`, `_log`, `build_export_path`, `build_sequence_dir`, `format_time`
-- Lines 77-289: `resolve_keyframe`, `apply_keyframes_to_jobs`, `build_ffmpeg_command`, `build_audio_extract_command`, `detect_hw_encoders`, `_RATIOS`, `_portrait_crop_filter`
-- Lines 191-241: annotation functions (already in range above)
-- Lines 291: `_SELVA_CATEGORIES` stays — it's UI-only
-- Lines 294-395: tracking functions
+Remove definitions from main.py:
+- Lines 36-74: `_frozen_path`, `_bin`, `_log`, `build_export_path`, `build_sequence_dir`, `format_time`
+- Lines 77-188: `resolve_keyframe`, `apply_keyframes_to_jobs`, `build_ffmpeg_command`, `build_audio_extract_command`
+- Lines 191-241: annotation functions (`build_annotation_json_path`, `remove_clip_annotation`, `upsert_clip_annotation`)
+- Lines 244-289: `detect_hw_encoders`, `_RATIOS`, `_portrait_crop_filter`
+- Lines 294-395: tracking functions (`_yolo_model`, `_get_yolo`, `extract_frame_cv`, `detect_subject_center`, `track_centers_for_jobs`)
 - Lines 398-626: `ProcessedDB` class
 
+Remove now-dead stdlib imports from the top of main.py:
+- `re` (only used in `detect_hw_encoders`)
+- `json` (only used in annotation functions)
+- `sqlite3` (only used in `ProcessedDB`)
+- `tempfile` (only used in `extract_frame_cv`)
+- `datetime`, `timezone` from the datetime import (only used in `_log` and `ProcessedDB`)
+
 Keep in main.py:
-- `_SELVA_CATEGORIES` (UI constant)
+- `_SELVA_CATEGORIES` (UI constant, line 291)
 - `_RATIOS` reference — imported from core.ffmpeg
 - `ExportWorker` (QThread-based, stays in main.py — the server uses `core.export.ExportRunner` instead)
+- `_DBWorker` and `FrameGrabber` (QThread-based, stay in main.py)
 
 **Step 3: Verify Qt app still works**
 
@@ -637,10 +645,16 @@ git commit -m "refactor: import shared logic from core/ instead of inline defini
 ### Task 8: Create server/config.py
 
 **Files:**
-- Create: `server/__init__.py`
+- Create: `server/__init__.py` (empty package marker)
 - Create: `server/config.py`
 
-**Step 1: Create config**
+**Step 1: Create `server/__init__.py`**
+
+```python
+# empty — package marker
+```
+
+**Step 2: Create config**
 
 ```python
 import os
@@ -738,9 +752,39 @@ def list_roots():
     return MEDIA_DIRS
 ```
 
-**Step 3: Create stub routers** for stream, markers, export, hidden (empty routers so app.py imports don't fail).
+**Step 3: Create `server/routes/__init__.py`**
 
-**Step 4: Commit**
+```python
+# empty — package marker
+```
+
+**Step 4: Create stub routers** so app.py imports don't fail. Each file gets a minimal router — later tasks fill in the real endpoints.
+
+`server/routes/stream.py`:
+```python
+from fastapi import APIRouter
+router = APIRouter()
+```
+
+`server/routes/markers.py`:
+```python
+from fastapi import APIRouter
+router = APIRouter()
+```
+
+`server/routes/export.py`:
+```python
+from fastapi import APIRouter
+router = APIRouter()
+```
+
+`server/routes/hidden.py`:
+```python
+from fastapi import APIRouter
+router = APIRouter()
+```
+
+**Step 5: Commit**
 
 ```bash
 git add server/
@@ -867,6 +911,8 @@ RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY core/ core/
 COPY server/ server/
+# Note: ultralytics + opencv-python needed only if subject tracking is used.
+# Add them here if tracking is required on the server.
 RUN pip install --no-cache-dir fastapi uvicorn
 EXPOSE 8000
 CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000"]
