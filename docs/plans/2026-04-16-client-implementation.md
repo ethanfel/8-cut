@@ -152,16 +152,21 @@ export function getFiles(root?: string): Promise<VideoFile[]> {
   return get(`/api/files${q}`);
 }
 
+// For {path:path} routes, encode each segment individually to preserve slashes
+function encodePath(p: string): string {
+  return p.split("/").map(encodeURIComponent).join("/");
+}
+
 export function streamUrl(path: string, root: string, quality: string): string {
-  return `${serverUrl}/api/stream/${encodeURIComponent(path)}?root=${encodeURIComponent(root)}&quality=${quality}`;
+  return `${serverUrl}/api/stream/${encodePath(path)}?root=${encodeURIComponent(root)}&quality=${quality}`;
 }
 
 export function audioUrl(path: string, root: string): string {
-  return `${serverUrl}/api/audio/${encodeURIComponent(path)}?root=${encodeURIComponent(root)}`;
+  return `${serverUrl}/api/audio/${encodePath(path)}?root=${encodeURIComponent(root)}`;
 }
 
 export function cacheStatus(path: string, root: string): Promise<Record<string, string>> {
-  return get(`/api/cache/status/${encodeURIComponent(path)}?root=${encodeURIComponent(root)}`);
+  return get(`/api/cache/status/${encodePath(path)}?root=${encodeURIComponent(root)}`);
 }
 
 // --- Markers & Profiles ---
@@ -311,12 +316,10 @@ export const clipSpan = derived(
 );
 
 export const visibleFiles = derived(
-  [files, hiddenFiles, hideExported, showHidden, markers],
-  ([$files, $hidden, $hideExported, $showHidden, $markers]) => {
-    const exportedNames = new Set($markers.map(m => m.output_path));
+  [files, hiddenFiles, showHidden],
+  ([$files, $hidden, $showHidden]) => {
     return $files.filter(f => {
       if (!$showHidden && $hidden.has(f.name)) return false;
-      // hideExported filtering would need per-file marker lookup
       return true;
     });
   }
@@ -398,19 +401,21 @@ git commit -m "feat: add WebSocket client for export progress"
 
 **Step 1: Create mpv.rs**
 
-This module spawns mpv with `--input-ipc-server`, then sends JSON IPC commands over the Unix socket.
+This module spawns mpv with `--input-ipc-server`, then sends JSON IPC commands over the Unix socket. Uses a persistent BufReader and request_id to correctly handle mpv's interleaved events and responses.
 
 ```rust
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::{json, Value};
 
 pub struct Mpv {
     process: Option<Child>,
-    socket: Option<UnixStream>,
+    writer: Option<UnixStream>,
+    reader: Option<BufReader<UnixStream>>,
     socket_path: String,
+    next_id: AtomicU64,
 }
 
 impl Mpv {
@@ -418,13 +423,14 @@ impl Mpv {
         let socket_path = format!("/tmp/8cut-mpv-{}", std::process::id());
         Mpv {
             process: None,
-            socket: None,
+            writer: None,
+            reader: None,
             socket_path,
+            next_id: AtomicU64::new(1),
         }
     }
 
     pub fn start(&mut self) -> Result<(), String> {
-        // Kill existing
         self.stop();
 
         let child = Command::new("mpv")
@@ -445,7 +451,9 @@ impl Mpv {
             std::thread::sleep(std::time::Duration::from_millis(100));
             if let Ok(stream) = UnixStream::connect(&self.socket_path) {
                 stream.set_nonblocking(false).ok();
-                self.socket = Some(stream);
+                let reader_stream = stream.try_clone().map_err(|e| e.to_string())?;
+                self.writer = Some(stream);
+                self.reader = Some(BufReader::new(reader_stream));
                 return Ok(());
             }
         }
@@ -458,55 +466,62 @@ impl Mpv {
             child.wait().ok();
         }
         self.process = None;
-        self.socket = None;
+        self.writer = None;
+        self.reader = None;
         std::fs::remove_file(&self.socket_path).ok();
     }
 
-    pub fn command(&mut self, args: &[&str]) -> Result<(), String> {
-        let socket = self.socket.as_mut().ok_or("mpv not running")?;
-        let cmd = json!({ "command": args });
-        let mut msg = serde_json::to_string(&cmd).unwrap();
-        msg.push('\n');
-        socket.write_all(msg.as_bytes()).map_err(|e| e.to_string())?;
+    /// Send a command and wait for the matching response (by request_id).
+    /// Skips over asynchronous mpv events while waiting.
+    fn send_and_recv(&mut self, cmd: Value) -> Result<Value, String> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let writer = self.writer.as_mut().ok_or("mpv not running")?;
+        let reader = self.reader.as_mut().ok_or("mpv not running")?;
 
-        // Read response
-        let mut reader = BufReader::new(socket.try_clone().map_err(|e| e.to_string())?);
+        let mut msg_val = cmd;
+        msg_val["request_id"] = json!(id);
+        let mut msg = serde_json::to_string(&msg_val).unwrap();
+        msg.push('\n');
+        writer.write_all(msg.as_bytes()).map_err(|e| e.to_string())?;
+
+        // Read lines until we find the response matching our request_id
         let mut line = String::new();
-        reader.read_line(&mut line).map_err(|e| e.to_string())?;
+        loop {
+            line.clear();
+            reader.read_line(&mut line).map_err(|e| e.to_string())?;
+            let parsed: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+            // mpv events have "event" key, responses have "request_id"
+            if parsed.get("request_id").and_then(|v| v.as_u64()) == Some(id) {
+                return Ok(parsed);
+            }
+            // Otherwise it's an async event — skip it
+        }
+    }
+
+    pub fn command(&mut self, args: &[&str]) -> Result<(), String> {
+        let resp = self.send_and_recv(json!({ "command": args }))?;
+        if resp.get("error").and_then(|e| e.as_str()) != Some("success") {
+            return Err(format!("mpv error: {}", resp.get("error").unwrap_or(&Value::Null)));
+        }
         Ok(())
     }
 
     pub fn set_property(&mut self, name: &str, value: Value) -> Result<(), String> {
-        let socket = self.socket.as_mut().ok_or("mpv not running")?;
-        let cmd = json!({ "command": ["set_property", name, value] });
-        let mut msg = serde_json::to_string(&cmd).unwrap();
-        msg.push('\n');
-        socket.write_all(msg.as_bytes()).map_err(|e| e.to_string())?;
-
-        let mut reader = BufReader::new(socket.try_clone().map_err(|e| e.to_string())?);
-        let mut line = String::new();
-        reader.read_line(&mut line).map_err(|e| e.to_string())?;
-        Ok(())
+        self.command(&["set_property", name, &value.to_string()])
     }
 
     pub fn get_property(&mut self, name: &str) -> Result<Value, String> {
-        let socket = self.socket.as_mut().ok_or("mpv not running")?;
-        let cmd = json!({ "command": ["get_property", name] });
-        let mut msg = serde_json::to_string(&cmd).unwrap();
-        msg.push('\n');
-        socket.write_all(msg.as_bytes()).map_err(|e| e.to_string())?;
-
-        let mut reader = BufReader::new(socket.try_clone().map_err(|e| e.to_string())?);
-        let mut line = String::new();
-        reader.read_line(&mut line).map_err(|e| e.to_string())?;
-        let resp: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+        let resp = self.send_and_recv(json!({ "command": ["get_property", name] }))?;
+        if resp.get("error").and_then(|e| e.as_str()) != Some("success") {
+            return Err(format!("mpv error: {}", resp.get("error").unwrap_or(&Value::Null)));
+        }
         Ok(resp.get("data").cloned().unwrap_or(Value::Null))
     }
 
     pub fn load_file(&mut self, video_url: &str, audio_url: &str) -> Result<(), String> {
-        self.command(&["loadfile", video_url])?;
-        self.set_property("audio-files", json!(audio_url))?;
-        Ok(())
+        // Pass audio-file option during load so both streams sync from the start
+        let options = format!("audio-file={}", audio_url);
+        self.command(&["loadfile", video_url, "replace", &options])
     }
 
     pub fn seek(&mut self, time: f64) -> Result<(), String> {
@@ -651,7 +666,9 @@ pub fn run() {
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    client_lib::run();
+    // Crate name matches the `name` field in Cargo.toml (with hyphens → underscores).
+    // The Tauri scaffold sets this — adjust if the package is named differently.
+    app_lib::run();
 }
 ```
 
@@ -662,6 +679,8 @@ Add `serde_json` to `client/src-tauri/Cargo.toml` dependencies:
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = [] }
+
+[build-dependencies]
 tauri-build = { version = "2", features = [] }
 ```
 
@@ -1071,14 +1090,14 @@ git commit -m "feat: add canvas-based timeline component"
   const CATEGORIES = ["", "Human", "Animal", "Vehicle", "Tool", "Music", "Nature", "Sport", "Other"];
   const RATIOS = ["Off", "9:16", "4:5", "1:1"];
 
-  async function doExport(folderSuffix: string = "") {
+  export async function doExport(folderSuffix: string = "") {
     if (!$currentFile) return;
     $exportStatus = "running";
     $exportCompleted = 0;
     $exportTotal = $clips;
 
     const req = {
-      input_path: `${$currentFile.root}${$currentFile.path}`,
+      input_path: `${$currentFile.root}/${$currentFile.path}`,
       cursor: $cursor,
       name: $clipName || $currentFile.name.replace(/\.[^.]+$/, ""),
       clips: $clips,
@@ -1302,8 +1321,9 @@ git commit -m "feat: add profile bar component"
     clearInterval(pollInterval);
   });
 
-  // Load file into mpv when currentFile changes
+  // Load file into mpv when currentFile OR quality changes
   $: if ($currentFile) {
+    void $quality; // trigger reactivity on quality change too
     const vUrl = streamUrl($currentFile.path, $currentFile.root, $quality);
     const aUrl = audioUrl($currentFile.path, $currentFile.root);
     mpvLoad(vUrl, aUrl).then(async () => {
@@ -1370,6 +1390,7 @@ git commit -m "feat: add profile bar component"
       </div>
       <Timeline
         onCursorChange={handleCursorChange}
+        onSeek={handleCursorChange}
         onMarkerClick={handleMarkerClick}
         onMarkerDelete={handleMarkerDelete}
       />
@@ -1392,7 +1413,7 @@ git commit -m "feat: add profile bar component"
           <option value="high">Original</option>
         </select>
       </div>
-      <ExportPanel />
+      <ExportPanel bind:this={exportPanelRef} />
     </div>
   </div>
 </main>
@@ -1476,6 +1497,9 @@ git commit -m "feat: wire up main app layout with all components"
 Add to the `<script>` in App.svelte:
 
 ```typescript
+// Export trigger — called from keyboard shortcuts and forwarded to ExportPanel
+let exportPanelRef: ExportPanel;
+
 function handleKeydown(e: KeyboardEvent) {
   // Ignore when typing in inputs
   const tag = (e.target as HTMLElement).tagName;
@@ -1488,7 +1512,7 @@ function handleKeydown(e: KeyboardEvent) {
       break;
     case "e":
     case "E":
-      doMainExport();
+      exportPanelRef?.doExport();
       break;
     case "ArrowLeft":
       $cursor = Math.max(0, $cursor - 1);
@@ -1505,7 +1529,7 @@ function handleKeydown(e: KeyboardEvent) {
   if (num >= 1 && num <= 9) {
     const idx = num - 1;
     if (idx < $subprofiles.length) {
-      doSubprofileExport($subprofiles[idx]);
+      exportPanelRef?.doExport($subprofiles[idx]);
     }
   }
 }

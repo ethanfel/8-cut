@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +13,7 @@ class ProcessedDB:
         if db_path is None:
             db_path = str(Path.home() / ".8cut.db")
         self._path = db_path
+        self._lock = threading.Lock()
         try:
             self._con = sqlite3.connect(db_path, check_same_thread=False)
             self._migrate()
@@ -86,18 +88,19 @@ class ProcessedDB:
             profile: str = "default") -> None:
         if not self._enabled:
             return
-        self._con.execute(
-            "INSERT INTO processed"
-            " (filename, start_time, output_path, label, category,"
-            "  short_side, portrait_ratio, crop_center, format,"
-            "  clip_count, spread, profile, processed_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (filename, start_time, output_path, label, category,
-             short_side, portrait_ratio, crop_center, fmt,
-             clip_count, spread, profile,
-             datetime.now(timezone.utc).isoformat()),
-        )
-        self._con.commit()
+        with self._lock:
+            self._con.execute(
+                "INSERT INTO processed"
+                " (filename, start_time, output_path, label, category,"
+                "  short_side, portrait_ratio, crop_center, format,"
+                "  clip_count, spread, profile, processed_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (filename, start_time, output_path, label, category,
+                 short_side, portrait_ratio, crop_center, fmt,
+                 clip_count, spread, profile,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            self._con.commit()
 
     def get_labels(self) -> list[str]:
         """Return distinct non-empty labels ordered by most recently used."""
@@ -134,8 +137,9 @@ class ProcessedDB:
     def delete_by_output_path(self, output_path: str) -> None:
         if not self._enabled:
             return
-        self._con.execute("DELETE FROM processed WHERE output_path = ?", (output_path,))
-        self._con.commit()
+        with self._lock:
+            self._con.execute("DELETE FROM processed WHERE output_path = ?", (output_path,))
+            self._con.commit()
 
     def get_group(self, output_path: str) -> list[str]:
         """Return all output_paths sharing the same (filename, start_time) as *output_path*."""
@@ -159,23 +163,24 @@ class ProcessedDB:
         Returns list of deleted output_paths."""
         if not self._enabled:
             return []
-        row = self._con.execute(
-            "SELECT filename, start_time FROM processed WHERE output_path = ?",
-            (output_path,),
-        ).fetchone()
-        if not row:
-            return []
-        filename, start_time = row
-        paths = [r[0] for r in self._con.execute(
-            "SELECT output_path FROM processed WHERE filename = ? AND start_time = ?",
-            (filename, start_time),
-        ).fetchall()]
-        self._con.execute(
-            "DELETE FROM processed WHERE filename = ? AND start_time = ?",
-            (filename, start_time),
-        )
-        self._con.commit()
-        return paths
+        with self._lock:
+            row = self._con.execute(
+                "SELECT filename, start_time FROM processed WHERE output_path = ?",
+                (output_path,),
+            ).fetchone()
+            if not row:
+                return []
+            filename, start_time = row
+            paths = [r[0] for r in self._con.execute(
+                "SELECT output_path FROM processed WHERE filename = ? AND start_time = ?",
+                (filename, start_time),
+            ).fetchall()]
+            self._con.execute(
+                "DELETE FROM processed WHERE filename = ? AND start_time = ?",
+                (filename, start_time),
+            )
+            self._con.commit()
+            return paths
 
     def _get_markers_for(self, match: str, profile: str = "default") -> list[tuple[float, int, str]]:
         rows = self._con.execute(
@@ -211,20 +216,22 @@ class ProcessedDB:
     def hide_file(self, filename: str, profile: str = "default") -> None:
         if not self._enabled:
             return
-        self._con.execute(
-            "INSERT OR IGNORE INTO hidden_files (filename, profile) VALUES (?, ?)",
-            (filename, profile),
-        )
-        self._con.commit()
+        with self._lock:
+            self._con.execute(
+                "INSERT OR IGNORE INTO hidden_files (filename, profile) VALUES (?, ?)",
+                (filename, profile),
+            )
+            self._con.commit()
 
     def unhide_file(self, filename: str, profile: str = "default") -> None:
         if not self._enabled:
             return
-        self._con.execute(
-            "DELETE FROM hidden_files WHERE filename = ? AND profile = ?",
-            (filename, profile),
-        )
-        self._con.commit()
+        with self._lock:
+            self._con.execute(
+                "DELETE FROM hidden_files WHERE filename = ? AND profile = ?",
+                (filename, profile),
+            )
+            self._con.commit()
 
     def get_hidden_files(self, profile: str = "default") -> set[str]:
         if not self._enabled:

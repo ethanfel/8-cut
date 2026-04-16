@@ -1,6 +1,8 @@
 import os
 import re
 import shutil
+import threading
+import time
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query
@@ -15,8 +17,11 @@ from ..config import EXPORT_DIR, MEDIA_DIRS
 router = APIRouter()
 
 _jobs: dict[str, dict] = {}
+_counter_lock = threading.Lock()
 
 _VALID_ENCODERS = {"libx264", "h264_nvenc", "h264_vaapi", "h264_qsv", "h264_amf", "h264_videotoolbox"}
+
+_MAX_FINISHED_JOBS = 200
 
 
 class CropKeyframe(BaseModel):
@@ -94,18 +99,19 @@ def start_export(req: ExportRequest):
         folder = folder.rstrip(os.sep) + "_" + req.folder_suffix
 
     image_sequence = req.format in ("WebP", "WebP sequence")
-    counter = _next_counter(folder, req.name)
 
-    # Build job list: (start, output_path, portrait_ratio, crop_center)
-    jobs = []
-    for i in range(req.clips):
-        start = req.cursor + i * req.spread
-        if image_sequence:
-            out = build_sequence_dir(folder, req.name, counter, sub=i if req.clips > 1 else None)
-        else:
-            out = build_export_path(folder, req.name, counter, sub=i if req.clips > 1 else None)
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        jobs.append((start, out, req.portrait_ratio, req.crop_center))
+    # Lock counter + directory creation to prevent race between concurrent exports
+    with _counter_lock:
+        counter = _next_counter(folder, req.name)
+        jobs = []
+        for i in range(req.clips):
+            start = req.cursor + i * req.spread
+            if image_sequence:
+                out = build_sequence_dir(folder, req.name, counter, sub=i if req.clips > 1 else None)
+            else:
+                out = build_export_path(folder, req.name, counter, sub=i if req.clips > 1 else None)
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            jobs.append((start, out, req.portrait_ratio, req.crop_center))
 
     # Apply keyframes if provided — returns 6-tuples, strip back to 4
     if req.crop_keyframes:
@@ -163,11 +169,18 @@ def start_export(req: ExportRequest):
         on_error=on_error,
     )
 
+    # Evict old finished jobs to prevent unbounded growth
+    finished = [k for k, v in _jobs.items() if v["status"] in ("done", "error")]
+    if len(finished) > _MAX_FINISHED_JOBS:
+        for k in finished[:len(finished) - _MAX_FINISHED_JOBS]:
+            del _jobs[k]
+
     _jobs[job_id] = {
         "status": "running",
         "total": len(jobs),
         "completed": completed,
         "runner": runner,
+        "created_at": time.monotonic(),
     }
     runner.start()
 
@@ -188,12 +201,23 @@ def get_export_status(job_id: str):
     }
 
 
+def _is_under_export_dir(real_path: str) -> bool:
+    """Check if path is under EXPORT_DIR or any EXPORT_DIR_suffix sibling."""
+    export_real = os.path.realpath(EXPORT_DIR).rstrip(os.sep)
+    # Walk up ancestors — must find EXPORT_DIR or EXPORT_DIR_suffix
+    d = os.path.dirname(real_path)
+    while d != os.path.dirname(d):
+        if d == export_real or d.startswith(export_real + "_"):
+            return True
+        d = os.path.dirname(d)
+    return False
+
+
 @router.delete("/export")
 def delete_export(output_path: str = Query(...)):
     from ..app import db
-    # Validate path is under EXPORT_DIR
     real = os.path.realpath(output_path)
-    if not real.startswith(os.path.realpath(EXPORT_DIR) + os.sep):
+    if not _is_under_export_dir(real):
         raise HTTPException(status_code=403, detail="path outside export directory")
     db.delete_by_output_path(real)
     if os.path.isfile(real):

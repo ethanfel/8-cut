@@ -91,7 +91,10 @@ class ExportRunner:
             raise RuntimeError(msg)
         if self._image_sequence:
             audio_cmd = build_audio_extract_command(self._input, start, output)
-            subprocess.run(audio_cmd, capture_output=True, text=True, timeout=60)
+            audio_result = subprocess.run(audio_cmd, capture_output=True, text=True, timeout=60)
+            if audio_result.returncode != 0:
+                msg = (audio_result.stderr or "audio extraction failed")[-500:]
+                raise RuntimeError(msg)
         return output
 
     def _run(self):
