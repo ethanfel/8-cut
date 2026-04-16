@@ -12,6 +12,13 @@ services:
       EXPORT_DIR: /exports
       DB_PATH: /data/8cut.db
       CACHE_DIR: /data/cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
 volumes:
   8cut-data:
