@@ -8,13 +8,15 @@ from pydantic import BaseModel
 
 from core.export import ExportRunner
 from core.paths import build_export_path, build_sequence_dir
-from core.ffmpeg import apply_keyframes_to_jobs
+from core.ffmpeg import _RATIOS, apply_keyframes_to_jobs
 from .. import ws as ws_module
-from ..config import EXPORT_DIR
+from ..config import EXPORT_DIR, MEDIA_DIRS
 
 router = APIRouter()
 
 _jobs: dict[str, dict] = {}
+
+_VALID_ENCODERS = {"libx264", "h264_nvenc", "h264_vaapi", "h264_qsv", "h264_amf", "h264_videotoolbox"}
 
 
 class ExportRequest(BaseModel):
@@ -49,16 +51,41 @@ def _next_counter(folder: str, basename: str) -> int:
     return highest + 1
 
 
+def _validate_input_path(path: str) -> str:
+    """Verify input_path falls under a configured MEDIA_DIR."""
+    real = os.path.realpath(path)
+    for root in MEDIA_DIRS:
+        root_real = os.path.realpath(root)
+        if real == root_real or real.startswith(root_real + os.sep):
+            return real
+    raise HTTPException(status_code=403, detail="input_path outside media directories")
+
+
 @router.post("/export")
 def start_export(req: ExportRequest):
     from ..app import db
 
+    # Validate inputs
+    input_path = _validate_input_path(req.input_path)
+
+    if req.encoder not in _VALID_ENCODERS:
+        raise HTTPException(status_code=400, detail=f"invalid encoder: {req.encoder}")
+
+    if req.portrait_ratio is not None and req.portrait_ratio not in _RATIOS:
+        raise HTTPException(status_code=400, detail=f"invalid portrait_ratio: {req.portrait_ratio}")
+
+    if req.folder_suffix and ("/" in req.folder_suffix or "\\" in req.folder_suffix or ".." in req.folder_suffix):
+        raise HTTPException(status_code=400, detail="folder_suffix must not contain path separators")
+
+    if "/" in req.name or "\\" in req.name or ".." in req.name:
+        raise HTTPException(status_code=400, detail="name must not contain path separators")
+
     job_id = str(uuid.uuid4())[:8]
     folder = EXPORT_DIR
     if req.folder_suffix:
-        folder = folder + req.folder_suffix
+        folder = folder.rstrip(os.sep) + "_" + req.folder_suffix
 
-    image_sequence = req.format == "WebP"
+    image_sequence = req.format in ("WebP", "WebP sequence")
     counter = _next_counter(folder, req.name)
 
     # Build job list: (start, output_path, portrait_ratio, crop_center)
@@ -87,7 +114,7 @@ def start_export(req: ExportRequest):
         completed.append(path)
         # Record in DB so markers show up
         db.add(
-            filename=os.path.basename(req.input_path),
+            filename=os.path.basename(input_path),
             start_time=req.cursor,
             output_path=path,
             label=req.label,
@@ -104,15 +131,17 @@ def start_export(req: ExportRequest):
 
     def on_all_done():
         _jobs[job_id]["status"] = "done"
+        _jobs[job_id].pop("runner", None)
         ws_module.broadcast({"type": "all_done", "job_id": job_id})
 
     def on_error(msg: str):
         _jobs[job_id]["status"] = "error"
         _jobs[job_id]["error"] = msg
+        _jobs[job_id].pop("runner", None)
         ws_module.broadcast({"type": "error", "job_id": job_id, "msg": msg})
 
     runner = ExportRunner(
-        input_path=req.input_path,
+        input_path=input_path,
         jobs=jobs,
         short_side=req.short_side,
         image_sequence=image_sequence,
@@ -154,9 +183,9 @@ def delete_export(output_path: str):
     real = os.path.realpath(output_path)
     if not real.startswith(os.path.realpath(EXPORT_DIR) + os.sep):
         raise HTTPException(status_code=403, detail="path outside export directory")
-    db.delete_by_output_path(output_path)
-    if os.path.isfile(output_path):
-        os.unlink(output_path)
-    elif os.path.isdir(output_path):
-        shutil.rmtree(output_path)
-    return {"deleted": output_path}
+    db.delete_by_output_path(real)
+    if os.path.isfile(real):
+        os.unlink(real)
+    elif os.path.isdir(real):
+        shutil.rmtree(real)
+    return {"deleted": real}

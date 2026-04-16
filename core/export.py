@@ -113,6 +113,7 @@ class ExportRunner:
                     except Exception as e:
                         if "cancelled" not in str(e) and self._on_error:
                             self._on_error(str(e))
+                        return
         except Exception as e:
             if self._on_error:
                 self._on_error(str(e))

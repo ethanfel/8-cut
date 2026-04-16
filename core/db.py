@@ -121,14 +121,14 @@ class ProcessedDB:
         """Return config dict for an output_path, or None."""
         if not self._enabled:
             return None
-        self._con.row_factory = sqlite3.Row
-        row = self._con.execute(
+        cur = self._con.cursor()
+        cur.row_factory = sqlite3.Row
+        row = cur.execute(
             "SELECT label, category, short_side, portrait_ratio, crop_center, format,"
             " clip_count, spread"
             " FROM processed WHERE output_path = ?",
             (output_path,),
         ).fetchone()
-        self._con.row_factory = None
         return dict(row) if row else None
 
     def delete_by_output_path(self, output_path: str) -> None:
