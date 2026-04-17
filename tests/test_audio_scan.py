@@ -1,6 +1,6 @@
 import tempfile, os
 import numpy as np
-from core.audio_scan import build_profile, _extract_mfcc
+from core.audio_scan import build_profile, _extract_mfcc, scan_video
 
 
 def _make_wav(path: str, duration: float = 8.0, sr: int = 22050):
@@ -68,3 +68,53 @@ def test_build_profile_skips_missing_files():
 def test_build_profile_empty_returns_none():
     result = build_profile([])
     assert result is None
+
+
+def test_scan_video_finds_matching_region():
+    """A video made of the same sine wave as the reference should match."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as ref:
+        _make_wav(ref.name, duration=8.0)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as vid:
+        _make_wav(vid.name, duration=20.0)
+    try:
+        profile = build_profile([ref.name])
+        regions = scan_video(vid.name, profile, mode="average", threshold=0.5, hop=1.0)
+        assert len(regions) > 0
+        for start, end, score in regions:
+            assert abs((end - start) - 8.0) < 1e-9
+            assert score >= 0.5
+    finally:
+        os.unlink(ref.name)
+        os.unlink(vid.name)
+
+
+def test_scan_video_nearest_mode():
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as ref:
+        _make_wav(ref.name, duration=8.0)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as vid:
+        _make_wav(vid.name, duration=20.0)
+    try:
+        profile = build_profile([ref.name])
+        regions = scan_video(vid.name, profile, mode="nearest", threshold=0.5, hop=1.0)
+        assert len(regions) > 0
+    finally:
+        os.unlink(ref.name)
+        os.unlink(vid.name)
+
+
+def test_scan_video_high_threshold_no_match():
+    """Different frequencies with very high threshold should not match."""
+    import soundfile as sf
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as ref:
+        t = np.linspace(0, 8.0, 22050 * 8, endpoint=False)
+        sf.write(ref.name, 0.5 * np.sin(2 * np.pi * 440 * t), 22050)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as vid:
+        # White noise — very different from sine wave
+        sf.write(vid.name, np.random.randn(22050 * 20).astype(np.float32) * 0.1, 22050)
+    try:
+        profile = build_profile([ref.name])
+        regions = scan_video(vid.name, profile, mode="average", threshold=0.99, hop=1.0)
+        assert len(regions) == 0
+    finally:
+        os.unlink(ref.name)
+        os.unlink(vid.name)
