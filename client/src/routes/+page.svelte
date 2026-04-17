@@ -5,7 +5,7 @@
   import ExportPanel from "../components/ExportPanel.svelte";
   import ProfileBar from "../components/ProfileBar.svelte";
   import { mpvStart, mpvLoad, mpvSeek, mpvPause, mpvResume, mpvSetLoop, mpvClearLoop, mpvTimePos, mpvDuration } from "$lib/mpv";
-  import { streamUrl, audioUrl, deleteExport, getMarkers } from "$lib/api";
+  import { streamUrl, audioUrl, waitForCache, deleteExport, getMarkers } from "$lib/api";
   import { connectExportWs, disconnectExportWs } from "$lib/ws";
   import { loadSettings, saveSettings } from "$lib/settings";
   import {
@@ -48,16 +48,24 @@
   });
 
   // Load file into mpv when currentFile OR quality changes
+  let loadAbort: AbortController | null = null;
   $effect(() => {
     const file = $currentFile;
     const q = $quality;
     if (file) {
+      // Cancel any previous polling
+      loadAbort?.abort();
+      const ac = new AbortController();
+      loadAbort = ac;
+
       const vUrl = streamUrl(file.path, file.root, q);
       const aUrl = audioUrl(file.path, file.root);
-      mpvLoad(vUrl, aUrl).then(async () => {
+      waitForCache(file.path, file.root, q, ac.signal).then(() =>
+        mpvLoad(vUrl, aUrl)
+      ).then(async () => {
         await new Promise(r => setTimeout(r, 500));
         try { $duration = await mpvDuration(); } catch {}
-      });
+      }).catch(() => {}); // aborted or error
     }
   });
 
@@ -198,6 +206,8 @@
   }
   .sidebar {
     width: 220px;
+    min-width: 220px;
+    flex-shrink: 0;
     border-right: 1px solid #333;
     overflow: hidden;
   }

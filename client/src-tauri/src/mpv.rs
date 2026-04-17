@@ -117,9 +117,14 @@ impl Mpv {
     }
 
     pub fn load_file(&mut self, video_url: &str, audio_url: &str) -> Result<(), String> {
-        // Pass audio-file option during load so both streams sync from the start
         let options = format!("audio-file={}", audio_url);
-        self.command(&["loadfile", video_url, "replace", &options])
+        let resp = self.send_and_recv(json!({
+            "command": ["loadfile", video_url, "replace", -1, options]
+        }))?;
+        if resp.get("error").and_then(|e| e.as_str()) != Some("success") {
+            return Err(format!("mpv error: {}", resp.get("error").unwrap_or(&Value::Null)));
+        }
+        Ok(())
     }
 
     pub fn seek(&mut self, time: f64) -> Result<(), String> {

@@ -63,6 +63,25 @@ export function audioUrl(path: string, root: string): string {
   return `${serverUrl}/api/audio/${encodePath(path)}?root=${encodeURIComponent(root)}`;
 }
 
+/** Poll cache status until both video and audio are ready. */
+export async function waitForCache(
+  path: string, root: string, quality: string,
+  signal: AbortSignal, interval = 2000
+): Promise<void> {
+  const url = `${serverUrl}/api/cache/status/${encodePath(path)}?root=${encodeURIComponent(root)}`;
+  // Trigger transcode/audio extraction by hitting stream+audio once
+  await fetch(streamUrl(path, root, quality), { signal }).catch(() => {});
+  await fetch(audioUrl(path, root), { signal }).catch(() => {});
+
+  while (!signal.aborted) {
+    const res = await fetch(url, { signal });
+    const status = await res.json();
+    if (status[quality] === "ready" && status.audio === "ready") return;
+    await new Promise(r => setTimeout(r, interval));
+  }
+  throw new Error("Aborted");
+}
+
 export function cacheStatus(path: string, root: string): Promise<Record<string, string>> {
   return get(`/api/cache/status/${encodePath(path)}?root=${encodeURIComponent(root)}`);
 }

@@ -162,10 +162,12 @@
     display: flex;
     justify-content: space-between;
     font-size: 12px;
+    white-space: nowrap;
   }
   .file-list li:hover { background: #333; }
   .file-list li.selected { background: #0066cc; }
   .file-list li.folder { color: #88aaff; }
-  .size { color: #888; font-size: 11px; }
-  .badge { color: #666; font-size: 10px; }
+  .name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .size { flex-shrink: 0; margin-left: 8px; color: #888; font-size: 11px; }
+  .badge { flex-shrink: 0; margin-left: 8px; color: #666; font-size: 10px; }
 </style>
