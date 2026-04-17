@@ -1568,7 +1568,7 @@ class MainWindow(QMainWindow):
         self._sld_threshold.setDecimals(2)
         self._sld_threshold.setRange(0.0, 1.0)
         self._sld_threshold.setSingleStep(0.01)
-        self._sld_threshold.setValue(0.70)
+        self._sld_threshold.setValue(0.05)
         self._sld_threshold.setPrefix("Thr: ")
         self._sld_threshold.setToolTip("Similarity threshold (0=match everything, 1=exact match)")
 
