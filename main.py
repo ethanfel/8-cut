@@ -185,6 +185,47 @@ class FrameGrabber(QThread):
             pass
 
 
+class ScanWorker(QThread):
+    """Runs audio similarity scan off the main thread."""
+    finished = pyqtSignal(list)   # emits list of (start, end, score)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)    # status message
+
+    def __init__(self, video_path: str, clip_paths: list[str],
+                 mode: str = "average", threshold: float = 0.7):
+        super().__init__()
+        self._video_path = video_path
+        self._clip_paths = clip_paths
+        self._mode = mode
+        self._threshold = threshold
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self):
+        from core.audio_scan import build_profile, scan_video
+        try:
+            self.progress.emit(f"Building profile from {len(self._clip_paths)} clips...")
+            profile = build_profile(self._clip_paths)
+            if self._cancel:
+                return
+            if profile is None:
+                self.error.emit("No valid reference clips found")
+                return
+            self.progress.emit("Scanning audio...")
+            regions = scan_video(
+                self._video_path, profile,
+                mode=self._mode, threshold=self._threshold,
+                cancel_flag=self,
+            )
+            if not self._cancel:
+                self.finished.emit(regions)
+        except Exception as e:
+            if not self._cancel:
+                self.error.emit(str(e))
+
+
 class TimelineWidget(QWidget):
     cursor_changed = pyqtSignal(float)              # emits position in seconds
     seek_changed = pyqtSignal(float)                # emits seek position (lock mode)
