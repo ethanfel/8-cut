@@ -208,6 +208,7 @@ class TimelineWidget(QWidget):
         self._crop_keyframes: list[tuple[float, float, str | None, bool, bool]] = []
         self._markers: list[tuple[float, int, str]] = []
         self._hover_cache: list[tuple[float, str]] = []  # (t/duration, path)
+        self._scan_regions: list[tuple[float, float, float]] = []  # (start, end, score)
 
         # Cached paint resources — created once, reused every frame
         self._cursor_pen = QPen(QColor(255, 210, 0))
@@ -250,6 +251,15 @@ class TimelineWidget(QWidget):
         """markers: list of (start_time, number, output_path)"""
         self._markers = markers
         self._rebuild_hover_cache()
+        self.update()
+
+    def set_scan_regions(self, regions: list[tuple[float, float, float]]) -> None:
+        """regions: list of (start_time, end_time, score)"""
+        self._scan_regions = regions
+        self.update()
+
+    def clear_scan_regions(self) -> None:
+        self._scan_regions = []
         self.update()
 
     def set_play_position(self, t: float | None) -> None:
@@ -359,6 +369,14 @@ class TimelineWidget(QWidget):
             p.setPen(QPen(QColor(60, 130, 220, 180), 1))
             p.drawLine(x_start, rh, x_start, h)
             p.drawLine(x_end,   rh, x_end,   h)
+
+            # ── scan regions ──────────────────────────────────────────────
+            if self._scan_regions and self._duration > 0:
+                for (start, end, score) in self._scan_regions:
+                    x1 = int(start / self._duration * w)
+                    x2 = int(end / self._duration * w)
+                    alpha = int(40 + score * 80)  # 40–120 opacity
+                    p.fillRect(x1, rh, x2 - x1, h - rh, QColor(100, 200, 255, alpha))
 
             # ── export markers ────────────────────────────────────────────
             p.setFont(self._marker_font)
