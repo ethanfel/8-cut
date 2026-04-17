@@ -10,10 +10,14 @@ _SR = 22050
 
 
 def _extract_mfcc(path: str, sr: int = _SR) -> np.ndarray:
-    """Load audio from a file and return a mean MFCC vector (20-dim)."""
+    """Load audio from a file and return an MFCC feature vector (40-dim).
+
+    Concatenates mean + std of each coefficient over time.
+    Mean captures average spectral content; std captures dynamics.
+    """
     y, _ = librosa.load(path, sr=sr, mono=True)
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=_N_MFCC)
-    return mfcc.mean(axis=1)  # average over time → (20,)
+    return np.concatenate([mfcc.mean(axis=1), mfcc.std(axis=1)])
 
 
 def build_profile(clip_paths: list[str]) -> dict | None:
@@ -95,7 +99,7 @@ def scan_video(
 
         chunk = y[pos : pos + win_samples]
         mfcc = librosa.feature.mfcc(y=chunk, sr=sr, n_mfcc=_N_MFCC)
-        vec = mfcc.mean(axis=1)
+        vec = np.concatenate([mfcc.mean(axis=1), mfcc.std(axis=1)])
 
         if mode == "nearest":
             score = max(

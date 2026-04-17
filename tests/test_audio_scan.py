@@ -16,7 +16,7 @@ def test_extract_mfcc_returns_1d_vector():
         _make_wav(f.name)
     try:
         vec = _extract_mfcc(f.name)
-        assert vec.shape == (20,)
+        assert vec.shape == (40,)
         assert not np.isnan(vec).any()
     finally:
         os.unlink(f.name)
@@ -29,7 +29,7 @@ def test_build_profile_single_clip():
         profile = build_profile([f.name])
         assert "mean_vector" in profile
         assert "clip_vectors" in profile
-        assert profile["mean_vector"].shape == (20,)
+        assert profile["mean_vector"].shape == (40,)
         assert len(profile["clip_vectors"]) == 1
     finally:
         os.unlink(f.name)
@@ -49,7 +49,7 @@ def test_build_profile_multiple_clips():
 
         profile = build_profile(paths)
         assert len(profile["clip_vectors"]) == 3
-        assert profile["mean_vector"].shape == (20,)
+        assert profile["mean_vector"].shape == (40,)
     finally:
         for p in paths:
             os.unlink(p)
