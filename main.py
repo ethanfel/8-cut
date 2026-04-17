@@ -1559,6 +1559,29 @@ class MainWindow(QMainWindow):
             lambda v: self._settings.setValue("track_subject", "true" if v else "false")
         )
 
+        # ── audio scan controls ──────────────────────────────────────
+        self._btn_scan = QPushButton("Scan")
+        self._btn_scan.setToolTip("Scan current video for audio segments matching reference clips")
+        self._btn_scan.clicked.connect(self._start_scan)
+
+        self._sld_threshold = QDoubleSpinBox()
+        self._sld_threshold.setRange(0.0, 1.0)
+        self._sld_threshold.setSingleStep(0.05)
+        self._sld_threshold.setValue(0.7)
+        self._sld_threshold.setPrefix("Thr: ")
+        self._sld_threshold.setToolTip("Similarity threshold (0=match everything, 1=exact match)")
+
+        self._cmb_scan_mode = QComboBox()
+        self._cmb_scan_mode.addItems(["Average", "Nearest"])
+        self._cmb_scan_mode.setToolTip("Average: compare to mean profile\nNearest: compare to closest clip")
+
+        self._cmb_scan_ref = QComboBox()
+        self._cmb_scan_ref.addItems(["Current Profile", "Custom Folder"])
+        self._cmb_scan_ref.currentIndexChanged.connect(self._on_scan_ref_changed)
+        self._scan_folder: str = ""
+
+        self._scan_worker: ScanWorker | None = None
+
         cpu_count = os.cpu_count() or 2
         self._spn_workers = QSpinBox()
         self._spn_workers.setRange(1, cpu_count)
@@ -1691,6 +1714,10 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(self._chk_rand_portrait)
         settings_row.addWidget(self._chk_rand_square)
         settings_row.addWidget(self._chk_track)
+        settings_row.addWidget(self._btn_scan)
+        settings_row.addWidget(self._sld_threshold)
+        settings_row.addWidget(self._cmb_scan_mode)
+        settings_row.addWidget(self._cmb_scan_ref)
         settings_row.addStretch()
         self._lbl_status = QLabel()
         self._lbl_status.setStyleSheet("color: #888; font-size: 11px;")
@@ -2467,6 +2494,83 @@ class MainWindow(QMainWindow):
                 self._step_cursor(t - self._cursor)
                 return
         self._step_cursor(markers[0][0] - self._cursor)  # wrap to first
+
+    def _on_scan_ref_changed(self, index: int) -> None:
+        if index == 1:  # Custom Folder
+            folder = QFileDialog.getExistingDirectory(self, "Select reference clip folder")
+            if folder:
+                self._scan_folder = folder
+            else:
+                self._cmb_scan_ref.setCurrentIndex(0)
+
+    def _cleanup_scan_worker(self) -> None:
+        """Disconnect signals and schedule deletion of old scan worker."""
+        if self._scan_worker is not None:
+            try:
+                self._scan_worker.finished.disconnect()
+                self._scan_worker.error.disconnect()
+                self._scan_worker.progress.disconnect()
+            except TypeError:
+                pass  # already disconnected
+            self._scan_worker.deleteLater()
+            self._scan_worker = None
+
+    def _start_scan(self) -> None:
+        if not self._file_path:
+            self._show_status("No video loaded")
+            return
+        if self._scan_worker and self._scan_worker.isRunning():
+            self._show_status("Scan already running")
+            return
+
+        # Clean up previous worker
+        self._cleanup_scan_worker()
+
+        # Collect reference clip paths
+        if self._cmb_scan_ref.currentIndex() == 0:
+            # Current profile — all exports across all files in this profile
+            clip_paths = [p for p in self._db.get_all_export_paths(self._profile)
+                          if os.path.exists(p)]
+        else:
+            # Custom folder
+            if not self._scan_folder:
+                self._show_status("No reference folder selected")
+                return
+            exts = (".mp4", ".mkv", ".avi", ".mov", ".wav", ".mp3", ".flac")
+            clip_paths = [
+                os.path.join(self._scan_folder, f)
+                for f in sorted(os.listdir(self._scan_folder))
+                if f.lower().endswith(exts)
+            ]
+
+        if not clip_paths:
+            self._show_status("No reference clips found")
+            return
+
+        mode = self._cmb_scan_mode.currentText().lower()
+        threshold = self._sld_threshold.value()
+
+        self._btn_scan.setEnabled(False)
+        self._scan_file_path = self._file_path  # remember which file we're scanning
+        self._show_status(f"Scanning with {len(clip_paths)} reference clips...")
+
+        self._scan_worker = ScanWorker(self._file_path, clip_paths, mode, threshold)
+        self._scan_worker.finished.connect(self._on_scan_done)
+        self._scan_worker.error.connect(self._on_scan_error)
+        self._scan_worker.progress.connect(self._show_status)
+        self._scan_worker.start()
+
+    def _on_scan_done(self, regions: list) -> None:
+        self._btn_scan.setEnabled(True)
+        # Ignore stale results if the user switched files during scan
+        if self._file_path != getattr(self, '_scan_file_path', None):
+            return
+        self._timeline.set_scan_regions(regions)
+        self._show_status(f"Scan complete: {len(regions)} matching regions")
+
+    def _on_scan_error(self, msg: str) -> None:
+        self._btn_scan.setEnabled(True)
+        self._show_status(f"Scan error: {msg}")
 
     # --- Export ---
 
