@@ -1812,6 +1812,7 @@ class MainWindow(QMainWindow):
                 lambda _, idx=i - 1: self._export_subprofile(idx)
             )
         QShortcut(QKeySequence("M"), self, context=ctx).activated.connect(self._jump_to_next_marker)
+        QShortcut(QKeySequence("S"), self, context=ctx).activated.connect(self._jump_to_next_scan_region)
         QShortcut(QKeySequence("N"), self, context=ctx).activated.connect(self._playlist.advance)
         QShortcut(QKeySequence("G"), self, context=ctx).activated.connect(self._btn_lock.toggle)
         QShortcut(QKeySequence("A"), self, context=ctx).activated.connect(self._autoclip)
@@ -1841,6 +1842,7 @@ class MainWindow(QMainWindow):
             "<tr><td><b>E</b></td><td>Export</td></tr>"
             "<tr><td><b>1–9</b></td><td>Export to subprofile 1–9</td></tr>"
             "<tr><td><b>M</b></td><td>Jump to next marker</td></tr>"
+            "<tr><td><b>S</b></td><td>Jump to next scan region</td></tr>"
             "<tr><td><b>N</b></td><td>Next file in playlist</td></tr>"
             "<tr><td><b>G</b></td><td>Toggle cursor lock</td></tr>"
             "<tr><td><b>A</b></td><td>Autoclip — fit clip count to pause position</td></tr>"
@@ -2027,6 +2029,11 @@ class MainWindow(QMainWindow):
             self._btn_lock.setChecked(False)
         self._crop_keyframes.clear()
         self._timeline.set_crop_keyframes([])
+        self._timeline.clear_scan_regions()
+        if self._scan_worker and self._scan_worker.isRunning():
+            self._scan_worker.cancel()
+        self._cleanup_scan_worker()
+        self._btn_scan.setEnabled(True)
 
         dur = self._mpv.get_duration()
         self._timeline.set_duration(dur)
@@ -2571,6 +2578,17 @@ class MainWindow(QMainWindow):
     def _on_scan_error(self, msg: str) -> None:
         self._btn_scan.setEnabled(True)
         self._show_status(f"Scan error: {msg}")
+
+    def _jump_to_next_scan_region(self) -> None:
+        regions = sorted(self._timeline._scan_regions, key=lambda r: r[0])
+        if not regions:
+            return
+        for (start, _end, _score) in regions:
+            if start > self._cursor + 0.1:
+                self._step_cursor(start - self._cursor)
+                return
+        # Wrap to first region
+        self._step_cursor(regions[0][0] - self._cursor)
 
     # --- Export ---
 
