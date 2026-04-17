@@ -213,6 +213,16 @@ class ProcessedDB:
         ).fetchall()
         return [r[0] for r in rows]
 
+    def get_all_export_paths(self, profile: str = "default") -> list[str]:
+        """Return all unique output_path values for a given profile."""
+        if not self._enabled:
+            return []
+        rows = self._con.execute(
+            "SELECT DISTINCT output_path FROM processed WHERE profile = ?",
+            (profile,),
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def hide_file(self, filename: str, profile: str = "default") -> None:
         if not self._enabled:
             return

@@ -118,3 +118,18 @@ def test_scan_video_high_threshold_no_match():
     finally:
         os.unlink(ref.name)
         os.unlink(vid.name)
+
+
+def test_db_get_all_export_paths():
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        path = f.name
+    try:
+        from core.db import ProcessedDB
+        db = ProcessedDB(path)
+        db.add("a.mp4", 10.0, "/out/a_001.mp4", profile="test")
+        db.add("b.mp4", 20.0, "/out/b_001.mp4", profile="test")
+        db.add("c.mp4", 30.0, "/out/c_001.mp4", profile="other")
+        paths = db.get_all_export_paths("test")
+        assert set(paths) == {"/out/a_001.mp4", "/out/b_001.mp4"}
+    finally:
+        os.unlink(path)
