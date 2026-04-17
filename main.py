@@ -2519,7 +2519,11 @@ class MainWindow(QMainWindow):
                 self._scan_worker.progress.disconnect()
             except TypeError:
                 pass  # already disconnected
-            self._scan_worker.deleteLater()
+            if self._scan_worker.isRunning():
+                # Let the thread finish naturally; deleteLater when done
+                self._scan_worker.finished.connect(self._scan_worker.deleteLater)
+            else:
+                self._scan_worker.deleteLater()
             self._scan_worker = None
 
     def _start_scan(self) -> None:
