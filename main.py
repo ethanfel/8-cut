@@ -187,7 +187,7 @@ class FrameGrabber(QThread):
 
 class ScanWorker(QThread):
     """Runs audio similarity scan off the main thread."""
-    finished = pyqtSignal(list)   # emits list of (start, end, score)
+    scan_done = pyqtSignal(list)  # emits list of (start, end, score)
     error = pyqtSignal(str)
     progress = pyqtSignal(str)    # status message
 
@@ -220,7 +220,7 @@ class ScanWorker(QThread):
                 cancel_flag=self,
             )
             if not self._cancel:
-                self.finished.emit(regions)
+                self.scan_done.emit(regions)
         except Exception as e:
             if not self._cancel:
                 self.error.emit(str(e))
@@ -2508,19 +2508,21 @@ class MainWindow(QMainWindow):
             if folder:
                 self._scan_folder = folder
             else:
+                self._cmb_scan_ref.blockSignals(True)
                 self._cmb_scan_ref.setCurrentIndex(0)
+                self._cmb_scan_ref.blockSignals(False)
 
     def _cleanup_scan_worker(self) -> None:
         """Disconnect signals and schedule deletion of old scan worker."""
         if self._scan_worker is not None:
             try:
-                self._scan_worker.finished.disconnect()
+                self._scan_worker.scan_done.disconnect()
                 self._scan_worker.error.disconnect()
                 self._scan_worker.progress.disconnect()
             except TypeError:
                 pass  # already disconnected
             if self._scan_worker.isRunning():
-                # Let the thread finish naturally; deleteLater when done
+                # QThread.finished fires when run() returns, even on cancel
                 self._scan_worker.finished.connect(self._scan_worker.deleteLater)
             else:
                 self._scan_worker.deleteLater()
@@ -2566,7 +2568,7 @@ class MainWindow(QMainWindow):
         self._show_status(f"Scanning with {len(clip_paths)} reference clips...")
 
         self._scan_worker = ScanWorker(self._file_path, clip_paths, mode, threshold)
-        self._scan_worker.finished.connect(self._on_scan_done)
+        self._scan_worker.scan_done.connect(self._on_scan_done)
         self._scan_worker.error.connect(self._on_scan_error)
         self._scan_worker.progress.connect(self._show_status)
         self._scan_worker.start()
@@ -2587,12 +2589,20 @@ class MainWindow(QMainWindow):
         regions = sorted(self._timeline._scan_regions, key=lambda r: r[0])
         if not regions:
             return
-        for (start, _end, _score) in regions:
+        # Merge overlapping regions into clusters so S jumps past each group
+        clusters: list[tuple[float, float]] = []
+        for (start, end, _score) in regions:
+            if clusters and start <= clusters[-1][1]:
+                clusters[-1] = (clusters[-1][0], max(clusters[-1][1], end))
+            else:
+                clusters.append((start, end))
+        # Jump to the start of the next cluster after cursor
+        for (start, _end) in clusters:
             if start > self._cursor + 0.1:
                 self._step_cursor(start - self._cursor)
                 return
-        # Wrap to first region
-        self._step_cursor(regions[0][0] - self._cursor)
+        # Wrap to first cluster
+        self._step_cursor(clusters[0][0] - self._cursor)
 
     # --- Export ---
 
