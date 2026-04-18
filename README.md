@@ -81,56 +81,132 @@ All clips are exactly 8 seconds — the standard length for foley sound datasets
 
 Shortcuts are suppressed when a text field has focus.
 
-## Requirements
+## Installation
 
-- Python 3.11+
-- `ffmpeg` on `PATH`
-- PyQt6
-- python-mpv (requires libmpv)
+### Prerequisites
 
-```
-pip install -r requirements.txt
-```
+- **Python 3.11+** — [python.org/downloads](https://www.python.org/downloads/)
+- **ffmpeg** — video encoding
+- **libmpv** — video playback
 
-### Platform setup
+### Quick start (all platforms)
 
-#### Linux
+The setup script creates a virtual environment and installs everything including PyTorch with CUDA support:
 
 ```bash
-# Arch
-pacman -S mpv ffmpeg python
+# Linux / macOS
+./setup_env.sh
 
-# Debian/Ubuntu
-apt install libmpv-dev ffmpeg python3
-
-# Install Python deps
-pip install -r requirements.txt
+# Windows (PowerShell)
+powershell -ExecutionPolicy Bypass -File setup-windows.ps1
 ```
 
-#### Windows
+Then run:
 
+```bash
+# Linux / macOS
+./8cut.sh
+
+# Windows
+8cut.bat
+```
+
+The launch scripts auto-detect your venv or conda environment.
+
+### Manual installation
+
+#### 1. Install system dependencies
+
+**Linux (Arch):**
+```bash
+pacman -S python mpv ffmpeg
+```
+
+**Linux (Debian/Ubuntu):**
+```bash
+apt install python3 python3-venv libmpv-dev ffmpeg
+```
+
+**Windows:**
 ```powershell
-# Install ffmpeg
+# ffmpeg
 winget install ffmpeg
 
-# Download mpv-2.dll from https://sourceforge.net/projects/mpv-player-windows/files/libmpv/
-# Place mpv-2.dll next to main.py or on PATH
-
-# Install Python deps
-pip install -r requirements.txt
+# libmpv — download mpv-2.dll and place next to main.py
+# https://sourceforge.net/projects/mpv-player-windows/files/libmpv/
 ```
 
-Or run the setup script:
-
-```powershell
-.\setup-windows.ps1
+**macOS:**
+```bash
+brew install python mpv ffmpeg
 ```
 
-#### macOS
+#### 2. Create a virtual environment
+
+A virtual environment keeps 8-cut's dependencies isolated from your system Python. This is strongly recommended — PyTorch alone is several GB and can conflict with other projects.
+
+**Using venv (recommended):**
 
 ```bash
-brew install mpv ffmpeg
+# Create the venv in the project directory
+python3 -m venv .venv
+
+# Activate it
+# Linux / macOS:
+source .venv/bin/activate
+# Windows (cmd):
+.venv\Scripts\activate.bat
+# Windows (PowerShell):
+.venv\Scripts\Activate.ps1
+```
+
+**Using conda / miniforge:**
+
+```bash
+conda create -n 8cut python=3.12
+conda activate 8cut
+```
+
+You must activate the environment every time you open a new terminal before running 8-cut. The `8cut.sh` launcher does this automatically.
+
+#### 3. Install PyTorch
+
+PyTorch must be installed separately with the correct CUDA version for GPU acceleration. Without CUDA, audio scanning will fall back to CPU (much slower).
+
+**With NVIDIA GPU (CUDA 12.8):**
+```bash
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+```
+
+**CPU only (no GPU):**
+```bash
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+```
+
+Check available CUDA versions at [pytorch.org/get-started](https://pytorch.org/get-started/locally/).
+
+#### 4. Install project dependencies
+
+```bash
 pip install -r requirements.txt
+```
+
+#### 5. Verify
+
+```bash
+python -c "import torch; print('PyTorch', torch.__version__, 'CUDA', torch.version.cuda)"
+python -c "import librosa, torchaudio, sklearn; print('All imports OK')"
+```
+
+### Running
+
+```bash
+# With venv activated:
+python main.py
+
+# Or use the launcher (auto-activates venv/conda):
+./8cut.sh        # Linux / macOS
+8cut.bat         # Windows
 ```
 
 ### GPU encoding
@@ -145,21 +221,11 @@ Hardware encoders are auto-detected from ffmpeg. Available encoders by platform:
 
 Enable the **HW** checkbox in the export controls to use GPU encoding.
 
-### Audio scanning dependencies
+### Optional: audio scanning
 
-Audio scanning requires additional packages (installed via `requirements.txt`):
-
-- `torch` and `torchaudio` — embedding model inference (CUDA recommended)
-- `scikit-learn` — classifier training
-- `joblib` — model persistence
-
-Models are downloaded on first use and cached in `cache/downloads/`.
+Audio scanning requires PyTorch (installed above). Embedding models are downloaded on first use and cached in `cache/downloads/`. A CUDA-capable GPU is strongly recommended for training and scanning speed.
 
 ## Usage
-
-```
-python main.py
-```
 
 Drop videos onto the queue or click **+ Open Files**. Scrub to your cut point, then press **Export** (or `E`).
 
@@ -223,6 +289,12 @@ Labels persist between exports so you can cut many clips of the same class witho
 ### 1. Build a dataset
 
 Export clips manually from several videos. Clips from the same export folder (e.g. `mp4_Intense`) become your positive training class.
+
+**Minimum dataset:** ~20 clips from 2–3 different videos. This is enough for the classifier to learn a basic boundary, but expect noisy results — you'll need to mark hard negatives and retrain.
+
+**Ideal dataset:** 50–100+ clips from 5+ videos covering the full range of variation in your target sound (different recording conditions, distances, intensities). More variety in your positives makes the model generalize better to unseen footage. Negatives are sampled automatically from regions far from your markers, but adding explicit negatives of confusable sounds (e.g. thunder when training for explosions) significantly reduces false positives.
+
+The classifier improves iteratively: export a small initial set → train → scan → mark false positives as hard negatives → retrain. Each cycle sharpens the decision boundary without needing a large upfront dataset.
 
 ### 2. Train a classifier
 
