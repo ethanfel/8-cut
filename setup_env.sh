@@ -15,8 +15,14 @@ PYTHON_VERSION="3.12"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
 
-# CUDA version for PyTorch index URL
-TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+# Auto-detect GPU for PyTorch index URL
+if command -v nvidia-smi &>/dev/null; then
+    TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+    echo "NVIDIA GPU detected — will install PyTorch with CUDA 12.8"
+else
+    TORCH_INDEX="https://download.pytorch.org/whl/cpu"
+    echo "No NVIDIA GPU detected — will install CPU-only PyTorch"
+fi
 
 # ── Parse args ────────────────────────────────────────────────────────
 

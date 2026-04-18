@@ -2149,7 +2149,30 @@ class _KeyFilter(QObject):
         return super().eventFilter(obj, event)
 
 
+def _log_env():
+    """Log Python environment info at startup."""
+    _log(f"Python {sys.version}")
+    _log(f"venv: {sys.prefix}")
+    try:
+        import torch
+        cuda = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "not available"
+        _log(f"PyTorch {torch.__version__} — CUDA {torch.version.cuda or 'n/a'} — GPU: {cuda}")
+    except ImportError:
+        _log("PyTorch: not installed")
+    try:
+        import sklearn
+        _log(f"scikit-learn {sklearn.__version__}")
+    except ImportError:
+        _log("scikit-learn: not installed (training will fail)")
+    try:
+        import librosa
+        _log(f"librosa {librosa.__version__}")
+    except ImportError:
+        _log("librosa: not installed")
+
+
 def main():
+    _log_env()
     # Force desktop OpenGL (not GLES) so mpv's render context produces non-black output.
     # Must be set before QApplication.
     from PyQt6.QtGui import QSurfaceFormat

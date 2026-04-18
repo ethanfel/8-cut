@@ -25,9 +25,16 @@ $hasTorch = python -c "import torch" 2>&1
 if ($LASTEXITCODE -eq 0) {
     Write-Host "`nPyTorch already installed, skipping." -ForegroundColor Green
 } else {
-    Write-Host "`nInstalling PyTorch with CUDA 12.8..."
-    Write-Host "(For CPU-only: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu)" -ForegroundColor Yellow
-    pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+    # Detect NVIDIA GPU via nvidia-smi
+    $hasNvidia = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+    if ($hasNvidia) {
+        Write-Host "`nNVIDIA GPU detected — installing PyTorch with CUDA 12.8..." -ForegroundColor Green
+        pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+    } else {
+        Write-Host "`nNo NVIDIA GPU detected — installing CPU-only PyTorch..." -ForegroundColor Yellow
+        Write-Host "(Audio scanning will work but will be slower without GPU)" -ForegroundColor Yellow
+        pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+    }
 }
 
 # ── Python deps ───────────────────────────────────────────
