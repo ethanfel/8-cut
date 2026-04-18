@@ -2737,11 +2737,14 @@ class MainWindow(QMainWindow):
             "<tr><td><b>N</b></td><td>Next file in playlist</td></tr>"
             "<tr><td><b>G</b></td><td>Toggle cursor lock</td></tr>"
             "<tr><td><b>A</b></td><td>Autoclip — fit clip count to pause position</td></tr>"
+            "<tr><td><b>Delete / Backspace</b></td><td>Toggle disable on selected scan regions</td></tr>"
+            "<tr><td><b>Ctrl+Z</b></td><td>Undo last scan panel action</td></tr>"
             "<tr><td><b>? / F1</b></td><td>This help</td></tr>"
             "<tr><td colspan='2'><hr></td></tr>"
             "<tr><td><b>Double-click marker</b></td><td>Enter overwrite mode (locked: jump to end of clip span)</td></tr>"
             "<tr><td><b>Right-click marker</b></td><td>Delete clip group</td></tr>"
             "<tr><td><b>Click video / crop bar</b></td><td>Reposition portrait crop</td></tr>"
+            "<tr><td><b>Drag scan region edge</b></td><td>Resize scan region</td></tr>"
             "</table>"
         )
         QMessageBox.information(self, "Keyboard shortcuts", text)
