@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+import sys
 
 from .paths import _bin, _log
 
@@ -63,6 +64,13 @@ def apply_keyframes_to_jobs(
     return result
 
 
+def _find_vaapi_device() -> str:
+    """Return the first available VAAPI render device path (Linux)."""
+    import glob
+    devices = sorted(glob.glob("/dev/dri/renderD*"))
+    return devices[0] if devices else "/dev/dri/renderD128"
+
+
 def build_ffmpeg_command(
     input_path: str, start: float, output_path: str,
     short_side: int | None = None,
@@ -74,13 +82,15 @@ def build_ffmpeg_command(
     # -ss before -i: fast input-seeking. Safe here because we always re-encode,
     # so there is no keyframe-alignment issue from pre-input seek.
     # Image sequences always use libwebp, so skip HW encoder setup.
-    use_hw_vaapi = encoder == "h264_vaapi" and not image_sequence
+    use_hw_vaapi = (encoder == "h264_vaapi" and not image_sequence
+                    and sys.platform == "linux")
     cmd = [_bin("ffmpeg"), "-y"]
 
-    # VAAPI needs a device for hardware context.
+    # VAAPI needs a render device for hardware context (Linux only).
     if use_hw_vaapi:
+        vaapi_dev = _find_vaapi_device()
         cmd += ["-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi",
-                "-vaapi_device", "/dev/dri/renderD128"]
+                "-vaapi_device", vaapi_dev]
 
     cmd += [
         "-threads", "0",
@@ -137,8 +147,19 @@ def build_audio_extract_command(input_path: str, start: float, sequence_dir: str
 
 
 def detect_hw_encoders() -> list[str]:
-    """Probe ffmpeg for available H.264 hardware encoders."""
-    _HW_ENCODERS = ["h264_nvenc", "h264_vaapi", "h264_qsv", "h264_amf", "h264_videotoolbox"]
+    """Probe ffmpeg for available H.264 hardware encoders.
+
+    Returns only encoders relevant to the current platform:
+      - Windows: h264_nvenc, h264_qsv, h264_amf
+      - Linux:   h264_nvenc, h264_vaapi, h264_qsv
+      - macOS:   h264_videotoolbox
+    """
+    if sys.platform == "win32":
+        candidates = ["h264_nvenc", "h264_qsv", "h264_amf"]
+    elif sys.platform == "darwin":
+        candidates = ["h264_videotoolbox"]
+    else:
+        candidates = ["h264_nvenc", "h264_vaapi", "h264_qsv"]
     try:
         result = subprocess.run(
             [_bin("ffmpeg"), "-hide_banner", "-encoders"],
@@ -149,10 +170,7 @@ def detect_hw_encoders() -> list[str]:
         output = result.stdout
     except Exception:
         return []
-    available = []
-    for enc in _HW_ENCODERS:
-        if re.search(rf'\b{enc}\b', output):
-            available.append(enc)
+    available = [enc for enc in candidates if re.search(rf'\b{enc}\b', output)]
     if available:
         _log(f"HW encoders detected: {', '.join(available)}")
     else:

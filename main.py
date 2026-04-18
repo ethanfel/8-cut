@@ -237,20 +237,14 @@ class TrainDialog(QDialog):
 
         # Positive class selector — lists export folders
         self._cmb_positive = QComboBox()
-        stats = db.get_training_stats(profile)
-        if not stats:
+        self._cmb_negative = QComboBox()
+        self._cmb_negative.addItem("(auto only)", userData="")
+        self._populate_folder_combos()
+        if self._cmb_positive.count() == 0:
             form.addRow("", QLabel("No exported clips found for this profile."))
-        for folder_name, info in stats.items():
-            label = f"{folder_name}  ({info['videos']} videos, {info['clips']} clips)"
-            self._cmb_positive.addItem(label, userData=folder_name)
         form.addRow("Positive class:", self._cmb_positive)
 
         # Negative class selector (optional)
-        self._cmb_negative = QComboBox()
-        self._cmb_negative.addItem("(auto only)", userData="")
-        for folder_name, info in stats.items():
-            label = f"{folder_name}  ({info['videos']} videos, {info['clips']} clips)"
-            self._cmb_negative.addItem(label, userData=folder_name)
         self._cmb_negative.currentIndexChanged.connect(lambda: self._debounce.start())
         form.addRow("Negative class:", self._cmb_negative)
 
@@ -325,7 +319,33 @@ class TrainDialog(QDialog):
         if d:
             self._txt_video_dir.setText(d)
 
+    def _populate_folder_combos(self):
+        """Rebuild positive/negative combo box items from DB stats."""
+        inc_scan = getattr(self, '_chk_scan_exports', None)
+        inc = inc_scan.isChecked() if inc_scan else False
+        prev_pos = self._cmb_positive.currentData()
+        prev_neg = self._cmb_negative.currentData()
+        self._cmb_positive.clear()
+        # Keep "(auto only)" as first item in negative, remove the rest
+        while self._cmb_negative.count() > 1:
+            self._cmb_negative.removeItem(1)
+        stats = self._db.get_training_stats(self._profile, include_scan_exports=inc)
+        for folder_name, info in stats.items():
+            label = f"{folder_name}  ({info['videos']} videos, {info['clips']} clips)"
+            self._cmb_positive.addItem(label, userData=folder_name)
+            self._cmb_negative.addItem(label, userData=folder_name)
+        # Restore previous selection if still present
+        if prev_pos:
+            idx = self._cmb_positive.findData(prev_pos)
+            if idx >= 0:
+                self._cmb_positive.setCurrentIndex(idx)
+        if prev_neg:
+            idx = self._cmb_negative.findData(prev_neg)
+            if idx >= 0:
+                self._cmb_negative.setCurrentIndex(idx)
+
     def _update_stats(self):
+        self._populate_folder_combos()
         folder = self._cmb_positive.currentData()
         if not folder:
             self._lbl_stats.setText("No export folder data available.")
@@ -433,12 +453,19 @@ class TrainWorker(QThread):
 
 
 class ScanResultsPanel(QWidget):
-    """Tabbed panel showing scan results per model, with seek-on-click and delete."""
+    """Tabbed panel showing scan results per model, with disable/resize/negatives."""
     seek_requested = pyqtSignal(float)   # request main window to seek to time
     export_requested = pyqtSignal(list)  # emit list of (start, end, score) to export
     negatives_requested = pyqtSignal(list)  # emit list of start times to mark as hard negatives
     negatives_removed = pyqtSignal(list)   # emit list of start times to un-mark as negatives
     tab_changed = pyqtSignal()           # active tab changed
+    regions_edited = pyqtSignal()        # a region was resized or toggled
+
+    # UserRole slots per item:
+    #   col 0: UserRole   = row_id (int)
+    #   col 0: UserRole+1 = start_time (float)
+    #   col 0: UserRole+2 = disabled (bool)
+    #   col 1: UserRole   = end_time (float)
 
     def __init__(self, db, parent=None):
         super().__init__(parent)
@@ -446,6 +473,8 @@ class ScanResultsPanel(QWidget):
         self._filename = ""
         self._profile = ""
         self._neg_times: set[float] = set()
+        self._editing = False  # guard against cellChanged during programmatic updates
+        self._undo_stack: list[tuple] = []  # list of (action, *data)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -458,7 +487,7 @@ class ScanResultsPanel(QWidget):
 
         btn_row = QHBoxLayout()
         self._btn_neg = QPushButton("Add to Negatives")
-        self._btn_neg.setToolTip("Mark selected rows as hard-negative training examples and remove them")
+        self._btn_neg.setToolTip("Mark selected rows as hard-negative training examples")
         self._btn_neg.clicked.connect(self._on_add_negatives)
         self._btn_export = QPushButton("Export Scan Results")
         self._btn_export.setToolTip("Export clips from the active tab's scan results")
@@ -467,6 +496,19 @@ class ScanResultsPanel(QWidget):
         btn_row.addWidget(self._btn_neg)
         btn_row.addWidget(self._btn_export)
         layout.addLayout(btn_row)
+
+    @staticmethod
+    def _parse_time(text: str) -> float | None:
+        """Parse 'M:SS.S' or 'H:MM:SS.S' back to seconds. Returns None on failure."""
+        try:
+            parts = text.strip().split(":")
+            if len(parts) == 2:
+                return float(parts[0]) * 60 + float(parts[1])
+            if len(parts) == 3:
+                return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        except (ValueError, IndexError):
+            pass
+        return None
 
     def load_for_file(self, filename: str, profile: str) -> None:
         """Load saved scan results from DB for a file."""
@@ -481,31 +523,31 @@ class ScanResultsPanel(QWidget):
     def add_scan_results(self, model: str,
                          regions: list[tuple[float, float, float]]) -> None:
         """Add/replace a tab with new scan results and save to DB."""
-        # Save to DB
         self._db.save_scan_results(self._filename, self._profile, model, regions)
-        # Build row data with IDs from DB
         db_results = self._db.get_scan_results(self._filename, self._profile)
         rows = db_results.get(model, [])
-        # Remove existing tab for this model
         for i in range(self._tabs.count()):
             if self._tabs.tabText(i).rsplit(" (", 1)[0] == model:
                 self._tabs.removeTab(i)
                 break
         self._add_tab(model, rows)
-        # Switch to the new tab
         for i in range(self._tabs.count()):
             if self._tabs.tabText(i).rsplit(" (", 1)[0] == model:
                 self._tabs.setCurrentIndex(i)
                 break
 
     def _add_tab(self, model: str,
-                 rows: list[tuple[int, float, float, float]]) -> None:
-        """Create a table tab. rows: [(row_id, start, end, score), ...]"""
+                 rows: list[tuple[int, float, float, float, bool, float, float]]) -> None:
+        """Create a table tab.
+
+        rows: [(row_id, start, end, score, disabled, orig_start, orig_end), ...]
+        """
         table = QTableWidget(len(rows), 3)
         table.setHorizontalHeaderLabels(["Time", "End", "Score"])
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
-        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        # Allow double-click editing on Time/End columns only
+        table.setEditTriggers(QTableWidget.EditTrigger.DoubleClicked)
         table.verticalHeader().setVisible(False)
         header = table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
@@ -513,21 +555,38 @@ class ScanResultsPanel(QWidget):
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
 
         red = QColor(220, 60, 60)
-        for i, (row_id, start, end, score) in enumerate(rows):
+        gray = QColor(100, 100, 100)
+        self._editing = True
+        for i, (row_id, start, end, score, disabled, os_, oe) in enumerate(rows):
             t_item = QTableWidgetItem(format_time(start))
             t_item.setData(Qt.ItemDataRole.UserRole, row_id)
             t_item.setData(Qt.ItemDataRole.UserRole + 1, start)
+            t_item.setData(Qt.ItemDataRole.UserRole + 2, disabled)
+            t_item.setData(Qt.ItemDataRole.UserRole + 3, os_)  # orig_start
+            t_item.setData(Qt.ItemDataRole.UserRole + 4, oe)   # orig_end
             table.setItem(i, 0, t_item)
+
             e_item = QTableWidgetItem(format_time(end))
             e_item.setData(Qt.ItemDataRole.UserRole, end)
             table.setItem(i, 1, e_item)
-            table.setItem(i, 2, QTableWidgetItem(f"{score:.2f}"))
-            if start in self._neg_times:
+
+            sc_item = QTableWidgetItem(f"{score:.2f}")
+            sc_item.setFlags(sc_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            table.setItem(i, 2, sc_item)
+
+            # Color: disabled (gray) > negative (red) > default
+            if disabled:
+                for col in range(3):
+                    table.item(i, col).setForeground(gray)
+            elif start in self._neg_times:
                 for col in range(3):
                     table.item(i, col).setForeground(red)
+        self._editing = False
 
         table.itemSelectionChanged.connect(
             lambda t=table: self._on_selection_changed(t))
+        table.cellChanged.connect(
+            lambda r, c, t=table: self._on_cell_changed(t, r, c))
         self._tabs.addTab(table, f"{model} ({len(rows)})")
 
     def _on_selection_changed(self, table: QTableWidget) -> None:
@@ -538,8 +597,81 @@ class ScanResultsPanel(QWidget):
             if start is not None:
                 self.seek_requested.emit(float(start))
 
+    def _on_cell_changed(self, table: QTableWidget, row: int, col: int) -> None:
+        """Handle user editing a Time or End cell — parse and update DB."""
+        if self._editing or col > 1:
+            return
+        item = table.item(row, col)
+        if item is None:
+            return
+        # Capture old value before parsing
+        if col == 0:
+            old_val = item.data(Qt.ItemDataRole.UserRole + 1)
+        else:
+            old_val = item.data(Qt.ItemDataRole.UserRole)
+        new_val = self._parse_time(item.text())
+        if new_val is None:
+            self._editing = True
+            item.setText(format_time(old_val))
+            self._editing = False
+            return
+        # Record undo: (action, tab_index, row, col, old_value)
+        tab_idx = self._tabs.indexOf(table)
+        self._undo_stack.append(("resize", tab_idx, row, col, float(old_val)))
+        # Update stored data
+        self._editing = True
+        item.setText(format_time(new_val))
+        if col == 0:
+            item.setData(Qt.ItemDataRole.UserRole + 1, new_val)
+        else:
+            item.setData(Qt.ItemDataRole.UserRole, new_val)
+        self._editing = False
+        # Persist to DB
+        row_id = table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        start = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
+        end = table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+        if row_id is not None:
+            self._db.update_scan_result_times(row_id, float(start), float(end))
+        self.regions_edited.emit()
+
+    def toggle_disable_selected(self) -> None:
+        """Toggle disabled state on selected rows."""
+        table = self._tabs.currentWidget()
+        if not isinstance(table, QTableWidget):
+            return
+        selected_rows = sorted({idx.row() for idx in table.selectedIndexes()})
+        if not selected_rows:
+            return
+        # Record undo: (action, tab_index, [(row, old_disabled), ...])
+        prev = [(r, table.item(r, 0).data(Qt.ItemDataRole.UserRole + 2) or False)
+                for r in selected_rows]
+        self._undo_stack.append(("disable", self._tabs.currentIndex(), prev))
+
+        gray = QColor(100, 100, 100)
+        red = QColor(220, 60, 60)
+        default_fg = table.palette().color(table.foregroundRole())
+        for row in selected_rows:
+            item0 = table.item(row, 0)
+            row_id = item0.data(Qt.ItemDataRole.UserRole)
+            start = item0.data(Qt.ItemDataRole.UserRole + 1)
+            currently_disabled = item0.data(Qt.ItemDataRole.UserRole + 2) or False
+            new_disabled = not currently_disabled
+            item0.setData(Qt.ItemDataRole.UserRole + 2, new_disabled)
+            if row_id is not None:
+                self._db.toggle_scan_result_disabled(row_id, new_disabled)
+            # Update visual
+            if new_disabled:
+                fg = gray
+            elif start is not None and float(start) in self._neg_times:
+                fg = red
+            else:
+                fg = default_fg
+            for col in range(3):
+                table.item(row, col).setForeground(fg)
+        self.regions_edited.emit()
+
     def delete_selected(self) -> None:
-        """Delete selected rows from active tab and DB."""
+        """Permanently delete selected rows from active tab and DB."""
         table = self._tabs.currentWidget()
         if not isinstance(table, QTableWidget):
             return
@@ -552,21 +684,77 @@ class ScanResultsPanel(QWidget):
             if row_id is not None:
                 self._db.delete_scan_result(row_id)
             table.removeRow(row)
-        # Update tab title with new count
         count = table.rowCount()
         self._tabs.setTabText(tab_idx, f"{model} ({count})")
-        self.tab_changed.emit()  # trigger export count refresh
+        self.tab_changed.emit()
 
-    def _get_tab_regions(self, table: QTableWidget
+    def _get_tab_regions(self, table: QTableWidget,
+                         include_disabled: bool = False
                          ) -> list[tuple[float, float, float]]:
-        """Extract (start, end, score) from a table widget."""
+        """Extract (start, end, score) from a table widget, skipping disabled rows."""
         regions = []
         for row in range(table.rowCount()):
+            if not include_disabled:
+                disabled = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 2)
+                if disabled:
+                    continue
             start = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
             end = table.item(row, 1).data(Qt.ItemDataRole.UserRole)
             score = float(table.item(row, 2).text())
             regions.append((float(start), float(end), score))
         return regions
+
+    def current_regions_with_orig(self) -> list[tuple[float, float, float, float, float]]:
+        """Return (start, end, score, orig_start, orig_end) for enabled rows."""
+        table = self._tabs.currentWidget()
+        if not isinstance(table, QTableWidget):
+            return []
+        regions = []
+        for row in range(table.rowCount()):
+            item0 = table.item(row, 0)
+            disabled = item0.data(Qt.ItemDataRole.UserRole + 2)
+            if disabled:
+                continue
+            start = item0.data(Qt.ItemDataRole.UserRole + 1)
+            end = table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+            score = float(table.item(row, 2).text())
+            os_ = item0.data(Qt.ItemDataRole.UserRole + 3)
+            oe = item0.data(Qt.ItemDataRole.UserRole + 4)
+            if os_ is None:
+                os_ = start
+            if oe is None:
+                oe = end
+            regions.append((float(start), float(end), score, float(os_), float(oe)))
+        return regions
+
+    def update_region_times(self, start_match: float, end_match: float,
+                            new_start: float, new_end: float) -> None:
+        """Update the table row matching (start, end) with new times. Called from timeline drag."""
+        table = self._tabs.currentWidget()
+        if not isinstance(table, QTableWidget):
+            return
+        for row in range(table.rowCount()):
+            item0 = table.item(row, 0)
+            s = item0.data(Qt.ItemDataRole.UserRole + 1)
+            e = table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+            if s is None or e is None:
+                continue
+            if abs(float(s) - start_match) < 0.01 and abs(float(e) - end_match) < 0.01:
+                # Record undo
+                tab_idx = self._tabs.indexOf(table)
+                self._undo_stack.append(("drag", tab_idx, row, float(s), float(e)))
+                # Update stored values
+                self._editing = True
+                item0.setData(Qt.ItemDataRole.UserRole + 1, new_start)
+                item0.setText(format_time(new_start))
+                table.item(row, 1).setData(Qt.ItemDataRole.UserRole, new_end)
+                table.item(row, 1).setText(format_time(new_end))
+                self._editing = False
+                # Persist to DB
+                row_id = item0.data(Qt.ItemDataRole.UserRole)
+                if row_id is not None:
+                    self._db.update_scan_result_times(row_id, new_start, new_end)
+                return
 
     def _on_add_negatives(self) -> None:
         """Toggle selected rows as hard negatives (red = negative, toggle off to remove)."""
@@ -576,25 +764,34 @@ class ScanResultsPanel(QWidget):
         selected_rows = sorted({idx.row() for idx in table.selectedIndexes()})
         if not selected_rows:
             return
+        # Record undo: which times were in neg before
+        prev_neg = [(r, table.item(r, 0).data(Qt.ItemDataRole.UserRole + 1))
+                     for r in selected_rows]
+        was_neg = [(r, t, float(t) in self._neg_times) for r, t in prev_neg if t is not None]
+        self._undo_stack.append(("neg", self._tabs.currentIndex(), was_neg))
+
         add_times: list[float] = []
         remove_times: list[float] = []
         red = QColor(220, 60, 60)
+        gray = QColor(100, 100, 100)
         default_fg = table.palette().color(table.foregroundRole())
         for row in selected_rows:
-            start = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
+            item0 = table.item(row, 0)
+            start = item0.data(Qt.ItemDataRole.UserRole + 1)
+            disabled = item0.data(Qt.ItemDataRole.UserRole + 2) or False
             if start is None:
                 continue
             t = float(start)
             if t in self._neg_times:
                 remove_times.append(t)
                 self._neg_times.discard(t)
-                for col in range(3):
-                    table.item(row, col).setForeground(default_fg)
+                fg = gray if disabled else default_fg
             else:
                 add_times.append(t)
                 self._neg_times.add(t)
-                for col in range(3):
-                    table.item(row, col).setForeground(red)
+                fg = gray if disabled else red
+            for col in range(3):
+                table.item(row, col).setForeground(fg)
         if add_times:
             self.negatives_requested.emit(add_times)
         if remove_times:
@@ -604,16 +801,40 @@ class ScanResultsPanel(QWidget):
         table = self._tabs.currentWidget()
         if not isinstance(table, QTableWidget):
             return
+        # _get_tab_regions already skips disabled; also skip negatives
         regions = [r for r in self._get_tab_regions(table) if r[0] not in self._neg_times]
         if regions:
             self.export_requested.emit(regions)
 
     def current_regions(self) -> list[tuple[float, float, float]]:
-        """Return (start, end, score) for all rows in the active tab."""
+        """Return (start, end, score) for enabled rows in the active tab."""
         table = self._tabs.currentWidget()
         if not isinstance(table, QTableWidget):
             return []
         return self._get_tab_regions(table)
+
+    def all_regions(self) -> list[tuple[float, float, float]]:
+        """Return (start, end, score) for ALL rows including disabled."""
+        table = self._tabs.currentWidget()
+        if not isinstance(table, QTableWidget):
+            return []
+        return self._get_tab_regions(table, include_disabled=True)
+
+    def highlight_time(self, t: float) -> None:
+        """Select the row containing time t, scrolling to it."""
+        table = self._tabs.currentWidget()
+        if not isinstance(table, QTableWidget):
+            return
+        for row in range(table.rowCount()):
+            start = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
+            end = table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+            if start is not None and end is not None and start <= t <= end:
+                if table.currentRow() != row:
+                    table.blockSignals(True)
+                    table.selectRow(row)
+                    table.scrollToItem(table.item(row, 0))
+                    table.blockSignals(False)
+                return
 
     def set_export_count(self, n: int) -> None:
         """Update the export button label with estimated clip count."""
@@ -625,9 +846,112 @@ class ScanResultsPanel(QWidget):
     def has_results(self) -> bool:
         return self._tabs.count() > 0
 
+    def undo(self) -> None:
+        """Pop the last action from the undo stack and revert it."""
+        if not self._undo_stack:
+            return
+        action = self._undo_stack.pop()
+        kind = action[0]
+        if kind == "disable":
+            _, tab_idx, prev = action
+            table = self._tabs.widget(tab_idx)
+            if not isinstance(table, QTableWidget):
+                return
+            gray = QColor(100, 100, 100)
+            red = QColor(220, 60, 60)
+            default_fg = table.palette().color(table.foregroundRole())
+            for row, was_disabled in prev:
+                if row >= table.rowCount():
+                    continue
+                item0 = table.item(row, 0)
+                item0.setData(Qt.ItemDataRole.UserRole + 2, was_disabled)
+                row_id = item0.data(Qt.ItemDataRole.UserRole)
+                if row_id is not None:
+                    self._db.toggle_scan_result_disabled(row_id, was_disabled)
+                start = item0.data(Qt.ItemDataRole.UserRole + 1)
+                if was_disabled:
+                    fg = gray
+                elif start is not None and float(start) in self._neg_times:
+                    fg = red
+                else:
+                    fg = default_fg
+                for col in range(3):
+                    table.item(row, col).setForeground(fg)
+            self.regions_edited.emit()
+
+        elif kind == "resize":
+            _, tab_idx, row, col, old_val = action
+            table = self._tabs.widget(tab_idx)
+            if not isinstance(table, QTableWidget) or row >= table.rowCount():
+                return
+            self._editing = True
+            if col == 0:
+                table.item(row, 0).setData(Qt.ItemDataRole.UserRole + 1, old_val)
+                table.item(row, 0).setText(format_time(old_val))
+            else:
+                table.item(row, 1).setData(Qt.ItemDataRole.UserRole, old_val)
+                table.item(row, 1).setText(format_time(old_val))
+            self._editing = False
+            row_id = table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            start = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
+            end = table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+            if row_id is not None:
+                self._db.update_scan_result_times(row_id, float(start), float(end))
+            self.regions_edited.emit()
+
+        elif kind == "drag":
+            _, tab_idx, row, old_start, old_end = action
+            table = self._tabs.widget(tab_idx)
+            if not isinstance(table, QTableWidget) or row >= table.rowCount():
+                return
+            self._editing = True
+            table.item(row, 0).setData(Qt.ItemDataRole.UserRole + 1, old_start)
+            table.item(row, 0).setText(format_time(old_start))
+            table.item(row, 1).setData(Qt.ItemDataRole.UserRole, old_end)
+            table.item(row, 1).setText(format_time(old_end))
+            self._editing = False
+            row_id = table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            if row_id is not None:
+                self._db.update_scan_result_times(row_id, old_start, old_end)
+            self.regions_edited.emit()
+
+        elif kind == "neg":
+            _, tab_idx, was_neg = action
+            table = self._tabs.widget(tab_idx)
+            if not isinstance(table, QTableWidget):
+                return
+            add_back: list[float] = []
+            remove_back: list[float] = []
+            gray = QColor(100, 100, 100)
+            red = QColor(220, 60, 60)
+            default_fg = table.palette().color(table.foregroundRole())
+            for row, t_val, was_in_neg in was_neg:
+                if row >= table.rowCount():
+                    continue
+                t = float(t_val)
+                disabled = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 2) or False
+                if was_in_neg and t not in self._neg_times:
+                    self._neg_times.add(t)
+                    add_back.append(t)
+                    fg = gray if disabled else red
+                elif not was_in_neg and t in self._neg_times:
+                    self._neg_times.discard(t)
+                    remove_back.append(t)
+                    fg = gray if disabled else default_fg
+                else:
+                    continue
+                for col in range(3):
+                    table.item(row, col).setForeground(fg)
+            if add_back:
+                self.negatives_requested.emit(add_back)
+            if remove_back:
+                self.negatives_removed.emit(remove_back)
+
     def keyPressEvent(self, event):
-        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
-            self.delete_selected()
+        if event.key() == Qt.Key.Key_Z and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.undo()
+        elif event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self.toggle_disable_selected()
         else:
             super().keyPressEvent(event)
 
@@ -640,9 +964,12 @@ class TimelineWidget(QWidget):
     keyframe_delete_requested = pyqtSignal(float)   # emits keyframe time
     marker_clicked = pyqtSignal(float, str)         # emits (start_time, output_path)
     marker_deselected = pyqtSignal()                # double-click on empty space
+    # (index, new_start, new_end, old_start, old_end)
+    scan_region_resized = pyqtSignal(int, float, float, float, float)
 
     _RULER_H = 22   # pixels reserved for the time ruler
     _HANDLE_H = 8   # height of the playhead triangle
+    _EDGE_PX = 3    # pixel tolerance for edge hit detection
 
     def __init__(self):
         super().__init__()
@@ -657,8 +984,15 @@ class TimelineWidget(QWidget):
         self._crop_keyframes: list[tuple[float, float, str | None, bool, bool]] = []
         self._markers: list[tuple[float, int, str]] = []
         self._hover_cache: list[tuple[float, str]] = []  # (t/duration, path)
-        self._scan_regions: list[tuple[float, float, float]] = []  # (start, end, score)
+        # (start, end, score, orig_start, orig_end)
+        self._scan_regions: list[tuple[float, float, float, float, float]] = []
         self._scan_neg_times: set[float] = set()
+
+        # Edge-drag state for scan regions
+        self._drag_idx: int | None = None       # which region
+        self._drag_edge: str | None = None      # "left" or "right"
+        self._drag_start_val: float = 0.0       # value before drag
+        self._drag_end_val: float = 0.0
 
         # Cached paint resources — created once, reused every frame
         self._cursor_pen = QPen(QColor(255, 210, 0))
@@ -706,15 +1040,22 @@ class TimelineWidget(QWidget):
         self._rebuild_hover_cache()
         self.update()
 
-    def set_scan_regions(self, regions: list[tuple[float, float, float]],
-                         neg_times: set[float] | None = None) -> None:
-        """regions: list of (start_time, end_time, score)"""
-        self._scan_regions = regions
+    def set_scan_regions(self, regions: list, neg_times: set[float] | None = None) -> None:
+        """regions: list of (start, end, score) or (start, end, score, orig_start, orig_end)"""
+        normed: list[tuple[float, float, float, float, float]] = []
+        for r in regions:
+            if len(r) >= 5:
+                normed.append((r[0], r[1], r[2], r[3], r[4]))
+            else:
+                normed.append((r[0], r[1], r[2], r[0], r[1]))
+        self._scan_regions = normed
         self._scan_neg_times = neg_times or set()
+        self._drag_idx = None
         self.update()
 
     def clear_scan_regions(self) -> None:
         self._scan_regions = []
+        self._drag_idx = None
         self.update()
 
     def set_play_position(self, t: float | None) -> None:
@@ -744,6 +1085,20 @@ class TimelineWidget(QWidget):
             return 0.0
         ratio = max(0.0, min(1.0, x / self.width()))
         return ratio * self._duration
+
+    def _hit_scan_edge(self, x: float) -> tuple[int, str] | None:
+        """Return (region_index, 'left'|'right') if x is near a scan region edge."""
+        if not self._scan_regions or self._duration <= 0:
+            return None
+        w = self.width()
+        for i, (start, end, score, os_, oe) in enumerate(self._scan_regions):
+            x1 = start / self._duration * w
+            x2 = end / self._duration * w
+            if abs(x - x1) <= self._EDGE_PX:
+                return (i, "left")
+            if abs(x - x2) <= self._EDGE_PX:
+                return (i, "right")
+        return None
 
     def paintEvent(self, event):
         from PyQt6.QtGui import QPolygon
@@ -829,14 +1184,26 @@ class TimelineWidget(QWidget):
 
             # ── scan regions ──────────────────────────────────────────────
             if self._scan_regions and self._duration > 0:
-                for (start, end, score) in self._scan_regions:
+                for (start, end, score, os_, oe) in self._scan_regions:
                     x1 = int(start / self._duration * w)
                     x2 = int(end / self._duration * w)
                     alpha = int(40 + score * 80)  # 40–120 opacity
+                    # Grey ghost for trimmed portions
+                    ox1 = int(os_ / self._duration * w)
+                    ox2 = int(oe / self._duration * w)
+                    if ox1 < x1:
+                        p.fillRect(ox1, rh, x1 - ox1, h - rh, QColor(120, 120, 120, 40))
+                    if ox2 > x2:
+                        p.fillRect(x2, rh, ox2 - x2, h - rh, QColor(120, 120, 120, 40))
+                    # Active region
                     if start in self._scan_neg_times:
                         p.fillRect(x1, rh, x2 - x1, h - rh, QColor(220, 60, 60, alpha))
                     else:
                         p.fillRect(x1, rh, x2 - x1, h - rh, QColor(100, 200, 255, alpha))
+                    # Edge handles (thin lines at edges)
+                    p.setPen(QPen(QColor(255, 255, 255, 140), 1))
+                    p.drawLine(x1, rh, x1, h)
+                    p.drawLine(x2, rh, x2, h)
 
             # ── export markers ────────────────────────────────────────────
             if not self._scan_mode:
@@ -916,7 +1283,18 @@ class TimelineWidget(QWidget):
             p.end()
 
     def mousePressEvent(self, event):
-        self._seek(event.position().x())
+        x = event.position().x()
+        # Check for scan region edge drag
+        hit = self._hit_scan_edge(x)
+        if hit is not None:
+            idx, edge = hit
+            r = self._scan_regions[idx]
+            self._drag_idx = idx
+            self._drag_edge = edge
+            self._drag_start_val = r[0]
+            self._drag_end_val = r[1]
+            return
+        self._seek(x)
 
     def mouseDoubleClickEvent(self, event):
         from PyQt6.QtCore import Qt as _Qt
@@ -936,6 +1314,28 @@ class TimelineWidget(QWidget):
 
     def mouseMoveEvent(self, event):
         x = event.position().x()
+
+        # Active edge drag
+        if self._drag_idx is not None and event.buttons():
+            t = self._pos_to_time(int(x))
+            r = self._scan_regions[self._drag_idx]
+            start, end, score, os_, oe = r
+            if self._drag_edge == "left":
+                new_start = max(0.0, min(t, end - 0.5))
+                self._scan_regions[self._drag_idx] = (new_start, end, score, os_, oe)
+            else:
+                new_end = max(start + 0.5, min(t, self._duration))
+                self._scan_regions[self._drag_idx] = (start, new_end, score, os_, oe)
+            self.update()
+            return
+
+        # Hover cursor: resize arrow near edges, normal otherwise
+        hit = self._hit_scan_edge(x)
+        if hit is not None:
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        else:
+            self.unsetCursor()
+
         # Check marker hover using pre-computed fractions.
         if self._hover_cache:
             w = self.width()
@@ -956,6 +1356,15 @@ class TimelineWidget(QWidget):
             self.cursor_changed.emit(self._cursor)
 
     def mouseReleaseEvent(self, event):
+        if self._drag_idx is not None:
+            # Emit resize signal with old and new bounds
+            idx = self._drag_idx
+            r = self._scan_regions[idx]
+            self.scan_region_resized.emit(
+                idx, r[0], r[1], self._drag_start_val, self._drag_end_val)
+            self._drag_idx = None
+            self._drag_edge = None
+            return
         # On release, flush any pending debounced seek immediately.
         self._seek_timer.stop()
         self._emit_seek()
@@ -1834,8 +2243,10 @@ class MainWindow(QMainWindow):
         self._timeline.markers_clear_requested.connect(self._on_clear_markers)
         self._timeline.keyframe_delete_requested.connect(self._on_delete_keyframe)
         self._mpv.time_pos_changed.connect(self._timeline.set_play_position)
+        self._mpv.time_pos_changed.connect(self._on_playback_pos_changed)
         self._timeline.marker_clicked.connect(self._on_marker_clicked)
         self._timeline.marker_deselected.connect(self._on_marker_deselected)
+        self._timeline.scan_region_resized.connect(self._on_scan_region_resized)
 
         self._lbl_file = QLabel("← Drop files onto the queue")
         self._lbl_file.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2034,7 +2445,7 @@ class MainWindow(QMainWindow):
         self._spn_auto_fuse.valueChanged.connect(
             lambda v: self._settings.setValue("auto_fuse", str(v))
         )
-        self._spn_auto_fuse.valueChanged.connect(lambda: self._update_scan_export_count())
+        self._spn_auto_fuse.valueChanged.connect(self._on_fuse_changed)
 
         self._sld_threshold = QDoubleSpinBox()
         self._sld_threshold.setDecimals(2)
@@ -2243,6 +2654,7 @@ class MainWindow(QMainWindow):
         self._scan_panel.negatives_requested.connect(self._on_scan_negatives)
         self._scan_panel.negatives_removed.connect(self._on_scan_negatives_removed)
         self._scan_panel.tab_changed.connect(self._update_scan_export_count)
+        self._scan_panel.regions_edited.connect(self._on_scan_regions_edited)
 
         # Root: horizontal splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -2521,7 +2933,7 @@ class MainWindow(QMainWindow):
             filename = os.path.basename(self._file_path)
             self._scan_panel.load_for_file(filename, self._profile)
             self._timeline.set_scan_regions(
-                self._scan_panel.current_regions(),
+                self._scan_panel.current_regions_with_orig(),
                 neg_times=self._scan_panel._neg_times,
             )
             self._update_scan_export_count()
@@ -2579,9 +2991,9 @@ class MainWindow(QMainWindow):
         """Re-evaluate marks on every playlist item for the current profile."""
         profile = self._profile
         for path in self._playlist._paths:
-            markers = self._db.get_markers(os.path.basename(path), profile)
-            if markers:
-                self._playlist.mark_done(path, len(markers))
+            n = self._db.get_clip_count(os.path.basename(path), profile)
+            if n:
+                self._playlist.mark_done(path, n)
             else:
                 self._playlist.unmark_done(path)
 
@@ -2939,7 +3351,10 @@ class MainWindow(QMainWindow):
         dur = self._mpv.get_duration()
         self._lbl_time.setText(f"{format_time(t)} / {format_time(dur)}")
         self._preview_timer.start()
-        if self._mpv.is_playing():
+        if self._timeline._scan_mode:
+            self._scan_panel.highlight_time(t)
+            self._mpv.seek(t)
+        elif self._mpv.is_playing():
             self._mpv.play_loop(t, t + self._clip_span)
         else:
             self._mpv.seek(t)
@@ -3083,6 +3498,36 @@ class MainWindow(QMainWindow):
                 self._scan_worker.deleteLater()
             self._scan_worker = None
 
+    def _on_fuse_changed(self) -> None:
+        """Re-fuse displayed scan regions and update export count."""
+        self._update_scan_export_count()
+        # Re-fuse the timeline regions using the new fuse gap
+        all_regions = self._scan_panel.current_regions_with_orig()
+        if all_regions:
+            fuse_gap = self._spn_auto_fuse.value()
+            sorted_r = sorted(all_regions, key=lambda r: r[0])
+            fused: list[tuple[float, float, float, float, float]] = []
+            s, e, sc, os_, oe = sorted_r[0]
+            for s2, e2, sc2, os2, oe2 in sorted_r[1:]:
+                if s2 - e <= fuse_gap:
+                    e = max(e, e2)
+                    sc = max(sc, sc2)
+                    os_ = min(os_, os2)
+                    oe = max(oe, oe2)
+                else:
+                    fused.append((s, e, sc, os_, oe))
+                    s, e, sc, os_, oe = s2, e2, sc2, os2, oe2
+            fused.append((s, e, sc, os_, oe))
+            self._timeline.set_scan_regions(
+                fused, neg_times=self._scan_panel._neg_times)
+        else:
+            self._timeline.set_scan_regions([])
+
+    def _on_playback_pos_changed(self, t: float) -> None:
+        """In review mode, highlight the scan result matching the playback position."""
+        if self._timeline._scan_mode:
+            self._scan_panel.highlight_time(t)
+
     def _toggle_scan_mode(self, on: bool) -> None:
         """Toggle scan review mode — clean timeline, free cursor."""
         self._timeline._scan_mode = on
@@ -3177,7 +3622,7 @@ class MainWindow(QMainWindow):
         self._db.add_hard_negatives(filename, self._profile, times,
                                     source_path=self._file_path)
         self._timeline.set_scan_regions(
-            self._scan_panel.current_regions(),
+            self._scan_panel.current_regions_with_orig(),
             neg_times=self._scan_panel._neg_times,
         )
         self._update_scan_export_count()
@@ -3190,11 +3635,25 @@ class MainWindow(QMainWindow):
         filename = os.path.basename(self._file_path)
         self._db.remove_hard_negatives(filename, self._profile, times)
         self._timeline.set_scan_regions(
-            self._scan_panel.current_regions(),
+            self._scan_panel.current_regions_with_orig(),
             neg_times=self._scan_panel._neg_times,
         )
         self._update_scan_export_count()
         self._show_status(f"Removed {len(times)} hard negative(s)")
+
+    def _on_scan_regions_edited(self) -> None:
+        """A scan region was disabled/enabled or resized — refresh timeline and count."""
+        self._timeline.set_scan_regions(
+            self._scan_panel.current_regions_with_orig(),
+            neg_times=self._scan_panel._neg_times,
+        )
+        self._update_scan_export_count()
+
+    def _on_scan_region_resized(self, idx: int, new_start: float, new_end: float,
+                                old_start: float, old_end: float) -> None:
+        """A scan region edge was dragged on the timeline — update panel + DB."""
+        self._scan_panel.update_region_times(old_start, old_end, new_start, new_end)
+        self._update_scan_export_count()
 
     # ── Scan All ───────────────────────────────────────────────
 
@@ -3485,27 +3944,24 @@ class MainWindow(QMainWindow):
         # Find next counter following the normal order
         counter = 1
         while True:
-            if image_sequence:
-                p = build_sequence_dir(folder, name, counter, sub=0)
-            else:
-                p = build_export_path(folder, name, counter, sub=0)
-            if not os.path.exists(p):
+            group_dir = os.path.join(folder, f"{name}_{counter:03d}")
+            if not os.path.exists(group_dir):
                 break
             counter += 1
 
-        # One group folder for the whole scan batch
-        group_name = f"{name}_{counter:03d}"
-        group_dir = os.path.join(folder, group_name)
-        os.makedirs(group_dir, exist_ok=True)
-
+        # One folder per area group, numbered sequentially
         jobs = []
         self._auto_export_positions = []
-        for area_idx, group in enumerate(groups, 1):
+        for area_idx, group in enumerate(groups):
+            group_name = f"{name}_{counter:03d}"
+            group_dir = os.path.join(folder, group_name)
+            os.makedirs(group_dir, exist_ok=True)
             for sub, start_t in enumerate(group):
-                fname = f"{group_name}_a{area_idx}_{sub}{ext}"
+                fname = f"{group_name}_a{area_idx + 1}_{sub}{ext}"
                 out = os.path.join(group_dir, fname)
                 jobs.append((start_t, out, None, 0.5))
                 self._auto_export_positions.append((start_t, out))
+            counter += 1
 
         self._show_status(f"Auto: exporting {len(jobs)} clips...")
 
@@ -3579,8 +4035,8 @@ class MainWindow(QMainWindow):
         self._set_subprofile_btns_enabled(True)
         self._auto_export_no_markers = False
         self._refresh_markers()
-        markers = self._db.get_markers(os.path.basename(self._file_path), self._profile)
-        self._playlist.mark_done(self._file_path, len(markers))
+        n_clips = self._db.get_clip_count(os.path.basename(self._file_path), self._profile)
+        self._playlist.mark_done(self._file_path, n_clips)
         self._update_next_label()
         self._show_status(f"Auto export complete: {n} clips")
         _log(f"Auto export complete: {n} clips")
@@ -3618,14 +4074,11 @@ class MainWindow(QMainWindow):
         folder = self._txt_folder.text()
         name = self._txt_name.text() or "clip"
         is_seq = self._cmb_format.currentText() == "WebP sequence"
-        # Find the first counter whose sub-clip _0 does not exist on disk.
+        # Find the first counter whose group folder does not exist on disk.
         self._export_counter = 1
         while True:
-            if is_seq:
-                path = build_sequence_dir(folder, name, self._export_counter, sub=0)
-            else:
-                path = build_export_path(folder, name, self._export_counter, sub=0)
-            if not os.path.exists(path):
+            group_dir = os.path.join(folder, f"{name}_{self._export_counter:03d}")
+            if not os.path.exists(group_dir):
                 break
             self._export_counter += 1
         n = self._spn_clips.value()
@@ -3837,8 +4290,8 @@ class MainWindow(QMainWindow):
         self._btn_delete.setEnabled(True)
         self._btn_delete.setText("Delete")
         self._refresh_markers()
-        markers = self._db.get_markers(os.path.basename(self._file_path), self._profile)
-        self._playlist.mark_done(self._file_path, len(markers))
+        n_clips = self._db.get_clip_count(os.path.basename(self._file_path), self._profile)
+        self._playlist.mark_done(self._file_path, n_clips)
         # Refresh label history so the new label is immediately selectable.
         current = self._txt_label.currentText()
         self._txt_label.blockSignals(True)
@@ -3875,9 +4328,9 @@ class MainWindow(QMainWindow):
         self._btn_export.setStyleSheet("")
         self._update_next_label()
         self._refresh_markers()
-        markers = self._db.get_markers(os.path.basename(self._file_path), self._profile)
-        if markers:
-            self._playlist.mark_done(self._file_path, len(markers))
+        n_clips = self._db.get_clip_count(os.path.basename(self._file_path), self._profile)
+        if n_clips:
+            self._playlist.mark_done(self._file_path, n_clips)
         self._show_status("Export cancelled", 4000)
 
     def changeEvent(self, event):

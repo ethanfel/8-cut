@@ -322,7 +322,7 @@ def train_classifier(video_infos: list[tuple[str, list[float], list[float]]],
         dict with 'classifier', 'embed_model', and metadata, or None on failure.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    from sklearn.ensemble import GradientBoostingClassifier
+    from sklearn.ensemble import HistGradientBoostingClassifier
 
     def _progress(msg: str) -> None:
         _log(msg)
@@ -411,8 +411,8 @@ def train_classifier(video_infos: list[tuple[str, list[float], list[float]]],
     rng.shuffle(train_idx)
 
     _progress(f"Fitting classifier on {len(train_idx)} samples...")
-    clf = GradientBoostingClassifier(
-        n_estimators=200, max_depth=5, learning_rate=0.1, random_state=42,
+    clf = HistGradientBoostingClassifier(
+        max_iter=200, max_depth=5, learning_rate=0.1, random_state=42,
     )
     clf.fit(X[train_idx], y_arr[train_idx])
     _log("audio_scan: classifier trained")
@@ -422,19 +422,20 @@ def train_classifier(video_infos: list[tuple[str, list[float], list[float]]],
 
     if model_path:
         import joblib
+        from datetime import datetime
         parent = os.path.dirname(model_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        # Version backup: keep previous model before overwriting
-        if os.path.exists(model_path):
-            from datetime import datetime
-            stem, ext = os.path.splitext(model_path)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup = f"{stem}_{ts}{ext}"
-            os.rename(model_path, backup)
-            _log(f"audio_scan: previous model backed up to {os.path.basename(backup)}")
-        joblib.dump(model, model_path)
-        _log(f"audio_scan: model saved to {model_path}")
+        # Save with timestamp in name; keep a symlink/copy as the "latest"
+        stem, ext = os.path.splitext(model_path)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        versioned = f"{stem}_{ts}{ext}"
+        joblib.dump(model, versioned)
+        _log(f"audio_scan: model saved to {versioned}")
+        # Update the base path to point to latest version (copy)
+        import shutil
+        shutil.copy2(versioned, model_path)
+        _log(f"audio_scan: latest model updated: {model_path}")
 
     return model
 
@@ -488,6 +489,7 @@ def list_model_versions(profile_name: str = "default",
 def restore_model_version(version_path: str, profile_name: str = "default",
                           embed_model: str | None = None) -> None:
     """Restore a backup version as the active model."""
+    import shutil
     from datetime import datetime
     current = default_model_path(profile_name, embed_model)
     if version_path == current:
@@ -496,8 +498,7 @@ def restore_model_version(version_path: str, profile_name: str = "default",
     if os.path.exists(current):
         stem, ext = os.path.splitext(current)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        os.rename(current, f"{stem}_{ts}{ext}")
-    import shutil
+        shutil.move(current, f"{stem}_{ts}{ext}")
     shutil.copy2(version_path, current)
     _log(f"audio_scan: restored {os.path.basename(version_path)} as active model")
 

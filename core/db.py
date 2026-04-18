@@ -84,15 +84,32 @@ class ProcessedDB:
         )
         self._con.execute(
             "CREATE TABLE IF NOT EXISTS scan_results ("
-            "  id         INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "  filename   TEXT NOT NULL,"
-            "  profile    TEXT NOT NULL DEFAULT 'default',"
-            "  model      TEXT NOT NULL,"
-            "  start_time REAL NOT NULL,"
-            "  end_time   REAL NOT NULL,"
-            "  score      REAL NOT NULL"
+            "  id              INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  filename        TEXT NOT NULL,"
+            "  profile         TEXT NOT NULL DEFAULT 'default',"
+            "  model           TEXT NOT NULL,"
+            "  start_time      REAL NOT NULL,"
+            "  end_time        REAL NOT NULL,"
+            "  score           REAL NOT NULL,"
+            "  disabled        INTEGER NOT NULL DEFAULT 0,"
+            "  orig_start_time REAL,"
+            "  orig_end_time   REAL"
             ")"
         )
+        # Migrate: add new columns to existing scan_results tables
+        sr_cols = {
+            row[1]
+            for row in self._con.execute("PRAGMA table_info(scan_results)").fetchall()
+        }
+        for col, typedef in [
+            ("disabled",        "INTEGER NOT NULL DEFAULT 0"),
+            ("orig_start_time", "REAL"),
+            ("orig_end_time",   "REAL"),
+        ]:
+            if col not in sr_cols:
+                self._con.execute(
+                    f"ALTER TABLE scan_results ADD COLUMN {col} {typedef}"
+                )
         self._con.execute(
             "CREATE INDEX IF NOT EXISTS idx_scan_file_profile_model"
             " ON scan_results(filename, profile, model)"
@@ -238,10 +255,21 @@ class ProcessedDB:
 
     def get_markers(self, filename: str, profile: str = "default") -> list[tuple[float, int, str]]:
         """Return [(start_time, marker_number, output_path), ...] for exact
-        filename match, sorted by start_time. Empty list if no match."""
+        filename match, sorted by start_time. Empty list if no match.
+        Excludes scan exports (shown via scan panel instead)."""
         if not self._enabled:
             return []
         return self._get_markers_for(filename, profile)
+
+    def get_clip_count(self, filename: str, profile: str = "default") -> int:
+        """Return total number of exported clips (including scan exports)."""
+        if not self._enabled:
+            return 0
+        row = self._con.execute(
+            "SELECT COUNT(*) FROM processed WHERE filename = ? AND profile = ?",
+            (filename, profile),
+        ).fetchone()
+        return row[0] if row else 0
 
     def get_profiles(self) -> list[str]:
         """Return distinct profile names, ordered alphabetically."""
@@ -378,7 +406,8 @@ class ProcessedDB:
             result.append((sp, gt_pos, gt_soft, gt_neg))
         return result
 
-    def get_training_stats(self, profile: str) -> dict[str, dict]:
+    def get_training_stats(self, profile: str,
+                           include_scan_exports: bool = False) -> dict[str, dict]:
         """Return per-subprofile stats for training readiness display.
 
         Returns dict mapping subprofile_name → {
@@ -388,10 +417,17 @@ class ProcessedDB:
         """
         if not self._enabled:
             return {}
-        rows = self._con.execute(
-            "SELECT filename, output_path FROM processed WHERE profile = ?",
-            (profile,),
-        ).fetchall()
+        if include_scan_exports:
+            rows = self._con.execute(
+                "SELECT filename, output_path FROM processed WHERE profile = ?",
+                (profile,),
+            ).fetchall()
+        else:
+            rows = self._con.execute(
+                "SELECT filename, output_path FROM processed"
+                " WHERE profile = ? AND scan_export = 0",
+                (profile,),
+            ).fetchall()
         folders = self.get_export_folders(profile)
         stats: dict[str, dict] = {}
         for folder_name in folders:
@@ -423,30 +459,36 @@ class ProcessedDB:
             )
             self._con.executemany(
                 "INSERT INTO scan_results"
-                " (filename, profile, model, start_time, end_time, score)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                [(filename, profile, model, s, e, sc) for s, e, sc in regions],
+                " (filename, profile, model, start_time, end_time, score,"
+                "  orig_start_time, orig_end_time)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [(filename, profile, model, s, e, sc, s, e) for s, e, sc in regions],
             )
             self._con.commit()
 
     def get_scan_results(self, filename: str, profile: str
-                         ) -> dict[str, list[tuple[int, float, float, float]]]:
+                         ) -> dict[str, list[tuple[int, float, float, float, bool, float, float]]]:
         """Return scan results grouped by model.
 
-        Returns {model: [(row_id, start_time, end_time, score), ...]} sorted by
-        start_time.
+        Returns {model: [(row_id, start, end, score, disabled, orig_start, orig_end), ...]}
+        sorted by start_time.
         """
         if not self._enabled:
             return {}
         rows = self._con.execute(
-            "SELECT id, model, start_time, end_time, score FROM scan_results"
+            "SELECT id, model, start_time, end_time, score, disabled,"
+            "       orig_start_time, orig_end_time"
+            " FROM scan_results"
             " WHERE filename = ? AND profile = ?"
             " ORDER BY model, start_time",
             (filename, profile),
         ).fetchall()
-        result: dict[str, list[tuple[int, float, float, float]]] = {}
-        for row_id, model, s, e, sc in rows:
-            result.setdefault(model, []).append((row_id, s, e, sc))
+        result: dict[str, list[tuple[int, float, float, float, bool, float, float]]] = {}
+        for row_id, model, s, e, sc, dis, os_, oe in rows:
+            # Fall back to current bounds for legacy rows without orig
+            result.setdefault(model, []).append(
+                (row_id, s, e, sc, bool(dis), os_ if os_ is not None else s,
+                 oe if oe is not None else e))
         return result
 
     def delete_scan_result(self, row_id: int) -> None:
@@ -455,6 +497,29 @@ class ProcessedDB:
             return
         with self._lock:
             self._con.execute("DELETE FROM scan_results WHERE id = ?", (row_id,))
+            self._con.commit()
+
+    def toggle_scan_result_disabled(self, row_id: int, disabled: bool) -> None:
+        """Set disabled flag on a scan result row."""
+        if not self._enabled:
+            return
+        with self._lock:
+            self._con.execute(
+                "UPDATE scan_results SET disabled = ? WHERE id = ?",
+                (1 if disabled else 0, row_id),
+            )
+            self._con.commit()
+
+    def update_scan_result_times(self, row_id: int,
+                                 start: float, end: float) -> None:
+        """Update start/end times of a scan result row (resize)."""
+        if not self._enabled:
+            return
+        with self._lock:
+            self._con.execute(
+                "UPDATE scan_results SET start_time = ?, end_time = ? WHERE id = ?",
+                (start, end, row_id),
+            )
             self._con.commit()
 
     def get_scan_models(self, filename: str, profile: str) -> list[str]:
