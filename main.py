@@ -2944,6 +2944,7 @@ class MainWindow(QMainWindow):
         self._cleanup_scan_worker()
         self._scan_all_queue.clear()
         self._btn_scan.setEnabled(True)
+        self._btn_scan_all.setText("Scan All")
         self._btn_scan_all.setEnabled(True)
         # Load saved scan results for this file
         if self._file_path:
@@ -3679,6 +3680,14 @@ class MainWindow(QMainWindow):
 
     def _start_scan_all(self) -> None:
         """Scan all playlist videos not yet scanned with the selected model."""
+        # If already running, stop after current video finishes
+        if self._scan_all_queue or getattr(self, '_scan_all_stopping', False):
+            if self._scan_worker and self._scan_worker.isRunning():
+                self._scan_all_stopping = True
+                self._scan_all_queue.clear()
+                self._btn_scan_all.setEnabled(False)
+                self._show_status("Scan All: stopping after current video…")
+                return
         if self._scan_worker and self._scan_worker.isRunning():
             self._show_status("Scan already running")
             return
@@ -3704,7 +3713,8 @@ class MainWindow(QMainWindow):
         self._scan_all_model_label = model_label
         self._scan_all_profile = self._profile
         self._scan_all_total = len(self._scan_all_queue)
-        self._btn_scan_all.setEnabled(False)
+        self._scan_all_stopping = False
+        self._btn_scan_all.setText("Stop")
         self._btn_scan.setEnabled(False)
         self._show_status(
             f"Scan All: 0/{self._scan_all_total} ({model_label})")
@@ -3713,10 +3723,15 @@ class MainWindow(QMainWindow):
     def _scan_all_next(self) -> None:
         """Start scanning the next video in the queue."""
         if not self._scan_all_queue:
+            self._btn_scan_all.setText("Scan All")
             self._btn_scan_all.setEnabled(True)
             self._btn_scan.setEnabled(True)
-            done = self._scan_all_total
-            self._show_status(f"Scan All complete: {done} videos scanned")
+            if getattr(self, '_scan_all_stopping', False):
+                done = self._scan_all_total - len(self._scan_all_queue)
+                self._show_status(f"Scan All stopped — {done}/{self._scan_all_total} videos scanned")
+            else:
+                self._show_status(f"Scan All complete: {self._scan_all_total} videos scanned")
+            self._scan_all_stopping = False
             return
 
         self._cleanup_scan_worker()
