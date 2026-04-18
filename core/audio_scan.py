@@ -425,6 +425,14 @@ def train_classifier(video_infos: list[tuple[str, list[float], list[float]]],
         parent = os.path.dirname(model_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
+        # Version backup: keep previous model before overwriting
+        if os.path.exists(model_path):
+            from datetime import datetime
+            stem, ext = os.path.splitext(model_path)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup = f"{stem}_{ts}{ext}"
+            os.rename(model_path, backup)
+            _log(f"audio_scan: previous model backed up to {os.path.basename(backup)}")
         joblib.dump(model, model_path)
         _log(f"audio_scan: model saved to {model_path}")
 
@@ -449,6 +457,49 @@ def default_model_path(profile_name: str = "default",
     if embed_model:
         return os.path.join(_MODEL_DIR, f"{profile_name}_{embed_model}.joblib")
     return os.path.join(_MODEL_DIR, f"{profile_name}.joblib")
+
+
+def list_model_versions(profile_name: str = "default",
+                        embed_model: str | None = None) -> list[tuple[str, str]]:
+    """Return available backup versions for a model, newest first.
+
+    Returns list of (timestamp_label, file_path).
+    The current (active) model is listed first as "current".
+    """
+    import re
+    current = default_model_path(profile_name, embed_model)
+    stem, ext = os.path.splitext(current)
+    versions: list[tuple[str, str]] = []
+    if os.path.exists(current):
+        versions.append(("current", current))
+    if not os.path.isdir(_MODEL_DIR):
+        return versions
+    pattern = re.compile(re.escape(os.path.basename(stem)) + r"_(\d{8}_\d{6})" + re.escape(ext) + "$")
+    for fname in os.listdir(_MODEL_DIR):
+        m = pattern.match(fname)
+        if m:
+            versions.append((m.group(1), os.path.join(_MODEL_DIR, fname)))
+    # Sort backups newest first (after "current")
+    current_entry = versions[:1]
+    backups = sorted(versions[1:], key=lambda v: v[0], reverse=True)
+    return current_entry + backups
+
+
+def restore_model_version(version_path: str, profile_name: str = "default",
+                          embed_model: str | None = None) -> None:
+    """Restore a backup version as the active model."""
+    from datetime import datetime
+    current = default_model_path(profile_name, embed_model)
+    if version_path == current:
+        return
+    # Back up current before replacing
+    if os.path.exists(current):
+        stem, ext = os.path.splitext(current)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        os.rename(current, f"{stem}_{ts}{ext}")
+    import shutil
+    shutil.copy2(version_path, current)
+    _log(f"audio_scan: restored {os.path.basename(version_path)} as active model")
 
 
 def list_trained_models(profile_name: str = "default") -> list[str]:
@@ -477,6 +528,25 @@ def list_trained_models(profile_name: str = "default") -> list[str]:
 # ---------------------------------------------------------------------------
 # Scanning
 # ---------------------------------------------------------------------------
+
+def _fuse_regions(regions: list[tuple[float, float, float]]
+                  ) -> list[tuple[float, float, float]]:
+    """Merge overlapping/adjacent regions, keeping max score."""
+    if not regions:
+        return []
+    by_start = sorted(regions, key=lambda r: r[0])
+    fused: list[tuple[float, float, float]] = []
+    s, e, sc = by_start[0]
+    for s2, e2, sc2 in by_start[1:]:
+        if s2 <= e:  # overlapping or touching
+            e = max(e, e2)
+            sc = max(sc, sc2)
+        else:
+            fused.append((s, e, sc))
+            s, e, sc = s2, e2, sc2
+    fused.append((s, e, sc))
+    return fused
+
 
 def scan_video(
     video_path: str,
@@ -532,9 +602,10 @@ def scan_video(
 
     probs = clf.predict_proba(normed)[:, 1]
     mask = probs >= threshold
-    results = [
+    raw = [
         (timestamps[i], timestamps[i] + window, float(probs[i]))
         for i in np.nonzero(mask)[0]
     ]
-    _log(f"audio_scan: {len(results)} regions above threshold {threshold}")
+    results = _fuse_regions(raw)
+    _log(f"audio_scan: {len(results)} regions above threshold {threshold} (from {len(raw)} raw)")
     return results
