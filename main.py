@@ -3068,7 +3068,7 @@ class MainWindow(QMainWindow):
                 filename, profile, model_label, regions)
             # If this is the currently loaded file, update the panel
             if self._file_path and os.path.basename(self._file_path) == filename:
-                self._scan_panel.load_for_file(filename, self._profile)
+                self._scan_panel.load_for_file(filename, profile)
                 self._timeline.set_scan_regions(regions)
         self._scan_all_next()
 
@@ -3303,11 +3303,13 @@ class MainWindow(QMainWindow):
         short_side = self._spn_resize.value() or None
         self._export_short_side = short_side
         self._export_portrait = "Off"
+        self._export_crop_center = 0.5
         self._export_format = fmt
         self._export_clip_count = 1
         self._export_spread = 0
         self._export_folder = folder
         self._export_folder_suffix = ""
+        self._export_profile = self._profile
 
         hw_on = self._chk_hw.isChecked() and self._hw_encoders
         encoder = self._hw_encoders[0] if hw_on else "libx264"
@@ -3354,7 +3356,7 @@ class MainWindow(QMainWindow):
             fmt=self._export_format,
             clip_count=1,
             spread=0,
-            profile=self._profile,
+            profile=self._export_profile,
             source_path=self._file_path,
         )
         upsert_clip_annotation(self._export_folder, path, label)
@@ -3544,11 +3546,13 @@ class MainWindow(QMainWindow):
         self._export_cursor = self._cursor
         self._export_short_side = short_side
         self._export_portrait = self._cmb_portrait.currentText()
+        self._export_crop_center = self._crop_center
         self._export_format = fmt
         self._export_clip_count = self._spn_clips.value()
         self._export_spread = self._spn_spread.value()
         self._export_folder = folder
         self._export_folder_suffix = folder_suffix
+        self._export_profile = self._profile
 
         self._btn_export.setEnabled(False)
         self._set_subprofile_btns_enabled(False)
@@ -3595,11 +3599,11 @@ class MainWindow(QMainWindow):
             category=category,
             short_side=self._export_short_side,
             portrait_ratio=portrait,
-            crop_center=self._crop_center,
+            crop_center=self._export_crop_center,
             fmt=self._export_format,
             clip_count=self._export_clip_count,
             spread=self._export_spread,
-            profile=self._profile,
+            profile=self._export_profile,
             source_path=self._file_path,
         )
         upsert_clip_annotation(self._export_folder, path, label)

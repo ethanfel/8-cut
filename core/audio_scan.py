@@ -3,7 +3,6 @@
 import hashlib
 import os
 import subprocess
-import warnings
 import numpy as np
 
 from .paths import _bin, _log
@@ -22,7 +21,10 @@ def _load_audio_ffmpeg(path: str, sr: int = _SR) -> np.ndarray:
         "-loglevel", "error",
         "pipe:1",
     ]
-    proc = subprocess.run(cmd, capture_output=True, timeout=300)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ffmpeg timed out (300s) on {os.path.basename(path)}")
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode().strip()}")
     return np.frombuffer(proc.stdout, dtype=np.float32)
@@ -240,11 +242,12 @@ def _extract_w2v_targeted(y: np.ndarray, sr: int, gt_intense: list[float],
         # Don't let manual negatives overlap with positives
         manual_neg_times -= pos_times
 
-    # Auto negative windows: every 4s, far from any marker (skip if margin <= 0)
+    # Auto negative windows: every 4s, far from any marker (skip if margin <= 0 or no markers)
     neg_times = set()
-    for t in range(0, int(duration - _WINDOW), 4):
-        if neg_margin > 0 and min((abs(t - g) for g in all_gt), default=9999) > neg_margin:
-            neg_times.add(t)
+    if all_gt and neg_margin > 0:
+        for t in range(0, int(duration - _WINDOW), 4):
+            if min(abs(t - g) for g in all_gt) > neg_margin:
+                neg_times.add(t)
 
     all_times = sorted(pos_times | neg_times | manual_neg_times)
     # Filter out windows that go past the end

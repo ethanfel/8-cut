@@ -159,43 +159,47 @@ class ProcessedDB:
             self._con.execute("DELETE FROM processed WHERE output_path = ?", (output_path,))
             self._con.commit()
 
-    def get_group(self, output_path: str) -> list[str]:
-        """Return all output_paths sharing the same (filename, start_time) as *output_path*."""
+    def get_group(self, output_path: str, profile: str = "") -> list[str]:
+        """Return all output_paths sharing the same (filename, start_time, profile) as *output_path*."""
         if not self._enabled:
             return []
         row = self._con.execute(
-            "SELECT filename, start_time FROM processed WHERE output_path = ?",
+            "SELECT filename, start_time, profile FROM processed WHERE output_path = ?",
             (output_path,),
         ).fetchone()
         if not row:
             return []
+        filename, start_time, row_profile = row
+        p = profile or row_profile
         rows = self._con.execute(
             "SELECT output_path FROM processed"
-            " WHERE filename = ? AND start_time = ? ORDER BY output_path",
-            (row[0], row[1]),
+            " WHERE filename = ? AND start_time = ? AND profile = ? ORDER BY output_path",
+            (filename, start_time, p),
         ).fetchall()
         return [r[0] for r in rows]
 
-    def delete_group(self, output_path: str) -> list[str]:
-        """Delete all rows sharing the same (filename, start_time) as *output_path*.
+    def delete_group(self, output_path: str, profile: str = "") -> list[str]:
+        """Delete all rows sharing the same (filename, start_time, profile) as *output_path*.
         Returns list of deleted output_paths."""
         if not self._enabled:
             return []
         with self._lock:
             row = self._con.execute(
-                "SELECT filename, start_time FROM processed WHERE output_path = ?",
+                "SELECT filename, start_time, profile FROM processed WHERE output_path = ?",
                 (output_path,),
             ).fetchone()
             if not row:
                 return []
-            filename, start_time = row
+            filename, start_time, row_profile = row
+            p = profile or row_profile
             paths = [r[0] for r in self._con.execute(
-                "SELECT output_path FROM processed WHERE filename = ? AND start_time = ?",
-                (filename, start_time),
+                "SELECT output_path FROM processed"
+                " WHERE filename = ? AND start_time = ? AND profile = ?",
+                (filename, start_time, p),
             ).fetchall()]
             self._con.execute(
-                "DELETE FROM processed WHERE filename = ? AND start_time = ?",
-                (filename, start_time),
+                "DELETE FROM processed WHERE filename = ? AND start_time = ? AND profile = ?",
+                (filename, start_time, p),
             )
             self._con.commit()
             return paths
