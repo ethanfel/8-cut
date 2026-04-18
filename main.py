@@ -194,11 +194,13 @@ class ScanWorker(QThread):
     progress = pyqtSignal(str)    # status message
 
     def __init__(self, video_path: str, model: dict,
-                 threshold: float = 0.30):
+                 threshold: float = 0.30,
+                 prefetched_audio=None):
         super().__init__()
         self._video_path = video_path
         self._model = model
         self._threshold = threshold
+        self._prefetched_audio = prefetched_audio
         self._cancel = False
 
     def cancel(self) -> None:
@@ -211,7 +213,9 @@ class ScanWorker(QThread):
             regions = scan_video(
                 self._video_path, model=self._model,
                 threshold=self._threshold, cancel_flag=self,
+                prefetched_audio=self._prefetched_audio,
             )
+            self._prefetched_audio = None  # free memory
             if not self._cancel:
                 self.scan_done.emit(regions)
         except Exception as e:
@@ -2939,13 +2943,14 @@ class MainWindow(QMainWindow):
         self._crop_keyframes.clear()
         self._timeline.set_crop_keyframes([])
         self._timeline.clear_scan_regions()
-        if self._scan_worker and self._scan_worker.isRunning():
-            self._scan_worker.cancel()
-        self._cleanup_scan_worker()
-        self._scan_all_queue.clear()
-        self._btn_scan.setEnabled(True)
-        self._btn_scan_all.setText("Scan All")
-        self._btn_scan_all.setEnabled(True)
+        # Don't interrupt Scan All when switching files — only cancel solo scans
+        if not self._scan_all_queue and not getattr(self, '_scan_all_stopping', False):
+            if self._scan_worker and self._scan_worker.isRunning():
+                self._scan_worker.cancel()
+            self._cleanup_scan_worker()
+            self._btn_scan.setEnabled(True)
+            self._btn_scan_all.setText("Scan All")
+            self._btn_scan_all.setEnabled(True)
         # Load saved scan results for this file
         if self._file_path:
             filename = os.path.basename(self._file_path)
@@ -3732,6 +3737,7 @@ class MainWindow(QMainWindow):
             else:
                 self._show_status(f"Scan All complete: {self._scan_all_total} videos scanned")
             self._scan_all_stopping = False
+            self._scan_all_prefetched = {}
             return
 
         self._cleanup_scan_worker()
@@ -3742,13 +3748,50 @@ class MainWindow(QMainWindow):
             f"Scan All: {remaining}/{self._scan_all_total} — "
             f"{os.path.basename(path)}")
 
+        # Use prefetched audio if available
+        prefetched = getattr(self, '_scan_all_prefetched', {}).pop(path, None)
+
         threshold = self._sld_threshold.value()
         self._scan_worker = ScanWorker(
             path, model=self._scan_all_model, threshold=threshold,
+            prefetched_audio=prefetched,
         )
         self._scan_worker.scan_done.connect(self._on_scan_all_done)
         self._scan_worker.error.connect(self._on_scan_all_error)
         self._scan_worker.start()
+
+        # Prefetch audio for the next video while GPU is busy
+        self._prefetch_next()
+
+    def _prefetch_next(self) -> None:
+        """Prefetch audio for the next queued video in a background thread."""
+        if not self._scan_all_queue:
+            return
+        next_path = self._scan_all_queue[0]
+        if not hasattr(self, '_scan_all_prefetched'):
+            self._scan_all_prefetched = {}
+        if next_path in self._scan_all_prefetched:
+            return
+        embed_model = self._scan_all_model.get("embed_model")
+        from concurrent.futures import ThreadPoolExecutor
+        if not hasattr(self, '_prefetch_pool'):
+            self._prefetch_pool = ThreadPoolExecutor(max_workers=1)
+        def _do_prefetch(p, em):
+            from core.audio_scan import prefetch_audio
+            return p, prefetch_audio(p, embed_model=em)
+        future = self._prefetch_pool.submit(_do_prefetch, next_path, embed_model)
+        future.add_done_callback(self._on_prefetch_done)
+
+    def _on_prefetch_done(self, future) -> None:
+        """Store prefetched audio data (called from thread pool)."""
+        try:
+            path, audio = future.result()
+            if audio is not None:
+                if not hasattr(self, '_scan_all_prefetched'):
+                    self._scan_all_prefetched = {}
+                self._scan_all_prefetched[path] = audio
+        except Exception as e:
+            _log(f"Prefetch error: {e}")
 
     def _on_scan_all_done(self, regions: list) -> None:
         """Save batch scan results and continue to next video."""
@@ -3759,6 +3802,9 @@ class MainWindow(QMainWindow):
             profile = getattr(self, '_scan_all_profile', self._profile)
             self._db.save_scan_results(
                 filename, profile, model_label, regions)
+            done = self._scan_all_total - len(self._scan_all_queue)
+            _log(f"Scan All: {done}/{self._scan_all_total} done — "
+                 f"{filename}: {len(regions)} regions")
             # If this is the currently loaded file, update the panel
             if self._file_path and os.path.basename(self._file_path) == filename:
                 self._scan_panel.load_for_file(filename, profile)

@@ -560,6 +560,21 @@ def _fuse_regions(regions: list[tuple[float, float, float]]
     return fused
 
 
+def prefetch_audio(video_path: str, embed_model: str | None = None,
+                    hop: float = 1.0, window: float = _WINDOW) -> np.ndarray | None:
+    """Pre-load audio for a video if embeddings aren't cached.
+
+    Returns the raw audio array, or None if cache already exists.
+    Call from a background thread while the GPU is busy with another video.
+    """
+    if _w2v_cache_exists(video_path, hop, window, embed_model):
+        return None
+    _log(f"audio_scan: prefetching {os.path.basename(video_path)}")
+    y = _load_audio_ffmpeg(video_path, sr=_SR)
+    _log(f"audio_scan: prefetched {len(y)/_SR:.1f}s")
+    return y
+
+
 def scan_video(
     video_path: str,
     model: dict = None,
@@ -567,10 +582,12 @@ def scan_video(
     hop: float = 1.0,
     window: float = _WINDOW,
     cancel_flag: object = None,
+    prefetched_audio: np.ndarray | None = None,
 ) -> list[tuple[float, float, float]]:
     """Scan a video for matching audio regions using a trained classifier.
 
     Returns list of (start_time, end_time, score) above threshold.
+    If prefetched_audio is provided, skips the ffmpeg decode step.
     """
     if model is None:
         _log("audio_scan: no model provided")
@@ -584,8 +601,12 @@ def scan_video(
     if cached is not None:
         timestamps, window_vectors = cached
     else:
-        _log(f"audio_scan: loading {video_path}")
-        y = _load_audio_ffmpeg(video_path, sr=_SR)
+        if prefetched_audio is not None:
+            _log(f"audio_scan: using prefetched audio")
+            y = prefetched_audio
+        else:
+            _log(f"audio_scan: loading {video_path}")
+            y = _load_audio_ffmpeg(video_path, sr=_SR)
         sr = _SR
         _log(f"audio_scan: {len(y)/sr:.1f}s loaded")
 

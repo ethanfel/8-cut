@@ -1,7 +1,7 @@
 # 8-cut Windows setup script
 # Run once: powershell -ExecutionPolicy Bypass -File setup-windows.ps1
 #
-# Prerequisites: Python 3.10+ must be installed and on PATH
+# Prerequisites: Python 3.11+ must be installed and on PATH
 #   https://www.python.org/downloads/
 
 $ErrorActionPreference = "Stop"
@@ -9,11 +9,32 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host "=== 8-cut Windows Setup ===" -ForegroundColor Cyan
 
-# ── Python deps ────────────────────────────────────────────
-Write-Host "`nInstalling Python dependencies..."
-pip install PyQt6 python-mpv
+# ── Virtual environment ───────────────────────────────────
+$venvDir = Join-Path $root ".venv"
+if (Test-Path (Join-Path $venvDir "Scripts\python.exe")) {
+    Write-Host "`nVirtual environment already exists, activating..." -ForegroundColor Green
+} else {
+    Write-Host "`nCreating virtual environment..."
+    python -m venv $venvDir
+    Write-Host "Virtual environment created at $venvDir" -ForegroundColor Green
+}
+& "$venvDir\Scripts\Activate.ps1"
 
-# ── libmpv ─────────────────────────────────────────────────
+# ── PyTorch ───────────────────────────────────────────────
+$hasTorch = python -c "import torch" 2>&1
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "`nPyTorch already installed, skipping." -ForegroundColor Green
+} else {
+    Write-Host "`nInstalling PyTorch with CUDA 12.8..."
+    Write-Host "(For CPU-only: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu)" -ForegroundColor Yellow
+    pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+}
+
+# ── Python deps ───────────────────────────────────────────
+Write-Host "`nInstalling project dependencies..."
+pip install -r (Join-Path $root "requirements.txt")
+
+# ── libmpv ────────────────────────────────────────────────
 $mpvDll = Join-Path $root "libmpv-2.dll"
 if (Test-Path $mpvDll) {
     Write-Host "`nlibmpv-2.dll already present, skipping." -ForegroundColor Green
@@ -30,12 +51,11 @@ if (Test-Path $mpvDll) {
     Write-Host "libmpv-2.dll downloaded." -ForegroundColor Green
 }
 
-# ── ffmpeg ─────────────────────────────────────────────────
+# ── ffmpeg ────────────────────────────────────────────────
 $ffmpeg = Join-Path $root "ffmpeg.exe"
 if (Test-Path $ffmpeg) {
     Write-Host "`nffmpeg.exe already present, skipping." -ForegroundColor Green
 } else {
-    # Check if ffmpeg is on PATH
     $onPath = Get-Command ffmpeg -ErrorAction SilentlyContinue
     if ($onPath) {
         Write-Host "`nffmpeg found on PATH: $($onPath.Source)" -ForegroundColor Green
@@ -54,6 +74,11 @@ if (Test-Path $ffmpeg) {
     }
 }
 
+# ── Verify ────────────────────────────────────────────────
+Write-Host "`n--- Verification ---" -ForegroundColor Cyan
+python -c "import torch; print('PyTorch', torch.__version__, 'CUDA', torch.version.cuda)"
+python -c "import sklearn, librosa, torchaudio; print('All imports OK')"
+
 Write-Host "`n=== Setup complete ===" -ForegroundColor Cyan
-Write-Host "Run 8-cut with: python main.py"
+Write-Host "Run 8-cut with: .venv\Scripts\python.exe main.py"
 Write-Host "Or double-click: 8cut.bat"
