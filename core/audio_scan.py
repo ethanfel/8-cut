@@ -9,7 +9,7 @@ from .paths import _log
 
 _SR = 16000           # lower sr = faster
 _WINDOW = 8.0         # seconds
-_MODEL_DIR = os.path.join(os.path.expanduser("~"), ".8cut_models")
+_MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
 _W2V_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".8cut_cache", "w2v")
 
 # ---------------------------------------------------------------------------

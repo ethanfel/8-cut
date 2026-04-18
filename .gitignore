@@ -3,5 +3,7 @@ __pycache__/
 *.pyo
 .pytest_cache/
 .worktrees/
-client/node_modules/
-client/src-tauri/target/
+.venv/
+models/
+*.joblib
+*.pt
