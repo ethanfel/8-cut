@@ -2,15 +2,39 @@
 
 import hashlib
 import os
+import subprocess
+import warnings
 import numpy as np
-import librosa
 
-from .paths import _log
+from .paths import _bin, _log
 
 _SR = 16000           # lower sr = faster
+
+
+def _load_audio_ffmpeg(path: str, sr: int = _SR) -> np.ndarray:
+    """Load audio from any file as mono float32 numpy array using ffmpeg directly."""
+    cmd = [
+        _bin("ffmpeg"), "-i", path,
+        "-vn",                    # skip video
+        "-ac", "1",               # mono
+        "-ar", str(sr),           # resample
+        "-f", "f32le",            # raw 32-bit float little-endian
+        "-loglevel", "error",
+        "pipe:1",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, timeout=300)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {proc.stderr.decode().strip()}")
+    return np.frombuffer(proc.stdout, dtype=np.float32)
 _WINDOW = 8.0         # seconds
-_MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")
-_W2V_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".8cut_cache", "w2v")
+_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_MODEL_DIR = os.path.join(_PROJECT_DIR, "models")
+_W2V_CACHE_DIR = os.path.join(_PROJECT_DIR, "cache", "w2v")
+_DL_CACHE_DIR = os.path.join(_PROJECT_DIR, "cache", "downloads")
+
+# Redirect torch hub and huggingface downloads into the project
+os.environ.setdefault("TORCH_HOME", _DL_CACHE_DIR)
+os.environ.setdefault("HF_HOME", os.path.join(_DL_CACHE_DIR, "huggingface"))
 
 # ---------------------------------------------------------------------------
 # Embedding extraction (lazy-loaded)
@@ -33,7 +57,7 @@ _EMBED_MODELS = {
 _DEFAULT_EMBED_MODEL = "WAV2VEC2_BASE"
 
 _BEATS_CHECKPOINT = os.path.join(
-    os.path.expanduser("~"), ".cache", "huggingface", "hub",
+    _DL_CACHE_DIR, "huggingface", "hub",
     "models--lpepino--beats_ckpts", "snapshots",
     "5b53b0404df452a3a607d7e67687227730e5bad1", "BEATs_iter3_plus_AS2M.pt",
 )
@@ -84,6 +108,30 @@ def _w2v_cache_path(video_path: str, hop: float, window: float,
     key = f"{abspath}|{mtime}|{hop}|{window}|{model_name}"
     h = hashlib.sha256(key.encode()).hexdigest()[:16]
     return os.path.join(_W2V_CACHE_DIR, f"{h}.npz")
+
+
+def _w2v_cache_exists(video_path: str, hop: float, window: float,
+                      model_name: str | None = None) -> bool:
+    """Check if embedding cache exists for a video."""
+    try:
+        path = _w2v_cache_path(video_path, hop, window, model_name)
+        return os.path.exists(path)
+    except Exception:
+        return False
+
+
+def _w2v_cache_load(video_path: str, hop: float, window: float,
+                    model_name: str | None = None) -> tuple[np.ndarray, np.ndarray] | None:
+    """Load embeddings from cache. Returns (timestamps, embeddings) or None."""
+    try:
+        path = _w2v_cache_path(video_path, hop, window, model_name)
+        if os.path.exists(path):
+            data = np.load(path)
+            _log(f"audio_scan: cache hit ({path})")
+            return data["timestamps"], data["embeddings"]
+    except Exception as e:
+        _log(f"audio_scan: cache read failed: {e}")
+    return None
 
 
 def _extract_w2v_windows(y: np.ndarray, sr: int = _SR,
@@ -162,6 +210,7 @@ def _extract_w2v_targeted(y: np.ndarray, sr: int, gt_intense: list[float],
                           gt_soft: list[float], tolerance: float = 12.0,
                           neg_margin: float = 120.0,
                           model_name: str | None = None,
+                          gt_negative: list[float] | None = None,
                           ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Extract embeddings only near positives and distant negatives.
 
@@ -180,13 +229,24 @@ def _extract_w2v_targeted(y: np.ndarray, sr: int, gt_intense: list[float],
             if 0 <= t <= duration - _WINDOW:
                 pos_times.add(int(t))
 
-    # Negative windows: every 4s, far from any marker
+    # Manual negative windows: near explicit negative markers
+    manual_neg_times = set()
+    if gt_negative:
+        for gt in gt_negative:
+            for offset in range(-int(tolerance), int(tolerance) + 1):
+                t = gt + offset
+                if 0 <= t <= duration - _WINDOW:
+                    manual_neg_times.add(int(t))
+        # Don't let manual negatives overlap with positives
+        manual_neg_times -= pos_times
+
+    # Auto negative windows: every 4s, far from any marker (skip if margin <= 0)
     neg_times = set()
     for t in range(0, int(duration - _WINDOW), 4):
-        if min((abs(t - g) for g in all_gt), default=9999) > neg_margin:
+        if neg_margin > 0 and min((abs(t - g) for g in all_gt), default=9999) > neg_margin:
             neg_times.add(t)
 
-    all_times = sorted(pos_times | neg_times)
+    all_times = sorted(pos_times | neg_times | manual_neg_times)
     # Filter out windows that go past the end
     valid_times = [t for t in all_times if int(t * sr) + win_samples <= len(y)]
 
@@ -225,9 +285,10 @@ def _extract_w2v_targeted(y: np.ndarray, sr: int, gt_intense: list[float],
     for i, t in enumerate(timestamps):
         di = min((abs(t - g) for g in gt_intense), default=9999)
         da = min((abs(t - g) for g in all_gt), default=9999)
+        dm = min((abs(t - g) for g in (gt_negative or [])), default=9999)
         if di < tolerance:
             labels[i] = 1
-        elif da > neg_margin:
+        elif dm < tolerance or (neg_margin > 0 and da > neg_margin):
             labels[i] = -1
     return timestamps, embeddings, labels
 
@@ -241,7 +302,9 @@ def train_classifier(video_infos: list[tuple[str, list[float], list[float]]],
                      tolerance: float = 12.0,
                      neg_margin: float = 120.0,
                      embed_model: str | None = None,
-                     cancel_flag: object = None) -> dict:
+                     cancel_flag: object = None,
+                     n_workers: int = 4,
+                     progress_cb: object = None) -> dict:
     """Train a classifier from labeled videos.
 
     Args:
@@ -250,24 +313,62 @@ def train_classifier(video_infos: list[tuple[str, list[float], list[float]]],
         tolerance/neg_margin: labeling parameters
         embed_model: embedding model name (e.g. "HUBERT_BASE", "BEATS"), defaults to WAV2VEC2_BASE
         cancel_flag: object with _cancel attribute; if set, training aborts early
+        n_workers: number of threads for parallel audio loading
 
     Returns:
         dict with 'classifier', 'embed_model', and metadata, or None on failure.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from sklearn.ensemble import GradientBoostingClassifier
 
-    all_X, all_y = [], []
+    def _progress(msg: str) -> None:
+        _log(msg)
+        if progress_cb:
+            progress_cb(msg)
 
-    for vi, (vpath, gt_intense, gt_soft) in enumerate(video_infos):
+    def _load_audio(path: str) -> np.ndarray:
+        return _load_audio_ffmpeg(path, sr=_SR)
+
+    # Phase 1: load all audio in parallel (cap workers — disk I/O bound)
+    n = len(video_infos)
+    load_workers = min(n_workers, 4)
+    _progress(f"Loading audio: 0/{n} videos ({load_workers} workers)...")
+    audio_data: dict[int, np.ndarray] = {}
+    with ThreadPoolExecutor(max_workers=load_workers) as pool:
+        future_to_idx = {
+            pool.submit(_load_audio, vi[0]): i
+            for i, vi in enumerate(video_infos)
+        }
+        failed = set()
+        for future in as_completed(future_to_idx):
+            if cancel_flag and getattr(cancel_flag, '_cancel', False):
+                _log("audio_scan: training cancelled")
+                return None
+            idx = future_to_idx[future]
+            try:
+                audio_data[idx] = future.result()
+            except Exception as e:
+                _log(f"audio_scan: failed to load {os.path.basename(video_infos[idx][0])}: {e}")
+                failed.add(idx)
+            _progress(f"Loading audio: {len(audio_data) + len(failed)}/{n}")
+
+    # Phase 2: extract embeddings sequentially on GPU
+    _progress(f"Extracting embeddings: 0/{n}")
+    all_X, all_y = [], []
+    for vi, vinfo in enumerate(video_infos):
+        if vi in failed:
+            continue
+        vpath, gt_intense, gt_soft = vinfo[0], vinfo[1], vinfo[2]
+        gt_negative = vinfo[3] if len(vinfo) > 3 else []
         if cancel_flag and getattr(cancel_flag, '_cancel', False):
             _log("audio_scan: training cancelled")
             return None
-        _log(f"audio_scan: training [{vi+1}/{len(video_infos)}] {os.path.basename(vpath)}")
-        y, _ = librosa.load(vpath, sr=_SR, mono=True)
+        _progress(f"Extracting embeddings: {vi+1}/{n}")
+        y = audio_data.pop(vi)
 
         timestamps, embeddings, labels = _extract_w2v_targeted(
             y, _SR, gt_intense, gt_soft, tolerance, neg_margin,
-            model_name=embed_model,
+            model_name=embed_model, gt_negative=gt_negative,
         )
         if len(timestamps) == 0:
             continue
@@ -306,6 +407,7 @@ def train_classifier(video_infos: list[tuple[str, list[float], list[float]]],
     train_idx = np.concatenate([pos_idx, neg_sample])
     rng.shuffle(train_idx)
 
+    _progress(f"Fitting classifier on {len(train_idx)} samples...")
     clf = GradientBoostingClassifier(
         n_estimators=200, max_depth=5, learning_rate=0.1, random_state=42,
     )
@@ -334,9 +436,39 @@ def load_classifier(model_path: str) -> dict | None:
     return joblib.load(model_path)
 
 
-def default_model_path(profile_name: str = "default") -> str:
-    """Return the default path for a profile's classifier model."""
+def default_model_path(profile_name: str = "default",
+                       embed_model: str | None = None) -> str:
+    """Return the path for a profile's classifier model.
+
+    When embed_model is given the file is ``{profile}_{model}.joblib``,
+    otherwise ``{profile}.joblib`` (legacy single-model layout).
+    """
+    if embed_model:
+        return os.path.join(_MODEL_DIR, f"{profile_name}_{embed_model}.joblib")
     return os.path.join(_MODEL_DIR, f"{profile_name}.joblib")
+
+
+def list_trained_models(profile_name: str = "default") -> list[str]:
+    """Return embedding model names that have a trained .joblib for *profile_name*.
+
+    Looks for files matching ``{profile}_{MODEL}.joblib`` in the models dir.
+    """
+    prefix = f"{profile_name}_"
+    suffix = ".joblib"
+    result = []
+    if not os.path.isdir(_MODEL_DIR):
+        return result
+    for fname in os.listdir(_MODEL_DIR):
+        if fname.startswith(prefix) and fname.endswith(suffix):
+            model_name = fname[len(prefix):-len(suffix)]
+            if model_name in _EMBED_MODELS:
+                result.append(model_name)
+    # Also check legacy {profile}.joblib
+    legacy = os.path.join(_MODEL_DIR, f"{profile_name}.joblib")
+    if os.path.exists(legacy) and not result:
+        # Legacy model — we don't know the embed model, but it's usable
+        result.append("")
+    return sorted(result)
 
 
 # ---------------------------------------------------------------------------
@@ -359,22 +491,28 @@ def scan_video(
         _log("audio_scan: no model provided")
         return []
 
-    _log(f"audio_scan: loading {video_path}")
-    y, sr = librosa.load(video_path, sr=_SR, mono=True)
-    duration = len(y) / sr
-    _log(f"audio_scan: {duration:.1f}s loaded, extracting features...")
-
-    if cancel_flag and getattr(cancel_flag, '_cancel', False):
-        return []
-
     clf = model["classifier"]
     embed_model = model.get("embed_model")
 
-    _log(f"audio_scan: extracting embeddings ({embed_model or 'default'})...")
-    timestamps, window_vectors = _extract_w2v_windows(
-        y, sr, hop=hop, window=window, video_path=video_path,
-        cancel_flag=cancel_flag, model_name=embed_model,
-    )
+    # Try cache first — skip expensive audio loading if embeddings exist
+    cached = _w2v_cache_load(video_path, hop, window, embed_model)
+    if cached is not None:
+        timestamps, window_vectors = cached
+    else:
+        _log(f"audio_scan: loading {video_path}")
+        y = _load_audio_ffmpeg(video_path, sr=_SR)
+        sr = _SR
+        _log(f"audio_scan: {len(y)/sr:.1f}s loaded")
+
+        if cancel_flag and getattr(cancel_flag, '_cancel', False):
+            return []
+
+        _log(f"audio_scan: extracting embeddings ({embed_model or 'default'})...")
+        timestamps, window_vectors = _extract_w2v_windows(
+            y, sr, hop=hop, window=window, video_path=video_path,
+            cancel_flag=cancel_flag, model_name=embed_model,
+        )
+
     if len(timestamps) == 0:
         _log("audio_scan: video shorter than window")
         return []

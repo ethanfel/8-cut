@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
     QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox,
     QMessageBox, QInputDialog, QDialog, QDialogButtonBox, QFormLayout,
+    QTableWidget, QTableWidgetItem, QTabWidget, QHeaderView,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QRect, QSize, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
@@ -244,12 +245,33 @@ class TrainDialog(QDialog):
             self._cmb_positive.addItem(label, userData=folder_name)
         form.addRow("Positive class:", self._cmb_positive)
 
+        # Negative class selector (optional)
+        self._cmb_negative = QComboBox()
+        self._cmb_negative.addItem("(auto only)", userData="")
+        for folder_name, info in stats.items():
+            label = f"{folder_name}  ({info['videos']} videos, {info['clips']} clips)"
+            self._cmb_negative.addItem(label, userData=folder_name)
+        self._cmb_negative.currentIndexChanged.connect(lambda: self._debounce.start())
+        form.addRow("Negative class:", self._cmb_negative)
+
         # Model selector
         self._cmb_model = QComboBox()
         for name in _EMBED_MODELS:
             self._cmb_model.addItem(name)
         self._cmb_model.setCurrentText("WAV2VEC2_BASE")
         form.addRow("Model:", self._cmb_model)
+
+        # Auto-negative margin (0 = disabled)
+        self._spn_neg_margin = QDoubleSpinBox()
+        self._spn_neg_margin.setDecimals(0)
+        self._spn_neg_margin.setRange(0.0, 600.0)
+        self._spn_neg_margin.setSingleStep(10.0)
+        self._spn_neg_margin.setValue(30.0)
+        self._spn_neg_margin.setSuffix("s")
+        self._spn_neg_margin.setSpecialValueText("Disabled")
+        self._spn_neg_margin.setToolTip(
+            "Auto-sample negatives from regions this far from any marker. 0 = disabled.")
+        form.addRow("Auto-neg margin:", self._spn_neg_margin)
 
         # Video source directory (fallback for old DB rows without source_path)
         self._txt_video_dir = QLineEdit(video_dir)
@@ -265,7 +287,13 @@ class TrainDialog(QDialog):
         btn_browse.setFixedWidth(30)
         btn_browse.clicked.connect(self._browse_video_dir)
         vid_row.addWidget(btn_browse)
-        form.addRow("Video dir:", vid_row)
+        self._lbl_video_dir = QLabel("Video dir:")
+        self._video_dir_widget = QWidget()
+        self._video_dir_widget.setLayout(vid_row)
+        form.addRow(self._lbl_video_dir, self._video_dir_widget)
+        # Hidden by default — shown only if some videos are missing source_path
+        self._lbl_video_dir.setVisible(False)
+        self._video_dir_widget.setVisible(False)
 
         layout.addLayout(form)
 
@@ -297,17 +325,32 @@ class TrainDialog(QDialog):
         if not folder:
             self._lbl_stats.setText("No export folder data available.")
             return
+        neg_folder = self._cmb_negative.currentData() or ""
+        # First check without fallback to see if source_paths are sufficient
+        video_infos_no_fb = self._db.get_training_data(
+            self._profile, folder, negative_folder=neg_folder,
+        )
         video_infos = self._db.get_training_data(
-            self._profile, folder,
+            self._profile, folder, negative_folder=neg_folder,
             fallback_video_dir=self._txt_video_dir.text(),
         )
+        # Show video dir field only when the fallback helps find extra videos
+        needs_fallback = len(video_infos) > len(video_infos_no_fb) or len(video_infos_no_fb) == 0
+        self._lbl_video_dir.setVisible(needs_fallback)
+        self._video_dir_widget.setVisible(needs_fallback)
+
         n_videos = len(video_infos)
-        n_pos = sum(len(gt) for _, gt, _ in video_infos)
-        n_soft = sum(len(s) for _, _, s in video_infos)
-        lines = [f"<b>{n_videos}</b> videos with positive clips"]
-        lines.append(f"<b>{n_pos}</b> positive markers, <b>{n_soft}</b> soft/buffer markers")
+        n_pos = sum(len(vi[1]) for vi in video_infos)
+        n_soft = sum(len(vi[2]) for vi in video_infos)
+        n_neg = sum(len(vi[3]) for vi in video_infos)
+        lines = [f"<b>{n_videos}</b> videos"]
+        lines.append(f"<b>{n_pos}</b> positive, <b>{n_soft}</b> soft/buffer"
+                     + (f", <b>{n_neg}</b> manual negative" if n_neg else "")
+                     + " markers")
         if n_videos == 0:
-            lines.append("<i>No source videos found. Set Video dir above.</i>")
+            lines.append("<i>No source videos found. Set Video dir below.</i>")
+            self._lbl_video_dir.setVisible(True)
+            self._video_dir_widget.setVisible(True)
         elif n_videos < 3:
             lines.append("<i>Recommend at least 3 videos for decent results.</i>")
         self._lbl_stats.setText("<br>".join(lines))
@@ -315,6 +358,14 @@ class TrainDialog(QDialog):
     @property
     def positive_folder(self) -> str:
         return self._cmb_positive.currentData() or ""
+
+    @property
+    def negative_folder(self) -> str:
+        return self._cmb_negative.currentData() or ""
+
+    @property
+    def neg_margin(self) -> float:
+        return self._spn_neg_margin.value()
 
     @property
     def embed_model(self) -> str:
@@ -332,11 +383,14 @@ class TrainWorker(QThread):
     progress = pyqtSignal(str)     # per-video status
 
     def __init__(self, video_infos: list, model_path: str,
-                 embed_model: str | None = None):
+                 embed_model: str | None = None, n_workers: int = 4,
+                 neg_margin: float = 120.0):
         super().__init__()
         self._video_infos = video_infos
         self._model_path = model_path
         self._embed_model = embed_model
+        self._n_workers = n_workers
+        self._neg_margin = neg_margin
         self._cancel = False
 
     def cancel(self) -> None:
@@ -349,8 +403,11 @@ class TrainWorker(QThread):
             result = train_classifier(
                 self._video_infos,
                 model_path=self._model_path,
+                neg_margin=self._neg_margin,
                 embed_model=self._embed_model,
                 cancel_flag=self,
+                n_workers=self._n_workers,
+                progress_cb=self.progress.emit,
             )
             if self._cancel:
                 return
@@ -361,6 +418,152 @@ class TrainWorker(QThread):
         except Exception as e:
             if not self._cancel:
                 self.error.emit(str(e))
+
+
+class ScanResultsPanel(QWidget):
+    """Tabbed panel showing scan results per model, with seek-on-click and delete."""
+    seek_requested = pyqtSignal(float)   # request main window to seek to time
+    export_requested = pyqtSignal(list)  # emit list of (start, end, score) to export
+
+    def __init__(self, db, parent=None):
+        super().__init__(parent)
+        self._db = db
+        self._filename = ""
+        self._profile = ""
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        self._tabs = QTabWidget()
+        self._tabs.setTabsClosable(False)
+        layout.addWidget(self._tabs)
+
+        btn_row = QHBoxLayout()
+        self._btn_export = QPushButton("Export Scan Results")
+        self._btn_export.setToolTip("Export clips from the active tab's scan results")
+        self._btn_export.clicked.connect(self._on_export)
+        btn_row.addStretch()
+        btn_row.addWidget(self._btn_export)
+        layout.addLayout(btn_row)
+
+    def load_for_file(self, filename: str, profile: str) -> None:
+        """Load saved scan results from DB for a file."""
+        self._filename = filename
+        self._profile = profile
+        self._tabs.clear()
+        results = self._db.get_scan_results(filename, profile)
+        for model, rows in results.items():
+            self._add_tab(model, rows)
+
+    def add_scan_results(self, model: str,
+                         regions: list[tuple[float, float, float]]) -> None:
+        """Add/replace a tab with new scan results and save to DB."""
+        # Save to DB
+        self._db.save_scan_results(self._filename, self._profile, model, regions)
+        # Build row data with IDs from DB
+        db_results = self._db.get_scan_results(self._filename, self._profile)
+        rows = db_results.get(model, [])
+        # Remove existing tab for this model
+        for i in range(self._tabs.count()):
+            if self._tabs.tabText(i).rsplit(" (", 1)[0] == model:
+                self._tabs.removeTab(i)
+                break
+        self._add_tab(model, rows)
+        # Switch to the new tab
+        for i in range(self._tabs.count()):
+            if self._tabs.tabText(i).rsplit(" (", 1)[0] == model:
+                self._tabs.setCurrentIndex(i)
+                break
+
+    def _add_tab(self, model: str,
+                 rows: list[tuple[int, float, float, float]]) -> None:
+        """Create a table tab. rows: [(row_id, start, end, score), ...]"""
+        table = QTableWidget(len(rows), 3)
+        table.setHorizontalHeaderLabels(["Time", "End", "Score"])
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+
+        for i, (row_id, start, end, score) in enumerate(rows):
+            t_item = QTableWidgetItem(format_time(start))
+            t_item.setData(Qt.ItemDataRole.UserRole, row_id)
+            t_item.setData(Qt.ItemDataRole.UserRole + 1, start)
+            table.setItem(i, 0, t_item)
+            e_item = QTableWidgetItem(format_time(end))
+            e_item.setData(Qt.ItemDataRole.UserRole, end)
+            table.setItem(i, 1, e_item)
+            table.setItem(i, 2, QTableWidgetItem(f"{score:.2f}"))
+
+        table.itemSelectionChanged.connect(
+            lambda t=table: self._on_selection_changed(t))
+        self._tabs.addTab(table, f"{model} ({len(rows)})")
+
+    def _on_selection_changed(self, table: QTableWidget) -> None:
+        items = table.selectedItems()
+        if items:
+            row = items[0].row()
+            start = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
+            if start is not None:
+                self.seek_requested.emit(float(start))
+
+    def delete_selected(self) -> None:
+        """Delete selected rows from active tab and DB."""
+        table = self._tabs.currentWidget()
+        if not isinstance(table, QTableWidget):
+            return
+        rows_to_delete = sorted(
+            {idx.row() for idx in table.selectedIndexes()}, reverse=True)
+        tab_idx = self._tabs.currentIndex()
+        model = self._tabs.tabText(tab_idx).rsplit(" (", 1)[0]
+        for row in rows_to_delete:
+            row_id = table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            if row_id is not None:
+                self._db.delete_scan_result(row_id)
+            table.removeRow(row)
+        # Update tab title with new count
+        count = table.rowCount()
+        self._tabs.setTabText(tab_idx, f"{model} ({count})")
+
+    def _get_tab_regions(self, table: QTableWidget
+                         ) -> list[tuple[float, float, float]]:
+        """Extract (start, end, score) from a table widget."""
+        regions = []
+        for row in range(table.rowCount()):
+            start = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
+            end = table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+            score = float(table.item(row, 2).text())
+            regions.append((float(start), float(end), score))
+        return regions
+
+    def _on_export(self) -> None:
+        table = self._tabs.currentWidget()
+        if not isinstance(table, QTableWidget):
+            return
+        regions = self._get_tab_regions(table)
+        if regions:
+            self.export_requested.emit(regions)
+
+    def current_regions(self) -> list[tuple[float, float, float]]:
+        """Return (start, end, score) for all rows in the active tab."""
+        table = self._tabs.currentWidget()
+        if not isinstance(table, QTableWidget):
+            return []
+        return self._get_tab_regions(table)
+
+    def has_results(self) -> bool:
+        return self._tabs.count() > 0
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+            self.delete_selected()
+        else:
+            super().keyPressEvent(event)
 
 
 class TimelineWidget(QWidget):
@@ -1710,6 +1913,15 @@ class MainWindow(QMainWindow):
         self._btn_train.clicked.connect(self._open_train_dialog)
         self._train_worker: TrainWorker | None = None
 
+        self._btn_scan_all = QPushButton("Scan All")
+        self._btn_scan_all.setToolTip("Scan all playlist videos that haven't been scanned yet")
+        self._btn_scan_all.clicked.connect(self._start_scan_all)
+        self._scan_all_queue: list[str] = []
+
+        self._cmb_scan_model = QComboBox()
+        self._cmb_scan_model.setToolTip("Trained embedding model to use for scanning")
+        self._cmb_scan_model.setMinimumWidth(120)
+
         self._spn_auto_fuse = QDoubleSpinBox()
         self._spn_auto_fuse.setDecimals(1)
         self._spn_auto_fuse.setRange(0.0, 60.0)
@@ -1800,6 +2012,7 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self._cmb_profile.setCurrentIndex(idx)
         self._cmb_profile.activated.connect(self._on_profile_activated)
+        self._refresh_scan_models()
 
         self._btn_shortcuts = QPushButton("?")
         self._btn_shortcuts.setFixedWidth(28)
@@ -1864,11 +2077,13 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(self._chk_rand_portrait)
         settings_row.addWidget(self._chk_rand_square)
         settings_row.addWidget(self._chk_track)
+        settings_row.addWidget(self._cmb_scan_model)
         settings_row.addWidget(self._btn_scan)
         settings_row.addWidget(self._btn_auto_export)
         settings_row.addWidget(self._spn_auto_fuse)
         settings_row.addWidget(self._sld_threshold)
         settings_row.addWidget(self._btn_train)
+        settings_row.addWidget(self._btn_scan_all)
         settings_row.addStretch()
         self._lbl_status = QLabel()
         self._lbl_status.setStyleSheet("color: #888; font-size: 11px;")
@@ -1918,13 +2133,20 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(left_top)
         left_layout.addWidget(self._playlist)
 
+        # Scan results panel (right side)
+        self._scan_panel = ScanResultsPanel(self._db)
+        self._scan_panel.seek_requested.connect(self._on_scan_seek)
+        self._scan_panel.export_requested.connect(self._on_scan_export)
+
         # Root: horizontal splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left)
         splitter.addWidget(right)
-        splitter.setSizes([200, 900])
+        splitter.addWidget(self._scan_panel)
+        splitter.setSizes([200, 900, 200])
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
+        splitter.setCollapsible(2, True)
 
         self.setCentralWidget(splitter)
         self.setStatusBar(None)
@@ -2061,6 +2283,7 @@ class MainWindow(QMainWindow):
                 self._btn_delete.setEnabled(False)
         self._update_next_label()
         self._apply_playlist_filters()
+        self._refresh_scan_models()
         if self._file_path:
             self._refresh_markers()
             _log(f"Profile switched: {text}")
@@ -2184,7 +2407,13 @@ class MainWindow(QMainWindow):
         if self._scan_worker and self._scan_worker.isRunning():
             self._scan_worker.cancel()
         self._cleanup_scan_worker()
+        self._scan_all_queue.clear()
         self._btn_scan.setEnabled(True)
+        self._btn_scan_all.setEnabled(True)
+        # Load saved scan results for this file
+        if self._file_path:
+            filename = os.path.basename(self._file_path)
+            self._scan_panel.load_for_file(filename, self._profile)
 
         dur = self._mpv.get_duration()
         self._timeline.set_duration(dur)
@@ -2653,8 +2882,42 @@ class MainWindow(QMainWindow):
                 return
         self._step_cursor(markers[0][0] - self._cursor)  # wrap to first
 
+    def _load_selected_scan_model(self) -> tuple:
+        """Load the classifier selected in the scan model combo.
+
+        Returns (model_dict, label_str) or (None, "") on failure.
+        """
+        from core.audio_scan import load_classifier, default_model_path
+        sel = self._cmb_scan_model.currentText()
+        if not sel or sel == "(no model)":
+            self._show_status("No trained model — click Train first")
+            return None, ""
+        embed_name = None if sel == "(legacy)" else sel
+        model_path = default_model_path(self._profile, embed_name)
+        model = load_classifier(model_path)
+        if model is None:
+            self._show_status(f"Model file missing: {model_path}")
+            return None, ""
+        return model, sel
+
+    def _refresh_scan_models(self) -> None:
+        """Populate the scan model combo with trained models for the current profile."""
+        from core.audio_scan import list_trained_models
+        prev = self._cmb_scan_model.currentText()
+        self._cmb_scan_model.clear()
+        models = list_trained_models(self._profile)
+        if not models:
+            self._cmb_scan_model.addItem("(no model)")
+        else:
+            for m in models:
+                self._cmb_scan_model.addItem(m if m else "(legacy)")
+        # Restore previous selection if still available
+        idx = self._cmb_scan_model.findText(prev)
+        if idx >= 0:
+            self._cmb_scan_model.setCurrentIndex(idx)
+
     def _cleanup_scan_worker(self) -> None:
-        """Disconnect signals and schedule deletion of old scan worker."""
+        """Disconnect signals, cancel, and schedule deletion of old scan worker."""
         if self._scan_worker is not None:
             try:
                 self._scan_worker.scan_done.disconnect()
@@ -2662,8 +2925,8 @@ class MainWindow(QMainWindow):
                 self._scan_worker.progress.disconnect()
             except TypeError:
                 pass  # already disconnected
+            self._scan_worker.cancel()
             if self._scan_worker.isRunning():
-                # QThread.finished fires when run() returns, even on cancel
                 self._scan_worker.finished.connect(self._scan_worker.deleteLater)
             else:
                 self._scan_worker.deleteLater()
@@ -2682,17 +2945,14 @@ class MainWindow(QMainWindow):
 
         threshold = self._sld_threshold.value()
 
-        from core.audio_scan import load_classifier, default_model_path
-        model_path = default_model_path(self._profile)
-        model = load_classifier(model_path)
-
+        model, model_label = self._load_selected_scan_model()
         if model is None:
-            self._show_status("No trained model — click Train first")
             return
 
         self._btn_scan.setEnabled(False)
         self._scan_file_path = self._file_path
-        self._show_status("Scanning...")
+        self._scan_model_label = model_label
+        self._show_status(f"Scanning ({model_label})...")
         self._scan_worker = ScanWorker(
             self._file_path, model=model, threshold=threshold,
         )
@@ -2708,12 +2968,115 @@ class MainWindow(QMainWindow):
         if self._file_path != getattr(self, '_scan_file_path', None):
             return
         self._timeline.set_scan_regions(regions)
+        model_label = getattr(self, '_scan_model_label', '')
+        if model_label and self._file_path:
+            filename = os.path.basename(self._file_path)
+            self._scan_panel.add_scan_results(model_label, regions)
         self._show_status(f"Scan complete: {len(regions)} matching regions")
 
     def _on_scan_error(self, msg: str) -> None:
         self._btn_scan.setEnabled(True)
         self._btn_auto_export.setEnabled(True)
         self._show_status(f"Scan error: {msg}")
+
+    def _on_scan_seek(self, t: float) -> None:
+        """Seek player when a scan result row is clicked."""
+        if self._file_path:
+            self._cursor = t
+            self._mpv.seek(t)
+            self._timeline.set_cursor(t)
+            dur = self._mpv.get_duration()
+            self._lbl_time.setText(f"{format_time(t)} / {format_time(dur)}")
+
+    def _on_scan_export(self, regions: list) -> None:
+        """Export clips from scan results panel."""
+        if not self._file_path or not regions:
+            return
+        if self._export_worker and self._export_worker.isRunning():
+            self._show_status("Export already running…")
+            return
+        self._auto_export_regions(regions)
+
+    # ── Scan All ───────────────────────────────────────────────
+
+    def _start_scan_all(self) -> None:
+        """Scan all playlist videos not yet scanned with the selected model."""
+        if self._scan_worker and self._scan_worker.isRunning():
+            self._show_status("Scan already running")
+            return
+
+        model, model_label = self._load_selected_scan_model()
+        if model is None:
+            return
+
+        # Build queue: playlist files minus already-scanned and training files
+        all_paths = self._playlist._paths
+        scanned = self._db.get_scanned_filenames(self._profile, model_label)
+        training = self._db.get_training_filenames(self._profile)
+        skip = scanned | training
+
+        self._scan_all_queue = [
+            p for p in all_paths if os.path.basename(p) not in skip
+        ]
+        if not self._scan_all_queue:
+            self._show_status("All videos already scanned or used for training")
+            return
+
+        self._scan_all_model = model
+        self._scan_all_model_label = model_label
+        self._scan_all_profile = self._profile
+        self._scan_all_total = len(self._scan_all_queue)
+        self._btn_scan_all.setEnabled(False)
+        self._btn_scan.setEnabled(False)
+        self._show_status(
+            f"Scan All: 0/{self._scan_all_total} ({model_label})")
+        self._scan_all_next()
+
+    def _scan_all_next(self) -> None:
+        """Start scanning the next video in the queue."""
+        if not self._scan_all_queue:
+            self._btn_scan_all.setEnabled(True)
+            self._btn_scan.setEnabled(True)
+            done = self._scan_all_total
+            self._show_status(f"Scan All complete: {done} videos scanned")
+            return
+
+        self._cleanup_scan_worker()
+        path = self._scan_all_queue.pop(0)
+        remaining = self._scan_all_total - len(self._scan_all_queue)
+        self._scan_all_current_path = path
+        self._show_status(
+            f"Scan All: {remaining}/{self._scan_all_total} — "
+            f"{os.path.basename(path)}")
+
+        threshold = self._sld_threshold.value()
+        self._scan_worker = ScanWorker(
+            path, model=self._scan_all_model, threshold=threshold,
+        )
+        self._scan_worker.scan_done.connect(self._on_scan_all_done)
+        self._scan_worker.error.connect(self._on_scan_all_error)
+        self._scan_worker.start()
+
+    def _on_scan_all_done(self, regions: list) -> None:
+        """Save batch scan results and continue to next video."""
+        path = getattr(self, '_scan_all_current_path', '')
+        model_label = getattr(self, '_scan_all_model_label', '')
+        if path and model_label:
+            filename = os.path.basename(path)
+            profile = getattr(self, '_scan_all_profile', self._profile)
+            self._db.save_scan_results(
+                filename, profile, model_label, regions)
+            # If this is the currently loaded file, update the panel
+            if self._file_path and os.path.basename(self._file_path) == filename:
+                self._scan_panel.load_for_file(filename, self._profile)
+                self._timeline.set_scan_regions(regions)
+        self._scan_all_next()
+
+    def _on_scan_all_error(self, msg: str) -> None:
+        """Log error and continue to next video."""
+        path = getattr(self, '_scan_all_current_path', '')
+        _log(f"Scan All error on {os.path.basename(path)}: {msg}")
+        self._scan_all_next()
 
     # ── Training ────────────────────────────────────────────────
 
@@ -2751,6 +3114,8 @@ class MainWindow(QMainWindow):
             return
 
         pos_folder = dlg.positive_folder
+        neg_folder = dlg.negative_folder
+        neg_margin = dlg.neg_margin
         embed_model = dlg.embed_model
         video_dir = dlg.video_dir
         if not pos_folder:
@@ -2762,20 +3127,22 @@ class MainWindow(QMainWindow):
             self._settings.setValue("train_video_dir", video_dir)
 
         video_infos = self._db.get_training_data(
-            self._profile, pos_folder, fallback_video_dir=video_dir,
+            self._profile, pos_folder, negative_folder=neg_folder,
+            fallback_video_dir=video_dir,
         )
         if not video_infos:
             self._show_status("No training data found for this subprofile")
             return
 
         from core.audio_scan import default_model_path
-        model_path = default_model_path(self._profile)
+        model_path = default_model_path(self._profile, embed_model)
 
         self._cleanup_train_worker()
         self._btn_train.setEnabled(False)
         self._show_status(f"Training {embed_model} on {len(video_infos)} videos...")
 
-        self._train_worker = TrainWorker(video_infos, model_path, embed_model)
+        n_workers = self._spn_workers.value()
+        self._train_worker = TrainWorker(video_infos, model_path, embed_model, n_workers, neg_margin)
         self._train_worker.train_done.connect(self._on_train_done)
         self._train_worker.error.connect(self._on_train_error)
         self._train_worker.progress.connect(self._show_status)
@@ -2783,6 +3150,7 @@ class MainWindow(QMainWindow):
 
     def _on_train_done(self, model_path: str):
         self._btn_train.setEnabled(True)
+        self._refresh_scan_models()
         self._show_status(f"Model trained and saved")
         _log(f"Training complete: {model_path}")
 
@@ -2810,21 +3178,18 @@ class MainWindow(QMainWindow):
 
         threshold = self._sld_threshold.value()
 
-        from core.audio_scan import load_classifier, default_model_path
-        model_path = default_model_path(self._profile)
-        model = load_classifier(model_path)
-
-        if model is not None:
-            self._scan_file_path = self._file_path
-            self._show_status("Auto: scanning with classifier...")
-            self._scan_worker = ScanWorker(
-                self._file_path, model=model, threshold=threshold,
-            )
-        else:
-            self._show_status("Auto: no trained model — click Train first")
+        model, model_label = self._load_selected_scan_model()
+        if model is None:
             self._btn_auto_export.setEnabled(True)
             self._btn_scan.setEnabled(True)
             return
+
+        self._scan_file_path = self._file_path
+        self._scan_model_label = model_label
+        self._show_status(f"Auto: scanning ({model_label})...")
+        self._scan_worker = ScanWorker(
+            self._file_path, model=model, threshold=threshold,
+        )
 
         self._scan_worker.scan_done.connect(self._on_auto_scan_done)
         self._scan_worker.error.connect(self._on_scan_error)
@@ -2879,7 +3244,15 @@ class MainWindow(QMainWindow):
             return
 
         self._timeline.set_scan_regions(regions)
+        # Also save to scan panel
+        model_label = getattr(self, '_scan_model_label', '')
+        if model_label and self._file_path:
+            self._scan_panel.add_scan_results(model_label, regions)
 
+        self._auto_export_regions(regions)
+
+    def _auto_export_regions(self, regions: list) -> None:
+        """Export clips from a list of (start, end, score) regions."""
         if not regions:
             self._show_status("Auto: no regions found")
             self._btn_auto_export.setEnabled(True)
@@ -2896,6 +3269,7 @@ class MainWindow(QMainWindow):
         # Build export jobs — one 8s clip per position
         folder = self._txt_folder.text()
         name = self._txt_name.text() or "clip"
+        self._auto_export_name = name
         fmt = self._cmb_format.currentText()
         image_sequence = fmt == "WebP sequence"
         os.makedirs(folder, exist_ok=True)
@@ -2959,7 +3333,7 @@ class MainWindow(QMainWindow):
         """Record each auto-exported clip to DB."""
         # Find the start_time for this clip from stashed positions
         counter_str = os.path.basename(os.path.dirname(path))  # e.g. "clip_042"
-        name = self._txt_name.text() or "clip"
+        name = getattr(self, '_auto_export_name', self._txt_name.text() or "clip")
         start_t = None
         for t, c in self._auto_export_positions:
             if counter_str == f"{name}_{c:03d}":
@@ -3306,6 +3680,11 @@ class MainWindow(QMainWindow):
         # Cancel background workers to prevent callbacks into dead objects.
         self._cleanup_scan_worker()
         self._cleanup_train_worker()
+        if self._export_worker and self._export_worker.isRunning():
+            self._export_worker.cancel()
+            self._export_worker.wait(3000)
+        if hasattr(self, '_db_worker') and self._db_worker and self._db_worker.isRunning():
+            self._db_worker.wait(1000)
         # Stop timers first to prevent callbacks into dead objects.
         self._preview_timer.stop()
         self._mpv._render_timer.stop()

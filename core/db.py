@@ -81,6 +81,21 @@ class ProcessedDB:
             "  PRIMARY KEY (filename, profile)"
             ")"
         )
+        self._con.execute(
+            "CREATE TABLE IF NOT EXISTS scan_results ("
+            "  id         INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  filename   TEXT NOT NULL,"
+            "  profile    TEXT NOT NULL DEFAULT 'default',"
+            "  model      TEXT NOT NULL,"
+            "  start_time REAL NOT NULL,"
+            "  end_time   REAL NOT NULL,"
+            "  score      REAL NOT NULL"
+            ")"
+        )
+        self._con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scan_file_profile_model"
+            " ON scan_results(filename, profile, model)"
+        )
         self._con.commit()
 
     def add(self, filename: str, start_time: float, output_path: str,
@@ -248,18 +263,20 @@ class ProcessedDB:
         return sorted(folder_names)
 
     def get_training_data(self, profile: str, positive_folder: str,
+                          negative_folder: str = "",
                           fallback_video_dir: str = "",
-                          ) -> list[tuple[str, list[float], list[float]]]:
+                          ) -> list[tuple[str, list[float], list[float], list[float]]]:
         """Build training video_infos from DB data.
 
         Args:
             profile: profile name
             positive_folder: export folder name for positive class (e.g. "mp4_Intense")
+            negative_folder: export folder name for explicit negatives (optional)
             fallback_video_dir: if source_path is empty, try filename in this dir
 
         Returns:
-            list of (source_video_path, positive_times, soft_times) per video.
-            Soft times = clips from any other export folder.
+            list of (source_video_path, positive_times, soft_times, negative_times)
+            per video.  Soft times = clips from any other non-negative folder.
         """
         if not self._enabled:
             return []
@@ -269,8 +286,9 @@ class ProcessedDB:
             (profile,),
         ).fetchall()
 
-        # Collect times by video, split by positive vs other folders
+        # Collect times by video, split by folder role
         pos_by_video: dict[str, set[float]] = {}
+        neg_by_video: dict[str, set[float]] = {}
         soft_by_video: dict[str, set[float]] = {}
         source_by_filename: dict[str, str] = {}
 
@@ -280,26 +298,43 @@ class ProcessedDB:
             grandparent = os.path.basename(os.path.dirname(os.path.dirname(op)))
             if grandparent == positive_folder:
                 pos_by_video.setdefault(fn, set()).add(st)
+            elif negative_folder and grandparent == negative_folder:
+                neg_by_video.setdefault(fn, set()).add(st)
             else:
                 soft_by_video.setdefault(fn, set()).add(st)
 
-        # Remove positive times from soft to avoid conflicting labels
+        # Remove positive times from soft/neg to avoid conflicting labels
         for fn in pos_by_video:
             if fn in soft_by_video:
                 soft_by_video[fn] -= pos_by_video[fn]
+            if fn in neg_by_video:
+                neg_by_video[fn] -= pos_by_video[fn]
 
+        # Deduplicate nearby markers (spread clips from same position)
+        def _dedup_times(times: set[float], min_gap: float = 8.0) -> list[float]:
+            if not times:
+                return []
+            ordered = sorted(times)
+            result = [ordered[0]]
+            for t in ordered[1:]:
+                if t - result[-1] >= min_gap:
+                    result.append(t)
+            return result
+
+        # Include videos that have positives OR explicit negatives
+        all_videos = set(pos_by_video) | set(neg_by_video)
         result = []
-        for fn in pos_by_video:
+        for fn in all_videos:
             sp = source_by_filename.get(fn, "")
             if not sp or not os.path.exists(sp):
-                # Fallback: try video_dir / filename
                 if fallback_video_dir:
                     sp = os.path.join(fallback_video_dir, fn)
             if not sp or not os.path.exists(sp):
                 continue
-            gt_pos = sorted(pos_by_video[fn])
-            gt_soft = sorted(soft_by_video.get(fn, set()))
-            result.append((sp, gt_pos, gt_soft))
+            gt_pos = _dedup_times(pos_by_video.get(fn, set()))
+            gt_soft = _dedup_times(soft_by_video.get(fn, set()))
+            gt_neg = _dedup_times(neg_by_video.get(fn, set()))
+            result.append((sp, gt_pos, gt_soft, gt_neg))
         return result
 
     def get_training_stats(self, profile: str) -> dict[str, dict]:
@@ -328,6 +363,92 @@ class ProcessedDB:
                     clips += 1
             stats[folder_name] = {"videos": len(videos), "clips": clips}
         return stats
+
+    # ── Scan results ─────────────────────────────────────────────
+
+    def save_scan_results(self, filename: str, profile: str, model: str,
+                          regions: list[tuple[float, float, float]]) -> None:
+        """Replace scan results for (filename, profile, model) with new regions.
+
+        regions: list of (start_time, end_time, score).
+        """
+        if not self._enabled:
+            return
+        with self._lock:
+            self._con.execute(
+                "DELETE FROM scan_results"
+                " WHERE filename = ? AND profile = ? AND model = ?",
+                (filename, profile, model),
+            )
+            self._con.executemany(
+                "INSERT INTO scan_results"
+                " (filename, profile, model, start_time, end_time, score)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                [(filename, profile, model, s, e, sc) for s, e, sc in regions],
+            )
+            self._con.commit()
+
+    def get_scan_results(self, filename: str, profile: str
+                         ) -> dict[str, list[tuple[int, float, float, float]]]:
+        """Return scan results grouped by model.
+
+        Returns {model: [(row_id, start_time, end_time, score), ...]} sorted by
+        start_time.
+        """
+        if not self._enabled:
+            return {}
+        rows = self._con.execute(
+            "SELECT id, model, start_time, end_time, score FROM scan_results"
+            " WHERE filename = ? AND profile = ?"
+            " ORDER BY model, start_time",
+            (filename, profile),
+        ).fetchall()
+        result: dict[str, list[tuple[int, float, float, float]]] = {}
+        for row_id, model, s, e, sc in rows:
+            result.setdefault(model, []).append((row_id, s, e, sc))
+        return result
+
+    def delete_scan_result(self, row_id: int) -> None:
+        """Delete a single scan result row."""
+        if not self._enabled:
+            return
+        with self._lock:
+            self._con.execute("DELETE FROM scan_results WHERE id = ?", (row_id,))
+            self._con.commit()
+
+    def get_scan_models(self, filename: str, profile: str) -> list[str]:
+        """Return model names that have scan results for this file."""
+        if not self._enabled:
+            return []
+        rows = self._con.execute(
+            "SELECT DISTINCT model FROM scan_results"
+            " WHERE filename = ? AND profile = ? ORDER BY model",
+            (filename, profile),
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def get_scanned_filenames(self, profile: str, model: str) -> set[str]:
+        """Return filenames that already have scan results for this model."""
+        if not self._enabled:
+            return set()
+        rows = self._con.execute(
+            "SELECT DISTINCT filename FROM scan_results"
+            " WHERE profile = ? AND model = ?",
+            (profile, model),
+        ).fetchall()
+        return {r[0] for r in rows}
+
+    def get_training_filenames(self, profile: str) -> set[str]:
+        """Return filenames used in training (have exported clips)."""
+        if not self._enabled:
+            return set()
+        rows = self._con.execute(
+            "SELECT DISTINCT filename FROM processed WHERE profile = ?",
+            (profile,),
+        ).fetchall()
+        return {r[0] for r in rows}
+
+    # ── Hidden files ───────────────────────────────────────────
 
     def hide_file(self, filename: str, profile: str = "default") -> None:
         if not self._enabled:
