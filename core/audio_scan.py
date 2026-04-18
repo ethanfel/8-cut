@@ -240,7 +240,8 @@ def train_classifier(video_infos: list[tuple[str, list[float], list[float]]],
                      model_path: str | None = None,
                      tolerance: float = 12.0,
                      neg_margin: float = 120.0,
-                     embed_model: str | None = None) -> dict:
+                     embed_model: str | None = None,
+                     cancel_flag: object = None) -> dict:
     """Train a classifier from labeled videos.
 
     Args:
@@ -248,6 +249,7 @@ def train_classifier(video_infos: list[tuple[str, list[float], list[float]]],
         model_path: if given, save model to this path
         tolerance/neg_margin: labeling parameters
         embed_model: embedding model name (e.g. "HUBERT_BASE", "BEATS"), defaults to WAV2VEC2_BASE
+        cancel_flag: object with _cancel attribute; if set, training aborts early
 
     Returns:
         dict with 'classifier', 'embed_model', and metadata, or None on failure.
@@ -257,6 +259,9 @@ def train_classifier(video_infos: list[tuple[str, list[float], list[float]]],
     all_X, all_y = [], []
 
     for vi, (vpath, gt_intense, gt_soft) in enumerate(video_infos):
+        if cancel_flag and getattr(cancel_flag, '_cancel', False):
+            _log("audio_scan: training cancelled")
+            return None
         _log(f"audio_scan: training [{vi+1}/{len(video_infos)}] {os.path.basename(vpath)}")
         y, _ = librosa.load(vpath, sr=_SR, mono=True)
 

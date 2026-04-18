@@ -283,6 +283,11 @@ class ProcessedDB:
             else:
                 soft_by_video.setdefault(fn, set()).add(st)
 
+        # Remove positive times from soft to avoid conflicting labels
+        for fn in pos_by_video:
+            if fn in soft_by_video:
+                soft_by_video[fn] -= pos_by_video[fn]
+
         result = []
         for fn in pos_by_video:
             sp = source_by_filename.get(fn, "")

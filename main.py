@@ -350,6 +350,7 @@ class TrainWorker(QThread):
                 self._video_infos,
                 model_path=self._model_path,
                 embed_model=self._embed_model,
+                cancel_flag=self,
             )
             if self._cancel:
                 return

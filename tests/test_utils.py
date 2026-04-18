@@ -1,5 +1,6 @@
 import tempfile, os, json
-from main import build_export_path, format_time, build_ffmpeg_command, build_sequence_dir, build_audio_extract_command, build_annotation_json_path, upsert_clip_annotation, resolve_keyframe, apply_keyframes_to_jobs
+from main import build_export_path, format_time, build_ffmpeg_command, build_sequence_dir, build_audio_extract_command, resolve_keyframe, apply_keyframes_to_jobs
+from core.annotations import build_annotation_json_path, upsert_clip_annotation
 from main import ProcessedDB
 
 
