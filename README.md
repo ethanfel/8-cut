@@ -312,6 +312,8 @@ The classifier trains a `HistGradientBoostingClassifier` on audio embeddings and
 
 Select a trained model from the dropdown and click **Scan**. Adjust the threshold slider to control sensitivity. Detected regions appear as colored bands on the timeline and as rows in the results panel.
 
+Audio embeddings are computed once per video and cached to disk (`cache/w2v/`). Subsequent scans with the same embedding model skip the GPU entirely and only re-run the classifier, which takes milliseconds. This makes the retrain → rescan loop nearly free after the first pass.
+
 ### 4. Review and refine
 
 - Toggle **Review** mode for a clean timeline focused on scan results
@@ -326,7 +328,7 @@ Click **Export Scan Results** to batch export all enabled regions. The button sh
 
 ### 6. Retrain with feedback
 
-Train again — hard negatives are automatically included. Each training run saves with a timestamp. Right-click the model dropdown to restore a previous version if results degrade.
+Train again — hard negatives are automatically included. Each training run saves with a timestamp. Click the **⏲** button next to the model dropdown to restore a previous version if results degrade — restoring automatically rescans with the selected version.
 
 ## Database
 
