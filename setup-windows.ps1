@@ -5,6 +5,7 @@
 #   https://www.python.org/downloads/
 
 $ErrorActionPreference = "Stop"
+trap { Write-Host "`n$_" -ForegroundColor Red; Read-Host "Press Enter to close"; exit 1 }
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host "=== 8-cut Windows Setup ===" -ForegroundColor Cyan
@@ -89,3 +90,4 @@ python -c "import sklearn, librosa, torchaudio; print('All imports OK')"
 Write-Host "`n=== Setup complete ===" -ForegroundColor Cyan
 Write-Host "Run 8-cut with: .venv\Scripts\python.exe main.py"
 Write-Host "Or double-click: 8cut.bat"
+Read-Host "`nPress Enter to close"
