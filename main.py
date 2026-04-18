@@ -330,6 +330,8 @@ class TrainDialog(QDialog):
         inc = inc_scan.isChecked() if inc_scan else False
         prev_pos = self._cmb_positive.currentData()
         prev_neg = self._cmb_negative.currentData()
+        self._cmb_positive.blockSignals(True)
+        self._cmb_negative.blockSignals(True)
         self._cmb_positive.clear()
         # Keep "(auto only)" as first item in negative, remove the rest
         while self._cmb_negative.count() > 1:
@@ -348,6 +350,8 @@ class TrainDialog(QDialog):
             idx = self._cmb_negative.findData(prev_neg)
             if idx >= 0:
                 self._cmb_negative.setCurrentIndex(idx)
+        self._cmb_positive.blockSignals(False)
+        self._cmb_negative.blockSignals(False)
 
     def _update_stats(self):
         self._populate_folder_combos()
