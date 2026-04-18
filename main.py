@@ -1218,10 +1218,16 @@ class TimelineWidget(QWidget):
                     p.drawText(mx + 1, rh + 2, 13, 12,
                                Qt.AlignmentFlag.AlignCenter, str(num))
 
-            # ── scan mode cursor line ─────────────────────────────────────
+            # ── scan mode cursor + playback line ─────────────────────────
             if self._scan_mode:
-                p.setPen(QPen(QColor(255, 255, 255, 200), 2))
+                # Export cursor (dim)
+                p.setPen(QPen(QColor(255, 255, 255, 80), 1))
                 p.drawLine(x_start, rh, x_start, h)
+                # Playback position (bright green)
+                if self._play_pos is not None and self._play_pos >= 0:
+                    px = int(self._play_pos / self._duration * w)
+                    p.setPen(QPen(QColor(80, 255, 80, 220), 2))
+                    p.drawLine(px, rh, px, h)
 
             # ── crop keyframe diamonds ────────────────────────────────────
             if self._crop_keyframes and self._duration > 0:
@@ -2429,10 +2435,16 @@ class MainWindow(QMainWindow):
         self._scan_all_queue: list[str] = []
 
         self._cmb_scan_model = QComboBox()
-        self._cmb_scan_model.setToolTip("Trained embedding model to use for scanning\nRight-click to rollback to a previous version")
+        self._cmb_scan_model.setToolTip("Trained embedding model to use for scanning")
         self._cmb_scan_model.setMinimumWidth(120)
         self._cmb_scan_model.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._cmb_scan_model.customContextMenuRequested.connect(self._show_model_versions_menu)
+        self._btn_model_history = QPushButton("\u23f2")
+        self._btn_model_history.setFixedWidth(28)
+        self._btn_model_history.setToolTip("Rollback to a previous model version")
+        self._btn_model_history.clicked.connect(
+            lambda: self._show_model_versions_menu(None)
+        )
 
         self._spn_auto_fuse = QDoubleSpinBox()
         self._spn_auto_fuse.setDecimals(1)
@@ -2591,6 +2603,7 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(self._chk_rand_square)
         settings_row.addWidget(self._chk_track)
         settings_row.addWidget(self._cmb_scan_model)
+        settings_row.addWidget(self._btn_model_history)
         settings_row.addWidget(self._btn_scan)
         settings_row.addWidget(self._btn_scan_mode)
         settings_row.addWidget(self._btn_auto_export)
@@ -3480,10 +3493,13 @@ class MainWindow(QMainWindow):
                 display = f"{label[:4]}-{label[4:6]}-{label[6:8]} {label[9:11]}:{label[11:13]}"
                 act = menu.addAction(f"Restore {display}")
                 act.setData(path)
-        chosen = menu.exec(self._cmb_scan_model.mapToGlobal(pos))
+        global_pos = (self._btn_model_history.mapToGlobal(self._btn_model_history.rect().bottomLeft())
+                      if pos is None
+                      else self._cmb_scan_model.mapToGlobal(pos))
+        chosen = menu.exec(global_pos)
         if chosen and chosen.data():
             restore_model_version(chosen.data(), self._profile, embed_name)
-            self._show_status(f"Restored model version — rescan to use it")
+            self._start_scan()
 
     def _cleanup_scan_worker(self) -> None:
         """Disconnect signals, cancel, and schedule deletion of old scan worker."""

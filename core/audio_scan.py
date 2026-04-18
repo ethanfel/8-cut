@@ -489,16 +489,27 @@ def list_model_versions(profile_name: str = "default",
 def restore_model_version(version_path: str, profile_name: str = "default",
                           embed_model: str | None = None) -> None:
     """Restore a backup version as the active model."""
-    import shutil
+    import filecmp, shutil
     from datetime import datetime
     current = default_model_path(profile_name, embed_model)
     if version_path == current:
         return
-    # Back up current before replacing
+    # Back up current before replacing — but only if no identical backup exists
     if os.path.exists(current):
         stem, ext = os.path.splitext(current)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        shutil.move(current, f"{stem}_{ts}{ext}")
+        already_saved = False
+        if os.path.isdir(_MODEL_DIR):
+            import re
+            pat = re.compile(re.escape(os.path.basename(stem)) + r"_\d{8}_\d{6}" + re.escape(ext) + "$")
+            for fname in os.listdir(_MODEL_DIR):
+                if pat.match(fname):
+                    candidate = os.path.join(_MODEL_DIR, fname)
+                    if filecmp.cmp(current, candidate, shallow=False):
+                        already_saved = True
+                        break
+        if not already_saved:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            shutil.move(current, f"{stem}_{ts}{ext}")
     shutil.copy2(version_path, current)
     _log(f"audio_scan: restored {os.path.basename(version_path)} as active model")
 
