@@ -24,6 +24,7 @@ if sys.platform == "win32":
     # Help ctypes find libmpv-2.dll next to main.py or in frozen bundle
     _dll_dir = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent
     os.add_dll_directory(str(_dll_dir))
+    os.environ["PATH"] = str(_dll_dir) + os.pathsep + os.environ.get("PATH", "")
 elif sys.platform == "darwin" and getattr(sys, "frozen", False):
     os.environ.setdefault("DYLD_LIBRARY_PATH", str(Path(sys._MEIPASS)))
 import mpv
