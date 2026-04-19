@@ -791,11 +791,13 @@ class ScanResultsPanel(QWidget):
         self._filename = filename
         self._profile = profile
         self._neg_times = self._db.get_hard_negative_times(filename, profile)
+        self._tabs.blockSignals(True)
         self._tabs.clear()
         results = self._db.get_scan_results(filename, profile)
         for model, rows in results.items():
             self._add_tab(model, rows)
         self._populate_version_combos()
+        self._tabs.blockSignals(False)
 
     def add_scan_results(self, model: str,
                          regions: list[tuple[float, float, float]]) -> None:
@@ -803,6 +805,7 @@ class ScanResultsPanel(QWidget):
         self._db.save_scan_results(self._filename, self._profile, model, regions)
         db_results = self._db.get_scan_results(self._filename, self._profile)
         rows = db_results.get(model, [])
+        self._tabs.blockSignals(True)
         for i in range(self._tabs.count()):
             if self._tabs.tabText(i).rsplit(" (", 1)[0] == model:
                 self._tabs.removeTab(i)
@@ -813,6 +816,8 @@ class ScanResultsPanel(QWidget):
             if self._tabs.tabText(i).rsplit(" (", 1)[0] == model:
                 self._tabs.setCurrentIndex(i)
                 break
+        self._tabs.blockSignals(False)
+        self.tab_changed.emit()
 
     def _add_tab(self, model: str,
                  rows: list[tuple[int, float, float, float, bool, float, float]]) -> None:
