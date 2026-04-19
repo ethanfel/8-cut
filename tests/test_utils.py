@@ -5,21 +5,21 @@ from main import ProcessedDB
 
 
 def test_build_export_path_first():
-    assert build_export_path("/out", "clip", 1) == "/out/clip_001/clip_001.mp4"
+    assert build_export_path("/out", "clip", 1) == "/out/clip_001.mp4"
 
 def test_build_export_path_counter():
-    assert build_export_path("/out", "clip", 42) == "/out/clip_042/clip_042.mp4"
+    assert build_export_path("/out", "clip", 42) == "/out/clip_042.mp4"
 
 def test_build_export_path_deep_counter():
-    assert build_export_path("/out", "shot", 999) == "/out/shot_999/shot_999.mp4"
+    assert build_export_path("/out", "shot", 999) == "/out/shot_999.mp4"
 
 def test_build_export_path_sub():
-    assert build_export_path("/out", "clip", 1, sub=0) == "/out/clip_001/clip_001_0.mp4"
-    assert build_export_path("/out", "clip", 1, sub=2) == "/out/clip_001/clip_001_2.mp4"
+    assert build_export_path("/out", "clip", 1, sub=0) == "/out/clip_001_0.mp4"
+    assert build_export_path("/out", "clip", 1, sub=2) == "/out/clip_001_2.mp4"
 
 def test_build_sequence_dir_sub():
-    assert build_sequence_dir("/out", "clip", 1, sub=0) == "/out/clip_001/clip_001_0"
-    assert build_sequence_dir("/out", "clip", 1, sub=1) == "/out/clip_001/clip_001_1"
+    assert build_sequence_dir("/out", "clip", 1, sub=0) == "/out/clip_001_0"
+    assert build_sequence_dir("/out", "clip", 1, sub=1) == "/out/clip_001_1"
 
 def test_format_time_seconds():
     assert format_time(0.0) == "0:00.0"
@@ -178,10 +178,10 @@ def test_audio_extract_timing():
 
 
 def test_build_sequence_dir_basic():
-    assert build_sequence_dir("/out", "clip", 1) == "/out/clip_001/clip_001"
+    assert build_sequence_dir("/out", "clip", 1) == "/out/clip_001"
 
 def test_build_sequence_dir_counter():
-    assert build_sequence_dir("/out", "clip", 42) == "/out/clip_042/clip_042"
+    assert build_sequence_dir("/out", "clip", 42) == "/out/clip_042"
 
 def test_ffmpeg_command_image_sequence():
     cmd = build_ffmpeg_command("/in/v.mp4", 0.0, "/out/seq_001", image_sequence=True)
@@ -265,13 +265,13 @@ def test_db_get_group_returns_all_sub_clips():
         path = f.name
     try:
         db = ProcessedDB(path)
-        db.add("video.mp4", 10.0, "/out/clip_001/clip_001_0.mp4")
-        db.add("video.mp4", 10.0, "/out/clip_001/clip_001_1.mp4")
-        db.add("video.mp4", 10.0, "/out/clip_001/clip_001_2.mp4")
-        group = db.get_group("/out/clip_001/clip_001_0.mp4")
+        db.add("video.mp4", 10.0, "/out/vid_001/clip_001_0.mp4")
+        db.add("video.mp4", 10.0, "/out/vid_001/clip_001_1.mp4")
+        db.add("video.mp4", 10.0, "/out/vid_001/clip_001_2.mp4")
+        group = db.get_group("/out/vid_001/clip_001_0.mp4")
         assert len(group) == 3
-        assert "/out/clip_001/clip_001_0.mp4" in group
-        assert "/out/clip_001/clip_001_2.mp4" in group
+        assert "/out/vid_001/clip_001_0.mp4" in group
+        assert "/out/vid_001/clip_001_2.mp4" in group
     finally:
         os.unlink(path)
 
@@ -281,10 +281,10 @@ def test_db_get_group_isolates_by_start_time():
         path = f.name
     try:
         db = ProcessedDB(path)
-        db.add("video.mp4", 10.0, "/out/clip_001/clip_001_0.mp4")
-        db.add("video.mp4", 10.0, "/out/clip_001/clip_001_1.mp4")
-        db.add("video.mp4", 30.0, "/out/clip_002/clip_002_0.mp4")
-        group = db.get_group("/out/clip_001/clip_001_0.mp4")
+        db.add("video.mp4", 10.0, "/out/vid_001/clip_001_0.mp4")
+        db.add("video.mp4", 10.0, "/out/vid_001/clip_001_1.mp4")
+        db.add("video.mp4", 30.0, "/out/vid_001/clip_002_0.mp4")
+        group = db.get_group("/out/vid_001/clip_001_0.mp4")
         assert len(group) == 2
     finally:
         os.unlink(path)
@@ -295,10 +295,10 @@ def test_db_delete_group_removes_all():
         path = f.name
     try:
         db = ProcessedDB(path)
-        db.add("video.mp4", 10.0, "/out/clip_001/clip_001_0.mp4")
-        db.add("video.mp4", 10.0, "/out/clip_001/clip_001_1.mp4")
-        db.add("video.mp4", 30.0, "/out/clip_002/clip_002_0.mp4")
-        deleted = db.delete_group("/out/clip_001/clip_001_0.mp4")
+        db.add("video.mp4", 10.0, "/out/vid_001/clip_001_0.mp4")
+        db.add("video.mp4", 10.0, "/out/vid_001/clip_001_1.mp4")
+        db.add("video.mp4", 30.0, "/out/vid_001/clip_002_0.mp4")
+        deleted = db.delete_group("/out/vid_001/clip_001_0.mp4")
         assert len(deleted) == 2
         # clip_002 should still exist
         markers = db.get_markers("video.mp4")

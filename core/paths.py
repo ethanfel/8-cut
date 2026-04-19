@@ -25,15 +25,19 @@ def _log(*args) -> None:
 
 
 def build_export_path(folder: str, basename: str, counter: int, sub: int | None = None) -> str:
-    group = f"{basename}_{counter:03d}"
-    name = f"{group}_{sub}" if sub is not None else group
-    return os.path.join(folder, group, name + ".mp4")
+    """Build clip output path.  *folder* should be the vid folder (e.g. .../mp4/vid_001)."""
+    name = f"{basename}_{counter:03d}"
+    if sub is not None:
+        name = f"{name}_{sub}"
+    return os.path.join(folder, name + ".mp4")
 
 
 def build_sequence_dir(folder: str, basename: str, counter: int, sub: int | None = None) -> str:
-    group = f"{basename}_{counter:03d}"
-    name = f"{group}_{sub}" if sub is not None else group
-    return os.path.join(folder, group, name)
+    """Build WebP sequence output dir.  *folder* should be the vid folder."""
+    name = f"{basename}_{counter:03d}"
+    if sub is not None:
+        name = f"{name}_{sub}"
+    return os.path.join(folder, name)
 
 
 def format_time(seconds: float) -> str:

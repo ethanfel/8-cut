@@ -141,6 +141,92 @@ class ProcessedDB:
             " ON hard_negatives(filename, profile)"
         )
         self._con.commit()
+        self._migrate_vid_folders()
+
+    def _migrate_vid_folders(self) -> None:
+        """Migrate old clip_NNN group dirs → vid_NNN per-video folders.
+
+        Old layout: export_folder/clip_NNN/clip_NNN_sub.mp4
+        New layout: export_folder/vid_NNN/clip_NNN_sub.mp4
+
+        Rewrites output_path in DB and moves files on disk.
+        """
+        # Check if any rows still use the old clip_NNN parent dir layout
+        row = self._con.execute(
+            "SELECT id FROM processed WHERE output_path LIKE '%/clip_%/%' LIMIT 1"
+        ).fetchone()
+        if not row:
+            return
+
+        _log("Migrating old clip group dirs → vid folders …")
+        rows = self._con.execute(
+            "SELECT id, filename, profile, output_path FROM processed"
+            " ORDER BY profile, filename, output_path"
+        ).fetchall()
+
+        # Assign vid_NNN per (profile, export_folder, filename)
+        vid_map: dict[tuple, str] = {}
+        vid_counters: dict[tuple, int] = {}
+
+        for rid, filename, profile, op in rows:
+            parent = os.path.dirname(op)
+            export_folder = os.path.dirname(parent)
+            key = (profile, export_folder, filename)
+            if key not in vid_map:
+                counter_key = (profile, export_folder)
+                n = vid_counters.get(counter_key, 1)
+                vid_map[key] = f"vid_{n:03d}"
+                vid_counters[counter_key] = n + 1
+
+        updates: list[tuple[str, int]] = []
+        moves: list[tuple[str, str]] = []
+        dirs_to_create: set[str] = set()
+        old_dirs: set[str] = set()
+
+        for rid, filename, profile, op in rows:
+            parent = os.path.dirname(op)
+            parent_name = os.path.basename(parent)
+            # Skip rows already using vid_NNN layout
+            if parent_name.startswith("vid_"):
+                continue
+            export_folder = os.path.dirname(parent)
+            key = (profile, export_folder, filename)
+            vid_name = vid_map[key]
+            new_path = os.path.join(export_folder, vid_name, os.path.basename(op))
+            updates.append((new_path, rid))
+            dirs_to_create.add(os.path.join(export_folder, vid_name))
+            old_dirs.add(parent)
+            if os.path.exists(op):
+                moves.append((op, new_path))
+
+        if not updates:
+            return
+
+        # Create vid directories
+        for d in sorted(dirs_to_create):
+            os.makedirs(d, exist_ok=True)
+
+        # Move files
+        import shutil
+        for old, new in moves:
+            if os.path.exists(old) and not os.path.exists(new):
+                shutil.move(old, new)
+
+        # Update DB
+        self._con.executemany(
+            "UPDATE processed SET output_path = ? WHERE id = ?", updates
+        )
+        self._con.commit()
+
+        # Remove empty old group directories
+        for d in sorted(old_dirs, reverse=True):
+            try:
+                if os.path.isdir(d) and not os.listdir(d):
+                    os.rmdir(d)
+            except OSError:
+                pass
+
+        _log(f"Migrated {len(updates)} rows, moved {len(moves)} files to vid folders")
 
     def add(self, filename: str, start_time: float, output_path: str,
             label: str = "", category: str = "",
@@ -306,8 +392,8 @@ class ProcessedDB:
     def get_max_counter(self, folder: str, name: str) -> int:
         """Return the highest counter N found in output_paths matching folder/name_NNN*.
 
-        Parses the group directory component (e.g. 'clip_035') from stored
-        output_path values.  Returns 0 if no matches exist.
+        Parses the counter from filenames (e.g. 'clip_035_0.mp4' → 35).
+        *folder* is typically the vid folder.  Returns 0 if no matches exist.
         """
         if not self._enabled:
             return 0
@@ -318,24 +404,66 @@ class ProcessedDB:
             (prefix + "%",),
         ).fetchall()
         max_n = 0
+        name_prefix = name + "_"
         for (op,) in rows:
-            # output_path: .../folder/name_NNN/name_NNN_sub.ext
-            parent = os.path.basename(os.path.dirname(op))
-            # parent should be "name_NNN"
-            parts = parent.rsplit("_", 1)
-            if len(parts) == 2:
-                try:
-                    max_n = max(max_n, int(parts[1]))
-                except ValueError:
-                    pass
+            stem = os.path.splitext(os.path.basename(op))[0]
+            # stem: "clip_035_0" or "clip_036_a1_0"
+            if not stem.startswith(name_prefix):
+                continue
+            rest = stem[len(name_prefix):]  # "035_0" or "036_a1_0"
+            counter_str = rest.split("_")[0]
+            try:
+                max_n = max(max_n, int(counter_str))
+            except ValueError:
+                pass
         return max_n
+
+    def get_vid_folder(self, filename: str, profile: str,
+                       export_folder: str) -> str:
+        """Return the vid_NNN folder name for a source video.
+
+        Checks existing DB output_paths first; if the video already has a
+        vid_NNN folder, returns it.  Otherwise assigns the next available
+        number, also checking disk for orphan vid folders.
+        """
+        if not self._enabled:
+            return "vid_001"
+        row = self._con.execute(
+            "SELECT output_path FROM processed"
+            " WHERE filename = ? AND profile = ? LIMIT 1",
+            (filename, profile),
+        ).fetchone()
+        if row:
+            parent = os.path.basename(os.path.dirname(row[0]))
+            if parent.startswith("vid_"):
+                return parent
+        # Collect all existing vid_NNN names from DB + disk
+        existing: set[str] = set()
+        rows = self._con.execute(
+            "SELECT DISTINCT output_path FROM processed WHERE profile = ?",
+            (profile,),
+        ).fetchall()
+        for (op,) in rows:
+            p = os.path.basename(os.path.dirname(op))
+            if p.startswith("vid_"):
+                existing.add(p)
+        if os.path.isdir(export_folder):
+            for d in os.listdir(export_folder):
+                if d.startswith("vid_") and os.path.isdir(
+                    os.path.join(export_folder, d)
+                ):
+                    existing.add(d)
+        n = 1
+        while f"vid_{n:03d}" in existing:
+            n += 1
+        return f"vid_{n:03d}"
 
     def get_export_folders(self, profile: str = "default",
                            include_scan_exports: bool = False) -> list[str]:
         """Return distinct export folder names found in output_paths for a profile.
 
         Export paths follow the structure:
-            .../export_folder/group_dir/clip.mp4
+            .../export_folder/vid_NNN/clip.mp4
         The export folder is 2 levels up from the clip file.
         Returns folder names sorted alphabetically (e.g. ["mp4_Intense", "mp4_Soft"]).
         """

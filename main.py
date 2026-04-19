@@ -1756,16 +1756,18 @@ class TimelineWidget(QWidget):
 
     def mousePressEvent(self, event):
         x = event.position().x()
-        # Check for scan region edge drag
-        hit = self._hit_scan_edge(x)
-        if hit is not None:
-            idx, edge = hit
-            r = self._scan_regions[idx]
-            self._drag_idx = idx
-            self._drag_edge = edge
-            self._drag_start_val = r[0]
-            self._drag_end_val = r[1]
-            return
+        # Check for scan region edge drag — require Shift to avoid accidental resizes
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            hit = self._hit_scan_edge(x)
+            if hit is not None:
+                idx, edge = hit
+                r = self._scan_regions[idx]
+                self._drag_idx = idx
+                self._drag_edge = edge
+                self._drag_start_val = r[0]
+                self._drag_end_val = r[1]
+                return
         self._seek(x)
 
     def mouseDoubleClickEvent(self, event):
@@ -1801,9 +1803,9 @@ class TimelineWidget(QWidget):
             self.update()
             return
 
-        # Hover cursor: resize arrow near edges, normal otherwise
-        hit = self._hit_scan_edge(x)
-        if hit is not None:
+        # Hover cursor: resize arrow near edges (only with Shift held)
+        mods = event.modifiers()
+        if (mods & Qt.KeyboardModifier.ShiftModifier) and self._hit_scan_edge(x):
             self.setCursor(Qt.CursorShape.SizeHorCursor)
         else:
             self.unsetCursor()
@@ -3224,6 +3226,67 @@ class MainWindow(QMainWindow):
                     self._playlist._select(0)
                 _log(f"Resumed session: {len(valid)} file(s)")
 
+        self._show_changelog()
+
+    # ── Changelog ────────────────────────────────────────────
+
+    APP_VERSION = "1.0"
+    CHANGELOG: list[tuple[str, list[str]]] = [
+        ("1.0", [
+            "<b>New export layout</b> — clips are now stored in per-video "
+            "<code>vid_NNN/</code> folders instead of per-clip "
+            "<code>clip_NNN/</code> group dirs. "
+            "Each source video gets its own folder with flat clip files inside "
+            "(e.g. <code>mp4/vid_001/clip_001_0.mp4</code>). "
+            "Old databases are migrated automatically on startup: "
+            "DB paths are rewritten and files are moved to the new layout.",
+            "<b>Counter is now per-video</b> — clip numbering restarts in each "
+            "vid folder, and the DB is cross-checked to prevent overwrites "
+            "even if the export folder is temporarily empty.",
+            "<b>Audio detection models</b> — three new embedding models for "
+            "audio scanning: <b>AST</b> (Audio Spectrogram Transformer), "
+            "<b>EAT</b> (Efficient Audio Transformer), and <b>multi-layer "
+            "HuBERT/Wav2Vec2</b> extraction. Classifier probabilities are now "
+            "calibrated with isotonic regression for more meaningful scores.",
+            "<b>Scan result history</b> — scan results are versioned per "
+            "(file, model); switch between past scan versions from a dropdown.",
+            "<b>Hard negatives</b> — management dialog to review, filter, and "
+            "bulk-delete hard negatives; source model is tracked per negative.",
+            "<b>Scan workflow</b> — disable/resize scan regions, undo edits, "
+            "interruptible Scan All with resume, audio prefetch, review mode.",
+            "<b>Dataset statistics</b> — dialog showing per-video clip breakdown "
+            "and class balance.",
+            "<b>Waveform overlay</b> on timeline.",
+        ]),
+    ]
+
+    def _show_changelog(self) -> None:
+        last = self._settings.value("last_seen_version", "")
+        if last == self.APP_VERSION:
+            return
+        # Collect entries newer than last seen
+        lines: list[str] = []
+        for ver, items in self.CHANGELOG:
+            if ver == last:
+                break
+            lines.append(f"<h3>v{ver}</h3><ul>")
+            for item in items:
+                lines.append(f"<li>{item}</li>")
+            lines.append("</ul>")
+        if not lines:
+            self._settings.setValue("last_seen_version", self.APP_VERSION)
+            return
+        msg = QMessageBox(self)
+        msg.setWindowTitle("What's new")
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setText("".join(lines))
+        cb = QCheckBox("Don't show again for this version")
+        msg.setCheckBox(cb)
+        msg.exec()
+        if cb.isChecked():
+            self._settings.setValue("last_seen_version", self.APP_VERSION)
+
     def _show_shortcuts(self) -> None:
         text = (
             "<table cellpadding='4' style='font-size:13px'>"
@@ -3248,7 +3311,7 @@ class MainWindow(QMainWindow):
             "<tr><td><b>Double-click marker</b></td><td>Enter overwrite mode (locked: jump to end of clip span)</td></tr>"
             "<tr><td><b>Right-click marker</b></td><td>Delete clip group</td></tr>"
             "<tr><td><b>Click video / crop bar</b></td><td>Reposition portrait crop</td></tr>"
-            "<tr><td><b>Drag scan region edge</b></td><td>Resize scan region</td></tr>"
+            "<tr><td><b>Shift+drag scan region edge</b></td><td>Resize scan region</td></tr>"
             "</table>"
         )
         QMessageBox.information(self, "Keyboard shortcuts", text)

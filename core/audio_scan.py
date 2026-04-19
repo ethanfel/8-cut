@@ -65,6 +65,7 @@ _EMBED_MODELS = {
     "AST":                 768,
     "AST_ML":             3072,   # 768 * 4
     "EAT":                 768,
+    "EAT_LARGE":          1024,
 }
 _DEFAULT_EMBED_MODEL = "WAV2VEC2_BASE"
 
@@ -104,11 +105,13 @@ def _get_w2v_model(model_name: str | None = None):
             _ast_feature_extractor = ASTFeatureExtractor.from_pretrained(
                 "MIT/ast-finetuned-audioset-10-10-0.4593"
             )
-        elif load_name == "EAT":
+        elif load_name in ("EAT", "EAT_LARGE"):
             from transformers import AutoModel
+            eat_repo = ("worstchan/EAT-large_epoch20_finetune_AS2M"
+                        if load_name == "EAT_LARGE"
+                        else "worstchan/EAT-base_epoch30_finetune_AS2M")
             _w2v_model = AutoModel.from_pretrained(
-                "worstchan/EAT-base_epoch30_finetune_AS2M",
-                trust_remote_code=True,
+                eat_repo, trust_remote_code=True,
             ).to(_w2v_device)
         else:
             import torchaudio
@@ -254,7 +257,7 @@ def _extract_w2v_windows(y: np.ndarray, sr: int = _SR,
     model, device = _get_w2v_model(model_name)
     is_beats = (model_name or _DEFAULT_EMBED_MODEL) == "BEATS"
     is_ast = (model_name or _DEFAULT_EMBED_MODEL) in ("AST", "AST_ML")
-    is_eat = (model_name or _DEFAULT_EMBED_MODEL) == "EAT"
+    is_eat = (model_name or _DEFAULT_EMBED_MODEL) in ("EAT", "EAT_LARGE")
     ml_cfg = _ml_config(model_name or _DEFAULT_EMBED_MODEL)
     # Auto-size batches based on available GPU memory
     batch_size = 16
@@ -383,7 +386,7 @@ def _extract_w2v_targeted(y: np.ndarray, sr: int, gt_intense: list[float],
 
     is_beats = (model_name or _DEFAULT_EMBED_MODEL) == "BEATS"
     is_ast = (model_name or _DEFAULT_EMBED_MODEL) in ("AST", "AST_ML")
-    is_eat = (model_name or _DEFAULT_EMBED_MODEL) == "EAT"
+    is_eat = (model_name or _DEFAULT_EMBED_MODEL) in ("EAT", "EAT_LARGE")
     ml_cfg = _ml_config(model_name or _DEFAULT_EMBED_MODEL)
 
     for batch_start in range(0, len(valid_times), batch_size):
