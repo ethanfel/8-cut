@@ -47,6 +47,12 @@ def test_ml_config():
     assert layers == [2, 5, 8, 11]
 
 
+def test_embed_dim_ast():
+    from core.audio_scan import _embed_dim
+    assert _embed_dim("AST") == 768
+    assert _embed_dim("AST_ML") == 3072
+
+
 def test_db_get_all_export_paths():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         path = f.name
