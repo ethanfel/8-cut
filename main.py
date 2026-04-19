@@ -372,6 +372,14 @@ class TrainDialog(QDialog):
         self._chk_scan_exports.stateChanged.connect(lambda: self._debounce.start())
         form.addRow("", self._chk_scan_exports)
 
+        self._chk_hard_negatives = QCheckBox("Use hard negatives in training")
+        self._chk_hard_negatives.setChecked(True)
+        self._chk_hard_negatives.setToolTip(
+            "When unchecked, manually marked hard negatives are excluded from training.\n"
+            "Useful when training a new model type where old negatives may not apply.")
+        self._chk_hard_negatives.stateChanged.connect(lambda: self._debounce.start())
+        form.addRow("", self._chk_hard_negatives)
+
         # Video source directory (fallback for old DB rows without source_path)
         self._txt_video_dir = QLineEdit(video_dir)
         self._txt_video_dir.setPlaceholderText("Directory containing source videos")
@@ -464,15 +472,18 @@ class TrainDialog(QDialog):
             return
         neg_folder = self._cmb_negative.currentData() or ""
         inc_scan = self._chk_scan_exports.isChecked()
+        use_neg = self._chk_hard_negatives.isChecked()
         # First check without fallback to see if source_paths are sufficient
         video_infos_no_fb = self._db.get_training_data(
             self._profile, folder, negative_folder=neg_folder,
             include_scan_exports=inc_scan,
+            use_hard_negatives=use_neg,
         )
         video_infos = self._db.get_training_data(
             self._profile, folder, negative_folder=neg_folder,
             fallback_video_dir=self._txt_video_dir.text(),
             include_scan_exports=inc_scan,
+            use_hard_negatives=use_neg,
         )
         # Show video dir field only when the fallback helps find extra videos
         needs_fallback = len(video_infos) > len(video_infos_no_fb) or len(video_infos_no_fb) == 0
@@ -525,6 +536,10 @@ class TrainDialog(QDialog):
     @property
     def include_scan_exports(self) -> bool:
         return self._chk_scan_exports.isChecked()
+
+    @property
+    def use_hard_negatives(self) -> bool:
+        return self._chk_hard_negatives.isChecked()
 
 
 class TrainWorker(QThread):
@@ -4007,8 +4022,10 @@ class MainWindow(QMainWindow):
         if not self._file_path:
             return
         filename = os.path.basename(self._file_path)
+        source_model = self._scan_panel.current_model_name()
         self._db.add_hard_negatives(filename, self._profile, times,
-                                    source_path=self._file_path)
+                                    source_path=self._file_path,
+                                    source_model=source_model)
         self._timeline.set_scan_regions(
             self._scan_panel.current_regions_with_orig(),
             neg_times=self._scan_panel._neg_times,
@@ -4228,6 +4245,7 @@ class MainWindow(QMainWindow):
         embed_model = dlg.embed_model
         video_dir = dlg.video_dir
         inc_scan = dlg.include_scan_exports
+        use_neg = dlg.use_hard_negatives
         if not pos_folder:
             self._show_status("No positive class selected")
             return
@@ -4240,6 +4258,7 @@ class MainWindow(QMainWindow):
             self._profile, pos_folder, negative_folder=neg_folder,
             fallback_video_dir=video_dir,
             include_scan_exports=inc_scan,
+            use_hard_negatives=use_neg,
         )
         if not video_infos:
             self._show_status("No training data found for this subprofile")

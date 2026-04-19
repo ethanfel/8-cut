@@ -119,13 +119,23 @@ class ProcessedDB:
         )
         self._con.execute(
             "CREATE TABLE IF NOT EXISTS hard_negatives ("
-            "  id          INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "  filename    TEXT NOT NULL,"
-            "  profile     TEXT NOT NULL DEFAULT 'default',"
-            "  start_time  REAL NOT NULL,"
-            "  source_path TEXT NOT NULL DEFAULT ''"
+            "  id           INTEGER PRIMARY KEY AUTOINCREMENT,"
+            "  filename     TEXT NOT NULL,"
+            "  profile      TEXT NOT NULL DEFAULT 'default',"
+            "  start_time   REAL NOT NULL,"
+            "  source_path  TEXT NOT NULL DEFAULT '',"
+            "  source_model TEXT NOT NULL DEFAULT ''"
             ")"
         )
+        # Migrate: add source_model column to existing hard_negatives tables
+        hn_cols = {
+            row[1]
+            for row in self._con.execute("PRAGMA table_info(hard_negatives)").fetchall()
+        }
+        if "source_model" not in hn_cols:
+            self._con.execute(
+                "ALTER TABLE hard_negatives ADD COLUMN source_model TEXT NOT NULL DEFAULT ''"
+            )
         self._con.execute(
             "CREATE INDEX IF NOT EXISTS idx_hardneg_file_profile"
             " ON hard_negatives(filename, profile)"
@@ -353,6 +363,7 @@ class ProcessedDB:
                           negative_folder: str = "",
                           fallback_video_dir: str = "",
                           include_scan_exports: bool = False,
+                          use_hard_negatives: bool = True,
                           ) -> list[tuple[str, list[float], list[float], list[float]]]:
         """Build training video_infos from DB data.
 
@@ -362,6 +373,7 @@ class ProcessedDB:
             negative_folder: export folder name for explicit negatives (optional)
             fallback_video_dir: if source_path is empty, try filename in this dir
             include_scan_exports: if True, include auto-exported scan clips
+            use_hard_negatives: if False, skip hard negatives from scan feedback
 
         Returns:
             list of (source_video_path, positive_times, soft_times, negative_times)
@@ -400,15 +412,16 @@ class ProcessedDB:
                 soft_by_video.setdefault(fn, set()).add(st)
 
         # Include hard negatives from scan feedback
-        hard_rows = self._con.execute(
-            "SELECT filename, start_time, source_path FROM hard_negatives"
-            " WHERE profile = ?",
-            (profile,),
-        ).fetchall()
-        for fn, st, sp in hard_rows:
-            neg_by_video.setdefault(fn, set()).add(st)
-            if sp:
-                source_by_filename.setdefault(fn, sp)
+        if use_hard_negatives:
+            hard_rows = self._con.execute(
+                "SELECT filename, start_time, source_path FROM hard_negatives"
+                " WHERE profile = ?",
+                (profile,),
+            ).fetchall()
+            for fn, st, sp in hard_rows:
+                neg_by_video.setdefault(fn, set()).add(st)
+                if sp:
+                    source_by_filename.setdefault(fn, sp)
 
         # Remove positive times from soft/neg to avoid conflicting labels
         for fn in pos_by_video:
@@ -638,16 +651,18 @@ class ProcessedDB:
         return {r[0] for r in rows}
 
     def add_hard_negatives(self, filename: str, profile: str,
-                           times: list[float], source_path: str = "") -> None:
+                           times: list[float], source_path: str = "",
+                           source_model: str = "") -> None:
         """Save timestamps as hard-negative training examples."""
         if not self._enabled or not times:
             return
         with self._lock:
             for t in times:
                 self._con.execute(
-                    "INSERT INTO hard_negatives (filename, profile, start_time, source_path)"
-                    " VALUES (?, ?, ?, ?)",
-                    (filename, profile, t, source_path),
+                    "INSERT INTO hard_negatives"
+                    " (filename, profile, start_time, source_path, source_model)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (filename, profile, t, source_path, source_model),
                 )
             self._con.commit()
 
@@ -661,6 +676,30 @@ class ProcessedDB:
             (filename, profile),
         ).fetchall()
         return {r[0] for r in rows}
+
+    def get_hard_negatives(self, profile: str) -> list[dict]:
+        """Return all hard negatives for a profile with full details."""
+        if not self._enabled:
+            return []
+        rows = self._con.execute(
+            "SELECT id, filename, start_time, source_path, source_model"
+            " FROM hard_negatives WHERE profile = ?"
+            " ORDER BY filename, start_time",
+            (profile,),
+        ).fetchall()
+        return [{"id": r[0], "filename": r[1], "start_time": r[2],
+                 "source_path": r[3], "source_model": r[4]} for r in rows]
+
+    def delete_hard_negatives_by_ids(self, ids: list[int]) -> None:
+        """Delete hard negatives by row IDs."""
+        if not self._enabled or not ids:
+            return
+        with self._lock:
+            self._con.execute(
+                f"DELETE FROM hard_negatives WHERE id IN ({','.join('?' * len(ids))})",
+                ids,
+            )
+            self._con.commit()
 
     def remove_hard_negatives(self, filename: str, profile: str,
                               times: list[float]) -> None:
