@@ -53,6 +53,11 @@ def test_embed_dim_ast():
     assert _embed_dim("AST_ML") == 3072
 
 
+def test_embed_dim_eat():
+    from core.audio_scan import _embed_dim
+    assert _embed_dim("EAT") == 768
+
+
 def test_db_get_all_export_paths():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         path = f.name
