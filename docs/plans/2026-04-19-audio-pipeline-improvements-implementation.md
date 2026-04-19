@@ -8,6 +8,12 @@
 
 **Tech Stack:** torchaudio (existing), transformers (new dep), timm (new dep), sklearn.calibration (existing dep)
 
+**Key design notes:**
+- `_get_w2v_model()` resolves `_ML` suffixed names to their base model for loading (e.g. `HUBERT_XLARGE_ML` loads `HUBERT_XLARGE`). Both share the same GPU model — only the extraction path differs (last-layer vs multi-layer). The global `_w2v_model_name` stores the **base** name so switching between `HUBERT_XLARGE` and `HUBERT_XLARGE_ML` does NOT trigger a reload.
+- Cache keys use the **full** model name (including `_ML`), so single-layer and multi-layer caches coexist as separate `.npz` files.
+- AST and EAT are separate model types that do NOT share the torchaudio loading path — they get their own `elif` branches in `_get_w2v_model()`.
+- Both `_extract_w2v_windows` and `_extract_w2v_targeted` need identical changes to their batch inference blocks. Keep them in sync.
+
 ---
 
 ### Task 1: Add transformers and timm to requirements
@@ -42,6 +48,7 @@ git commit -m "deps: add transformers and timm for AST/EAT models"
 **Files:**
 - Modify: `core/audio_scan.py:50-58` (_EMBED_MODELS dict)
 - Modify: `core/audio_scan.py:96-100` (_embed_dim)
+- Modify: `core/audio_scan.py:68-93` (_get_w2v_model)
 - Modify: `core/audio_scan.py:189-205` (_extract_w2v_windows batch loop)
 - Modify: `core/audio_scan.py:278-293` (_extract_w2v_targeted batch loop)
 - Test: `tests/test_audio_scan.py`
@@ -99,7 +106,7 @@ Add after `_embed_dim()` (around line 101):
 ```python
 def _ml_config(model_name: str) -> tuple[str, list[int]] | None:
     """If model_name is a multi-layer variant, return (base_model, layer_indices).
-    
+
     Returns None for single-layer models.
     Layer indices are 0-based into the list returned by extract_features().
     """
@@ -108,18 +115,21 @@ def _ml_config(model_name: str) -> tuple[str, list[int]] | None:
     base = model_name[:-3]  # strip "_ML"
     if base not in _EMBED_MODELS:
         return None
-    # torchaudio layer counts: BASE=12, LARGE=24, XLARGE=48
+    # Layer counts per model family
     layer_counts = {
         "WAV2VEC2_BASE": 12, "WAV2VEC2_LARGE": 24, "WAV2VEC2_LARGE_LV60K": 24,
         "HUBERT_BASE": 12, "HUBERT_LARGE": 24, "HUBERT_XLARGE": 48,
+        "AST": 12,
     }
     n = layer_counts.get(base)
     if n is None:
         return None
-    # Select 4 layers at quartile boundaries (1-indexed quartiles, 0-indexed list)
+    # Select 4 layers at quartile boundaries (0-indexed)
     indices = [n // 4 - 1, n // 2 - 1, 3 * n // 4 - 1, n - 1]
     return base, indices
 ```
+
+Note: AST is included in the layer_counts dict here already so Task 3 doesn't need to modify it again.
 
 **Step 6: Write test for _ml_config**
 
@@ -127,6 +137,7 @@ def _ml_config(model_name: str) -> tuple[str, list[int]] | None:
 def test_ml_config():
     from core.audio_scan import _ml_config
     assert _ml_config("HUBERT_XLARGE") is None
+    assert _ml_config("BEATS_ML") is None  # BEATS has no ML variant
     base, layers = _ml_config("HUBERT_XLARGE_ML")
     assert base == "HUBERT_XLARGE"
     assert layers == [11, 23, 35, 47]
@@ -140,7 +151,7 @@ Expected: PASS
 
 **Step 7: Modify _get_w2v_model to resolve ML base names**
 
-In `_get_w2v_model()` (line 68), before loading, strip `_ML` suffix:
+In `_get_w2v_model()` (line 68), the comparison key must use the resolved base name so that `HUBERT_XLARGE` and `HUBERT_XLARGE_ML` share the same loaded model without reloading:
 
 ```python
 def _get_w2v_model(model_name: str | None = None):
@@ -148,7 +159,7 @@ def _get_w2v_model(model_name: str | None = None):
     global _w2v_model, _w2v_device, _w2v_model_name
     if model_name is None:
         model_name = _DEFAULT_EMBED_MODEL
-    # Multi-layer variants use the same base model
+    # Multi-layer variants use the same base model weights
     ml = _ml_config(model_name)
     load_name = ml[0] if ml else model_name
     if _w2v_model is None or _w2v_model_name != load_name:
@@ -166,9 +177,15 @@ def _get_w2v_model(model_name: str | None = None):
     return _w2v_model, _w2v_device
 ```
 
-**Step 8: Modify extraction to use extract_features for ML models**
+**Step 8: Modify _extract_w2v_windows batch inference**
 
-In `_extract_w2v_windows` (line 197-204), change the batch inference block:
+In `_extract_w2v_windows`, compute `ml_cfg` **once** before the batch loop (after line 173 `is_beats = ...`):
+
+```python
+    ml_cfg = _ml_config(model_name or _DEFAULT_EMBED_MODEL)
+```
+
+Then replace the batch inference block (lines 197-204):
 
 ```python
         with torch.no_grad():
@@ -187,16 +204,41 @@ In `_extract_w2v_windows` (line 197-204), change the batch inference block:
         embeddings.append(batch_emb)
 ```
 
-Where `ml_cfg = _ml_config(model_name)` is computed once before the loop.
+**Step 9: Modify _extract_w2v_targeted batch inference (keep in sync)**
 
-Apply the same change to `_extract_w2v_targeted` (line 285-292).
+In `_extract_w2v_targeted`, add `ml_cfg` computation after line 276 `is_beats = ...`:
 
-**Step 9: Run all tests**
+```python
+    ml_cfg = _ml_config(model_name or _DEFAULT_EMBED_MODEL)
+```
+
+Then replace the batch inference block (lines 285-292) with the same branching logic as Step 8:
+
+```python
+        with torch.no_grad():
+            waveforms = torch.from_numpy(np.stack(chunks)).float().to(device)
+            if is_beats:
+                padding_mask = torch.zeros_like(waveforms, dtype=torch.bool)
+                features, _ = model.extract_features(waveforms, padding_mask=padding_mask)
+                batch_emb = features.mean(dim=1).cpu().numpy()
+            elif ml_cfg is not None:
+                all_layers, _ = model.extract_features(waveforms)
+                selected = [all_layers[i].mean(dim=1) for i in ml_cfg[1]]
+                batch_emb = torch.cat(selected, dim=1).cpu().numpy()
+            else:
+                features, _ = model(waveforms)
+                batch_emb = features.mean(dim=1).cpu().numpy()
+        embeddings_list.append(batch_emb)
+```
+
+Note: `_extract_w2v_targeted` appends to `embeddings_list` (not `embeddings`).
+
+**Step 10: Run all tests**
 
 Run: `pytest tests/ -v`
 Expected: All pass
 
-**Step 10: Commit**
+**Step 11: Commit**
 
 ```bash
 git add core/audio_scan.py tests/test_audio_scan.py
@@ -209,9 +251,9 @@ git commit -m "feat: multi-layer extraction for HuBERT/Wav2Vec2 models"
 
 **Files:**
 - Modify: `core/audio_scan.py:50-65` (_EMBED_MODELS, add AST entries)
-- Modify: `core/audio_scan.py:68-93` (_get_w2v_model, add AST branch)
-- Modify: `core/audio_scan.py:189-205` (_extract_w2v_windows, add AST branch)
-- Modify: `core/audio_scan.py:278-293` (_extract_w2v_targeted, add AST branch)
+- Modify: `core/audio_scan.py:45-47` (add _ast_feature_extractor global)
+- Modify: `core/audio_scan.py:68-93` (_get_w2v_model, add AST loading branch)
+- Modify: `core/audio_scan.py` (_extract_w2v_windows and _extract_w2v_targeted, add AST inference branch)
 - Test: `tests/test_audio_scan.py`
 
 **Step 1: Write failing test**
@@ -228,74 +270,77 @@ Expected: FAIL
 
 **Step 2: Add AST entries to _EMBED_MODELS**
 
+Add to the dict (after the ML entries):
+
 ```python
+    # Transformers-based models
     "AST":                     768,
     "AST_ML":                 3072,   # 768 * 4
 ```
 
-**Step 3: Add AST to _ml_config layer counts**
+Run test again — should PASS now.
 
-AST has 12 transformer layers + 1 embedding layer = 13 hidden states. Use layers [3, 6, 9, 12] (0-indexed) for quartiles.
+**Step 3: Add module-level global for AST feature extractor**
 
-```python
-    layer_counts = {
-        ...existing...
-        "AST": 12,
-    }
-```
-
-**Step 4: Add AST feature extractor cache**
-
-Add module-level globals near existing `_w2v_model`:
+Near line 47 (after `_w2v_model_name = None`):
 
 ```python
 _ast_feature_extractor = None
 ```
 
-**Step 5: Add AST loading branch in _get_w2v_model**
+**Step 4: Add AST loading branch in _get_w2v_model**
+
+In `_get_w2v_model()`, add an `elif` branch **before** the torchaudio fallback `else`:
 
 ```python
         elif load_name == "AST":
-            from transformers import ASTModel
+            from transformers import ASTModel, ASTFeatureExtractor
             _w2v_model = ASTModel.from_pretrained(
                 "MIT/ast-finetuned-audioset-10-10-0.4593"
             ).to(_w2v_device)
             global _ast_feature_extractor
-            if _ast_feature_extractor is None:
-                from transformers import ASTFeatureExtractor
-                _ast_feature_extractor = ASTFeatureExtractor.from_pretrained(
-                    "MIT/ast-finetuned-audioset-10-10-0.4593"
-                )
+            _ast_feature_extractor = ASTFeatureExtractor.from_pretrained(
+                "MIT/ast-finetuned-audioset-10-10-0.4593"
+            )
 ```
 
-**Step 6: Add AST inference branch in extraction functions**
+Note: `_ast_feature_extractor` is recreated on every model load (not cached separately) — simple and correct since the feature extractor is lightweight and model reloads are rare.
 
-In `_extract_w2v_windows` and `_extract_w2v_targeted`, add a branch for AST models:
+**Step 5: Add AST inference branch in both extraction functions**
+
+In both `_extract_w2v_windows` and `_extract_w2v_targeted`, compute `is_ast` once before the loop:
+
+```python
+    is_ast = (model_name or _DEFAULT_EMBED_MODEL) in ("AST", "AST_ML")
+```
+
+Then in the batch inference block, add after the `elif ml_cfg` branch and before `else`:
 
 ```python
             elif is_ast:
                 # AST uses its own feature extractor for mel spectrogram
                 inputs = _ast_feature_extractor(
-                    list(chunks_np), sampling_rate=sr, return_tensors="pt",
+                    list(chunks), sampling_rate=sr, return_tensors="pt",
                     padding=True,
                 )
                 input_values = inputs.input_values.to(device)
-                out = model(input_values, output_hidden_states=ml_cfg is not None)
                 if ml_cfg is not None:
+                    out = model(input_values, output_hidden_states=True)
                     selected = [out.hidden_states[i].mean(dim=1) for i in ml_cfg[1]]
                     batch_emb = torch.cat(selected, dim=1).cpu().numpy()
                 else:
+                    out = model(input_values)
                     batch_emb = out.last_hidden_state.mean(dim=1).cpu().numpy()
 ```
 
-Where `is_ast = (model_name or _DEFAULT_EMBED_MODEL) in ("AST", "AST_ML")` and `chunks_np` is the list of raw numpy audio arrays (not stacked tensor).
+Important: `chunks` is already a list of numpy arrays (built in the loop at lines 194-196). Pass it directly as `list(chunks)` — the `ASTFeatureExtractor` accepts a list of numpy arrays and handles batching/padding internally. Verified: `ASTFeatureExtractor([np.array, np.array, ...], sampling_rate=16000, return_tensors="pt", padding=True)` returns `input_values` of shape `[B, 1024, 128]`.
 
-**Step 7: Run all tests**
+**Step 6: Run all tests**
 
 Run: `pytest tests/ -v`
 Expected: All pass
 
-**Step 8: Commit**
+**Step 7: Commit**
 
 ```bash
 git add core/audio_scan.py tests/test_audio_scan.py
@@ -308,9 +353,9 @@ git commit -m "feat: add AST (Audio Spectrogram Transformer) embedding model"
 
 **Files:**
 - Modify: `core/audio_scan.py:50-65` (_EMBED_MODELS, add EAT entry)
-- Modify: `core/audio_scan.py:68-93` (_get_w2v_model, add EAT branch)
-- Modify: `core/audio_scan.py:189-205` (_extract_w2v_windows, add EAT branch)
-- Modify: `core/audio_scan.py:278-293` (_extract_w2v_targeted, add EAT branch)
+- Modify: `core/audio_scan.py:68-93` (_get_w2v_model, add EAT loading branch)
+- Add: `core/audio_scan.py` (_eat_preprocess helper function)
+- Modify: `core/audio_scan.py` (_extract_w2v_windows and _extract_w2v_targeted, add EAT inference branch)
 - Test: `tests/test_audio_scan.py`
 
 **Step 1: Write failing test**
@@ -327,7 +372,11 @@ def test_embed_dim_eat():
     "EAT":                     768,
 ```
 
+Note: No `EAT_ML` variant — EAT's `extract_features()` does not natively support multi-layer output. Can be added later if needed by monkey-patching.
+
 **Step 3: Add EAT loading branch in _get_w2v_model**
+
+Add after the AST branch, before the torchaudio `else`:
 
 ```python
         elif load_name == "EAT":
@@ -340,18 +389,19 @@ def test_embed_dim_eat():
 
 **Step 4: Add EAT preprocessing helper**
 
-Add near `_get_w2v_model`:
+Add as a module-level function near `_get_w2v_model`:
 
 ```python
-def _eat_preprocess(chunks: list[np.ndarray], sr: int, device: str) -> torch.Tensor:
+def _eat_preprocess(chunks: list[np.ndarray], sr: int, device: str):
     """Convert raw audio chunks to EAT mel spectrogram input.
-    
+
     Returns tensor of shape [B, 1, T, 128].
+    8s audio at 10ms frame shift produces ~798 frames, zero-padded to 1024.
     """
     import torch
     import torchaudio.compliance.kaldi as kaldi
 
-    TARGET_LEN = 1024  # ~10s at 10ms frame shift
+    TARGET_LEN = 1024
     MEAN, STD = -4.268, 4.569
 
     mels = []
@@ -371,7 +421,15 @@ def _eat_preprocess(chunks: list[np.ndarray], sr: int, device: str) -> torch.Ten
     return torch.stack(mels).unsqueeze(1).to(device)  # [B, 1, T, 128]
 ```
 
-**Step 5: Add EAT inference branch in extraction functions**
+**Step 5: Add EAT inference branch in both extraction functions**
+
+Compute `is_eat` once before the loop:
+
+```python
+    is_eat = (model_name or _DEFAULT_EMBED_MODEL) == "EAT"
+```
+
+Then in the batch inference block, add after the `elif is_ast` branch and before `else`:
 
 ```python
             elif is_eat:
@@ -381,7 +439,7 @@ def _eat_preprocess(chunks: list[np.ndarray], sr: int, device: str) -> torch.Ten
                 batch_emb = features[:, 1:, :].mean(dim=1).cpu().numpy()
 ```
 
-Where `is_eat = (model_name or _DEFAULT_EMBED_MODEL) == "EAT"`.
+Important: `model.extract_features()` returns a plain `torch.Tensor` of shape `[B, 513, 768]` (not a tuple). Index 0 is the CLS token, indices 1-512 are frame-level patch embeddings. We mean-pool the frame tokens for consistency with how other models are pooled.
 
 **Step 6: Run all tests**
 
@@ -405,23 +463,28 @@ git commit -m "feat: add EAT (Efficient Audio Transformer) embedding model"
 
 **Step 1: Modify train_classifier**
 
-After the existing `clf.fit()` call (line 428), add calibration:
+After the existing `clf.fit()` call (line 428), add calibration with a safe guard:
 
 ```python
     clf.fit(X[train_idx], y_arr[train_idx])
     _log("audio_scan: classifier trained")
 
     # Calibrate probabilities for better threshold behavior
+    # Requires at least 6 samples per class for stable 3-fold isotonic calibration
     from sklearn.calibration import CalibratedClassifierCV
-    if len(train_idx) >= 10:
-        cal_clf = CalibratedClassifierCV(clf, cv=min(3, n_pos, n_neg_sample),
-                                          method='isotonic')
+    min_class = min(int(n_pos), int(n_neg_sample))
+    if min_class >= 6:
+        cal_clf = CalibratedClassifierCV(clf, cv=3, method='isotonic')
         cal_clf.fit(X[train_idx], y_arr[train_idx])
         clf = cal_clf
-        _log("audio_scan: classifier calibrated")
+        _log("audio_scan: classifier calibrated (isotonic, 3-fold)")
+    else:
+        _log(f"audio_scan: skipping calibration (min class size {min_class} < 6)")
 ```
 
-The `cv=min(3, n_pos, n_neg_sample)` guard prevents errors when one class has very few samples.
+Why `min_class >= 6`: `CalibratedClassifierCV` uses stratified k-fold internally. With `cv=3`, each fold needs at least 2 samples per class. `min_class >= 6` guarantees this. With fewer samples, the uncalibrated HistGBT probabilities are still reasonable — calibration is an enhancement, not a requirement.
+
+Previous plan bug: `cv=min(3, n_pos, n_neg_sample)` could produce `cv=1` when `n_pos=1`, which raises `ValueError` (minimum is 2). Even `cv=2` with 2 positives causes one fold to have only 1 positive, making isotonic regression unstable. The `>= 6` guard avoids all these edge cases.
 
 **Step 2: Run all tests**
 
@@ -451,6 +514,7 @@ y = np.random.randn(16000 * 20).astype(np.float32) * 0.01
 ts, emb = _extract_w2v_windows(y, model_name='HUBERT_XLARGE_ML')
 print(f'HUBERT_XLARGE_ML: {emb.shape}')  # expect (13, 5120)
 assert emb.shape[1] == _embed_dim('HUBERT_XLARGE_ML')
+print('PASS')
 "
 ```
 
@@ -464,10 +528,25 @@ y = np.random.randn(16000 * 20).astype(np.float32) * 0.01
 ts, emb = _extract_w2v_windows(y, model_name='AST')
 print(f'AST: {emb.shape}')  # expect (13, 768)
 assert emb.shape[1] == _embed_dim('AST')
+print('PASS')
 "
 ```
 
-**Step 3: Test EAT extraction**
+**Step 3: Test AST multi-layer**
+
+```bash
+python -c "
+from core.audio_scan import _extract_w2v_windows, _embed_dim
+import numpy as np
+y = np.random.randn(16000 * 20).astype(np.float32) * 0.01
+ts, emb = _extract_w2v_windows(y, model_name='AST_ML')
+print(f'AST_ML: {emb.shape}')  # expect (13, 3072)
+assert emb.shape[1] == _embed_dim('AST_ML')
+print('PASS')
+"
+```
+
+**Step 4: Test EAT extraction**
 
 ```bash
 python -c "
@@ -477,14 +556,32 @@ y = np.random.randn(16000 * 20).astype(np.float32) * 0.01
 ts, emb = _extract_w2v_windows(y, model_name='EAT')
 print(f'EAT: {emb.shape}')  # expect (13, 768)
 assert emb.shape[1] == _embed_dim('EAT')
+print('PASS')
 "
 ```
 
-**Step 4: Test full train+scan cycle**
+**Step 5: Test model switching doesn't reload unnecessarily**
 
-Load app, select HUBERT_XLARGE_ML from scan model dropdown, scan a video, train, verify results display.
+```bash
+python -c "
+from core.audio_scan import _get_w2v_model
+import core.audio_scan as m
+# Load HUBERT_XLARGE
+_get_w2v_model('HUBERT_XLARGE')
+name1 = m._w2v_model_name
+# Switch to ML variant — should NOT reload
+_get_w2v_model('HUBERT_XLARGE_ML')
+name2 = m._w2v_model_name
+assert name1 == name2 == 'HUBERT_XLARGE', f'Expected no reload, got {name1} -> {name2}'
+print('PASS: no reload on ML switch')
+"
+```
 
-**Step 5: Final commit and push**
+**Step 6: Test full train+scan cycle in app**
+
+Load app, select each new model from scan model dropdown, scan a video, train, verify results display correctly.
+
+**Step 7: Final commit and push**
 
 ```bash
 git push
