@@ -318,6 +318,106 @@ class DatasetStatsDialog(QDialog):
         layout.addWidget(btns)
 
 
+class HardNegativesDialog(QDialog):
+    """View and manage hard negative training examples."""
+
+    def __init__(self, db: ProcessedDB, profile: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Hard Negatives")
+        self.setMinimumSize(600, 400)
+        self._db = db
+        self._profile = profile
+
+        layout = QVBoxLayout(self)
+
+        # Filter row
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("Filter model:"))
+        self._cmb_filter = QComboBox()
+        self._cmb_filter.addItem("(all)")
+        self._cmb_filter.currentIndexChanged.connect(self._apply_filter)
+        filter_row.addWidget(self._cmb_filter, 1)
+        layout.addLayout(filter_row)
+
+        # Summary
+        self._lbl_summary = QLabel()
+        layout.addWidget(self._lbl_summary)
+
+        # Table
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(
+            ["File", "Time", "Source Model", "ID"])
+        self._table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setColumnHidden(3, True)  # hide ID column
+        layout.addWidget(self._table)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_delete = QPushButton("Delete Selected")
+        btn_delete.clicked.connect(self._delete_selected)
+        btn_row.addWidget(btn_delete)
+        btn_clear = QPushButton("Clear All")
+        btn_clear.clicked.connect(self._clear_all)
+        btn_row.addWidget(btn_clear)
+        btn_row.addStretch()
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(self.close)
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)
+
+        self._load()
+
+    def _load(self):
+        rows = self._db.get_hard_negatives(self._profile)
+        models = sorted(set(r["source_model"] for r in rows if r["source_model"]))
+        self._cmb_filter.blockSignals(True)
+        self._cmb_filter.clear()
+        self._cmb_filter.addItem("(all)")
+        for m in models:
+            self._cmb_filter.addItem(m)
+        self._cmb_filter.blockSignals(False)
+
+        self._table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            self._table.setItem(i, 0, QTableWidgetItem(r["filename"]))
+            self._table.setItem(i, 1, QTableWidgetItem(f'{r["start_time"]:.1f}s'))
+            self._table.setItem(i, 2, QTableWidgetItem(r["source_model"]))
+            self._table.setItem(i, 3, QTableWidgetItem(str(r["id"])))
+        self._lbl_summary.setText(f"<b>{len(rows)}</b> hard negatives")
+
+    def _apply_filter(self):
+        model = self._cmb_filter.currentText()
+        for row in range(self._table.rowCount()):
+            if model == "(all)":
+                self._table.setRowHidden(row, False)
+            else:
+                src = self._table.item(row, 2).text()
+                self._table.setRowHidden(row, src != model)
+
+    def _delete_selected(self):
+        ids = []
+        for row in sorted(set(i.row() for i in self._table.selectedItems()), reverse=True):
+            if not self._table.isRowHidden(row):
+                ids.append(int(self._table.item(row, 3).text()))
+        if ids:
+            self._db.delete_hard_negatives_by_ids(ids)
+            self._load()
+
+    def _clear_all(self):
+        reply = QMessageBox.question(
+            self, "Clear All",
+            f"Delete all hard negatives for profile '{self._profile}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            all_rows = self._db.get_hard_negatives(self._profile)
+            self._db.delete_hard_negatives_by_ids([r["id"] for r in all_rows])
+            self._load()
+
+
 class TrainDialog(QDialog):
     """Dialog for configuring and launching classifier training."""
 
@@ -378,7 +478,13 @@ class TrainDialog(QDialog):
             "When unchecked, manually marked hard negatives are excluded from training.\n"
             "Useful when training a new model type where old negatives may not apply.")
         self._chk_hard_negatives.stateChanged.connect(lambda: self._debounce.start())
-        form.addRow("", self._chk_hard_negatives)
+        neg_row = QHBoxLayout()
+        neg_row.addWidget(self._chk_hard_negatives)
+        btn_manage_neg = QPushButton("Manage\u2026")
+        btn_manage_neg.setFixedWidth(80)
+        btn_manage_neg.clicked.connect(self._manage_negatives)
+        neg_row.addWidget(btn_manage_neg)
+        form.addRow("", neg_row)
 
         # Video source directory (fallback for old DB rows without source_path)
         self._txt_video_dir = QLineEdit(video_dir)
@@ -434,6 +540,11 @@ class TrainDialog(QDialog):
         d = QFileDialog.getExistingDirectory(self, "Select video source directory")
         if d:
             self._txt_video_dir.setText(d)
+
+    def _manage_negatives(self):
+        dlg = HardNegativesDialog(self._db, self._profile, parent=self)
+        dlg.exec()
+        self._debounce.start()  # refresh stats after potential deletions
 
     def _populate_folder_combos(self):
         """Rebuild positive/negative combo box items from DB stats."""
