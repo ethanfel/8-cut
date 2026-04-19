@@ -291,7 +291,35 @@ class ProcessedDB:
         ).fetchall()
         return [r[0] for r in rows]
 
-    def get_export_folders(self, profile: str = "default") -> list[str]:
+    def get_max_counter(self, folder: str, name: str) -> int:
+        """Return the highest counter N found in output_paths matching folder/name_NNN*.
+
+        Parses the group directory component (e.g. 'clip_035') from stored
+        output_path values.  Returns 0 if no matches exist.
+        """
+        if not self._enabled:
+            return 0
+        prefix = os.path.join(folder, name + "_")
+        rows = self._con.execute(
+            "SELECT DISTINCT output_path FROM processed"
+            " WHERE output_path LIKE ?",
+            (prefix + "%",),
+        ).fetchall()
+        max_n = 0
+        for (op,) in rows:
+            # output_path: .../folder/name_NNN/name_NNN_sub.ext
+            parent = os.path.basename(os.path.dirname(op))
+            # parent should be "name_NNN"
+            parts = parent.rsplit("_", 1)
+            if len(parts) == 2:
+                try:
+                    max_n = max(max_n, int(parts[1]))
+                except ValueError:
+                    pass
+        return max_n
+
+    def get_export_folders(self, profile: str = "default",
+                           include_scan_exports: bool = False) -> list[str]:
         """Return distinct export folder names found in output_paths for a profile.
 
         Export paths follow the structure:
@@ -301,10 +329,17 @@ class ProcessedDB:
         """
         if not self._enabled:
             return []
-        rows = self._con.execute(
-            "SELECT DISTINCT output_path FROM processed WHERE profile = ?",
-            (profile,),
-        ).fetchall()
+        if include_scan_exports:
+            rows = self._con.execute(
+                "SELECT DISTINCT output_path FROM processed WHERE profile = ?",
+                (profile,),
+            ).fetchall()
+        else:
+            rows = self._con.execute(
+                "SELECT DISTINCT output_path FROM processed"
+                " WHERE profile = ? AND scan_export = 0",
+                (profile,),
+            ).fetchall()
         folder_names: set[str] = set()
         for (op,) in rows:
             grandparent = os.path.basename(os.path.dirname(os.path.dirname(op)))
@@ -429,7 +464,7 @@ class ProcessedDB:
                 " WHERE profile = ? AND scan_export = 0",
                 (profile,),
             ).fetchall()
-        folders = self.get_export_folders(profile)
+        folders = self.get_export_folders(profile, include_scan_exports=include_scan_exports)
         stats: dict[str, dict] = {}
         for folder_name in folders:
             videos: set[str] = set()
@@ -440,7 +475,7 @@ class ProcessedDB:
                     videos.add(fn)
                     clips += 1
             stats[folder_name] = {"videos": len(videos), "clips": clips}
-        return stats
+        return {k: v for k, v in stats.items() if v["clips"] > 0}
 
     # ── Scan results ─────────────────────────────────────────────
 
