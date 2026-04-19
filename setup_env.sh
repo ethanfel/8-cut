@@ -66,7 +66,7 @@ setup_conda() {
     fi
 
     echo "  Installing PyTorch + torchaudio (CUDA 12.8)..."
-    pip install torch torchaudio --index-url "$TORCH_INDEX"
+    pip install torch torchaudio torchvision --index-url "$TORCH_INDEX"
 
     echo "  Installing project dependencies..."
     pip install -r "$SCRIPT_DIR/requirements.txt"
@@ -91,7 +91,7 @@ setup_venv() {
     source "$VENV_DIR/bin/activate"
 
     echo "  Installing PyTorch + torchaudio (CUDA 12.8)..."
-    pip install torch torchaudio --index-url "$TORCH_INDEX"
+    pip install torch torchaudio torchvision --index-url "$TORCH_INDEX"
 
     echo "  Installing project dependencies..."
     pip install -r "$SCRIPT_DIR/requirements.txt"

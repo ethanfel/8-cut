@@ -30,11 +30,11 @@ if ($LASTEXITCODE -eq 0) {
     $hasNvidia = Get-Command nvidia-smi -ErrorAction SilentlyContinue
     if ($hasNvidia) {
         Write-Host "`nNVIDIA GPU detected — installing PyTorch with CUDA 12.8..." -ForegroundColor Green
-        pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+        pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cu128
     } else {
         Write-Host "`nNo NVIDIA GPU detected — installing CPU-only PyTorch..." -ForegroundColor Yellow
         Write-Host "(Audio scanning will work but will be slower without GPU)" -ForegroundColor Yellow
-        pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+        pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cpu
     }
 }
 
