@@ -3155,7 +3155,7 @@ class MainWindow(QMainWindow):
         self._scan_panel.export_requested.connect(self._on_scan_export)
         self._scan_panel.negatives_requested.connect(self._on_scan_negatives)
         self._scan_panel.negatives_removed.connect(self._on_scan_negatives_removed)
-        self._scan_panel.tab_changed.connect(self._update_scan_export_count)
+        self._scan_panel.tab_changed.connect(self._on_scan_regions_edited)
         self._scan_panel.regions_edited.connect(self._on_scan_regions_edited)
         self._sld_threshold.valueChanged.connect(self._on_threshold_changed)
 
@@ -3485,6 +3485,9 @@ class MainWindow(QMainWindow):
         self._preview_timer.start()
         # Unlock scrollbar after Qt finishes processing layout events from load.
 
+        # Recalculate vid folder & counter for the new video.
+        self._update_next_label()
+
         # Run DB fuzzy match off the main thread — can be slow on large databases.
         filename = os.path.basename(self._file_path)
         self._db_worker = _DBWorker(self._db, filename, self._profile)
@@ -3564,15 +3567,18 @@ class MainWindow(QMainWindow):
             self._lbl_time.setText(f"{format_time(next_pos)} / {format_time(self._mpv.get_duration())}")
             self._update_next_label()
             self._preview_timer.start()
-            self._show_status(f"Cursor → end of {os.path.basename(os.path.dirname(output_path))}", 3000)
+            stem = os.path.splitext(os.path.basename(output_path))[0]
+            group_label = stem.rsplit("_", 1)[0]
+            self._show_status(f"Cursor → end of {group_label}", 3000)
             return
         self._overwrite_path = output_path
         self._overwrite_group = self._db.get_group(output_path)
         n = len(self._overwrite_group)
-        group_dir = os.path.basename(os.path.dirname(output_path))
+        stem = os.path.splitext(os.path.basename(output_path))[0]
+        group_label = stem.rsplit("_", 1)[0]
         if n > 1:
-            self._lbl_next.setText(f"↺ {group_dir} ({n} clips)")
-            self._btn_delete.setText(f"Delete {group_dir} ({n})")
+            self._lbl_next.setText(f"↺ {group_label} ({n} clips)")
+            self._btn_delete.setText(f"Delete {group_label} ({n})")
         else:
             self._lbl_next.setText(f"↺ {os.path.basename(output_path)}")
             self._btn_delete.setText(f"Delete {os.path.basename(output_path)}")
@@ -3609,7 +3615,7 @@ class MainWindow(QMainWindow):
                 if ratio != "Off":
                     self._mpv.set_crop_overlay(_RATIOS[ratio], self._crop_center)
         self._show_status(
-            f"Overwrite mode: {group_dir} ({n} clip{'s' if n != 1 else ''}) — export to replace", 5000
+            f"Overwrite mode: {group_label} ({n} clip{'s' if n != 1 else ''}) — export to replace", 5000
         )
 
     def _on_marker_deselected(self) -> None:
@@ -3632,9 +3638,10 @@ class MainWindow(QMainWindow):
         if not all_paths:
             all_paths = [target]
         n = len(all_paths)
-        group_dir = os.path.basename(os.path.dirname(all_paths[0]))
+        stem = os.path.splitext(os.path.basename(all_paths[0]))[0]
+        group_label = stem.rsplit("_", 1)[0]
         if n > 1:
-            msg = f"Delete {n} clips in {group_dir} from disk and database?"
+            msg = f"Delete {n} clips in {group_label} from disk and database?"
         else:
             msg = f"Delete {os.path.basename(target)} from disk and database?"
         reply = QMessageBox.question(
@@ -3654,13 +3661,6 @@ class MainWindow(QMainWindow):
             elif os.path.exists(path):
                 os.remove(path)
             remove_clip_annotation(folder, path)
-        # Remove empty group directory
-        parent = os.path.dirname(all_paths[0])
-        try:
-            if os.path.isdir(parent) and not os.listdir(parent):
-                os.rmdir(parent)
-        except OSError:
-            pass
         # Remove all from DB
         self._db.delete_group(target)
         # Reset state
@@ -3674,7 +3674,7 @@ class MainWindow(QMainWindow):
         self._update_next_label()
         self._refresh_markers()
         self._refresh_playlist_checks()
-        self._show_status(f"Deleted {n} clip{'s' if n != 1 else ''}: {group_dir}")
+        self._show_status(f"Deleted {n} clip{'s' if n != 1 else ''}: {group_label}")
 
     def _on_portrait_ratio_changed(self, text: str) -> None:
         ratio = None if text == "Off" else text
@@ -4537,26 +4537,24 @@ class MainWindow(QMainWindow):
         fmt = self._cmb_format.currentText()
         image_sequence = fmt == "WebP sequence"
         ext = "" if image_sequence else ".mp4"
-        os.makedirs(folder, exist_ok=True)
+        vid_name = self._get_vid_folder(folder)
+        vid_folder = os.path.join(folder, vid_name)
+        os.makedirs(vid_folder, exist_ok=True)
 
-        # Find next counter following the normal order
-        counter = 1
-        while True:
-            group_dir = os.path.join(folder, f"{name}_{counter:03d}")
-            if not os.path.exists(group_dir):
-                break
+        # Find next counter within the vid folder
+        db_max = self._db.get_max_counter(vid_folder, name) if self._db else 0
+        counter = max(1, db_max + 1)
+        while os.path.exists(build_export_path(vid_folder, name, counter, sub=0)):
             counter += 1
 
-        # One folder per area group, numbered sequentially
+        # Clips go flat inside vid folder, numbered sequentially
         jobs = []
         self._auto_export_positions = []
         for area_idx, group in enumerate(groups):
             group_name = f"{name}_{counter:03d}"
-            group_dir = os.path.join(folder, group_name)
-            os.makedirs(group_dir, exist_ok=True)
             for sub, start_t in enumerate(group):
                 fname = f"{group_name}_a{area_idx + 1}_{sub}{ext}"
-                out = os.path.join(group_dir, fname)
+                out = os.path.join(vid_folder, fname)
                 jobs.append((start_t, out, None, 0.5))
                 self._auto_export_positions.append((start_t, out))
             counter += 1
@@ -4668,26 +4666,35 @@ class MainWindow(QMainWindow):
     def _reset_counter(self):
         self._update_next_label()
 
+    def _get_vid_folder(self, folder: str) -> str:
+        """Return vid_NNN folder name for the currently loaded video."""
+        if not self._file_path or not self._db:
+            return "vid_001"
+        return self._db.get_vid_folder(
+            os.path.basename(self._file_path), self._profile, folder,
+        )
+
     def _update_next_label(self):
         folder = self._txt_folder.text()
         name = self._txt_name.text() or "clip"
-        is_seq = self._cmb_format.currentText() == "WebP sequence"
+        vid_name = self._get_vid_folder(folder)
+        vid_folder = os.path.join(folder, vid_name)
         # Start from the highest counter the DB knows about, so we never
         # reuse a counter if the folder is temporarily empty / unmounted.
-        db_max = self._db.get_max_counter(folder, name) if self._db else 0
+        db_max = self._db.get_max_counter(vid_folder, name) if self._db else 0
         self._export_counter = max(1, db_max + 1)
-        # Then also skip any directories that exist on disk.
+        # Then also skip any files that exist on disk.
         while True:
-            group_dir = os.path.join(folder, f"{name}_{self._export_counter:03d}")
-            if not os.path.exists(group_dir):
+            test_path = build_export_path(vid_folder, name, self._export_counter, sub=0)
+            if not os.path.exists(test_path):
                 break
             self._export_counter += 1
         n = self._spn_clips.value()
         base = f"{name}_{self._export_counter:03d}"
         if n == 1:
-            self._lbl_next.setText(f"→ {base}_0")
+            self._lbl_next.setText(f"→ {vid_name}/{base}_0")
         else:
-            self._lbl_next.setText(f"→ {base}_0..{n - 1}")
+            self._lbl_next.setText(f"→ {vid_name}/{base}_0..{n - 1}")
 
     def _on_export(self, _=None, folder_suffix: str = ""):
         if not self._file_path:
@@ -4746,30 +4753,30 @@ class MainWindow(QMainWindow):
         else:
             name = self._txt_name.text() or "clip"
             n_clips = self._spn_clips.value()
+            vid_name = self._get_vid_folder(folder)
+            vid_folder = os.path.join(folder, vid_name)
+            os.makedirs(vid_folder, exist_ok=True)
             # For subprofile exports, calculate counter independently.
             if folder_suffix:
-                db_max_sub = self._db.get_max_counter(folder, name) if self._db else 0
+                db_max_sub = self._db.get_max_counter(vid_folder, name) if self._db else 0
                 counter = max(1, db_max_sub + 1)
                 while True:
                     if image_sequence:
-                        p = build_sequence_dir(folder, name, counter, sub=0)
+                        p = build_sequence_dir(vid_folder, name, counter, sub=0)
                     else:
-                        p = build_export_path(folder, name, counter, sub=0)
+                        p = build_export_path(vid_folder, name, counter, sub=0)
                     if not os.path.exists(p):
                         break
                     counter += 1
             else:
                 counter = self._export_counter
-            # Create the group subfolder
-            group_dir = os.path.join(folder, f"{name}_{counter:03d}")
-            os.makedirs(group_dir, exist_ok=True)
             jobs = []
             for sub in range(n_clips):
                 start = self._cursor + sub * spread
                 if image_sequence:
-                    out = build_sequence_dir(folder, name, counter, sub=sub)
+                    out = build_sequence_dir(vid_folder, name, counter, sub=sub)
                 else:
-                    out = build_export_path(folder, name, counter, sub=sub)
+                    out = build_export_path(vid_folder, name, counter, sub=sub)
                 jobs.append((start, out, base_ratio, base_center))
 
             # Apply crop keyframes (or fall back to base state).
