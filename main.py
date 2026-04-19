@@ -250,10 +250,6 @@ class DatasetStatsDialog(QDialog):
 
         # ── Class balance bar ─────────────────────────────────
         if n_total > 0:
-            bar = QWidget()
-            bar.setFixedHeight(20)
-            bar.setStyleSheet("background: #222;")
-
             class _BalanceBar(QWidget):
                 def __init__(self, pos, soft, neg, total):
                     super().__init__()
@@ -290,10 +286,12 @@ class DatasetStatsDialog(QDialog):
             table.setItem(row, 0, QTableWidgetItem(name))
             for col, val in enumerate([len(pos), len(soft), len(neg),
                                        len(pos) + len(soft) + len(neg)], 1):
-                item = QTableWidgetItem(str(val))
+                item = QTableWidgetItem()
+                item.setData(Qt.ItemDataRole.DisplayRole, val)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 table.setItem(row, col, item)
 
+        table.setSortingEnabled(True)
         table.sortItems(1, Qt.SortOrder.DescendingOrder)
         layout.addWidget(table)
 
@@ -3193,7 +3191,9 @@ class MainWindow(QMainWindow):
         # Start waveform extraction in background
         self._timeline.set_waveform(None)
         if hasattr(self, '_waveform_worker') and self._waveform_worker is not None:
+            self._safe_disconnect(self._waveform_worker.done)
             self._waveform_worker.quit()
+            self._waveform_worker.wait(1000)
         self._waveform_worker = WaveformWorker(self._file_path)
         self._waveform_worker.done.connect(self._timeline.set_waveform)
         self._waveform_worker.start()
@@ -4089,6 +4089,8 @@ class MainWindow(QMainWindow):
             self._btn_train.setText("Train")
             self._btn_train.setEnabled(False)
             self._show_status("Cancelling training…")
+            self._train_worker.finished.connect(
+                lambda: self._btn_train.setEnabled(True))
             return
 
         # Default video dir: parent of currently loaded file, or saved setting
@@ -4690,6 +4692,10 @@ class MainWindow(QMainWindow):
         # Cancel background workers to prevent callbacks into dead objects.
         self._cleanup_scan_worker()
         self._cleanup_train_worker()
+        if hasattr(self, '_waveform_worker') and self._waveform_worker is not None:
+            self._safe_disconnect(self._waveform_worker.done)
+            self._waveform_worker.quit()
+            self._waveform_worker.wait(2000)
         if self._export_worker and self._export_worker.isRunning():
             self._export_worker.cancel()
             self._export_worker.wait(3000)
