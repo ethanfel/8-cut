@@ -22,21 +22,19 @@ if (Test-Path (Join-Path $venvDir "Scripts\python.exe")) {
 & "$venvDir\Scripts\Activate.ps1"
 
 # ── PyTorch ───────────────────────────────────────────────
-$hasTorch = python -c "import torch" 2>&1
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "`nPyTorch already installed, skipping." -ForegroundColor Green
+# Detect NVIDIA GPU via nvidia-smi
+$hasNvidia = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+if ($hasNvidia) {
+    $torchIndex = "https://download.pytorch.org/whl/cu128"
+    Write-Host "`nNVIDIA GPU detected — using CUDA 12.8 PyTorch index" -ForegroundColor Green
 } else {
-    # Detect NVIDIA GPU via nvidia-smi
-    $hasNvidia = Get-Command nvidia-smi -ErrorAction SilentlyContinue
-    if ($hasNvidia) {
-        Write-Host "`nNVIDIA GPU detected — installing PyTorch with CUDA 12.8..." -ForegroundColor Green
-        pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cu128
-    } else {
-        Write-Host "`nNo NVIDIA GPU detected — installing CPU-only PyTorch..." -ForegroundColor Yellow
-        Write-Host "(Audio scanning will work but will be slower without GPU)" -ForegroundColor Yellow
-        pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cpu
-    }
+    $torchIndex = "https://download.pytorch.org/whl/cpu"
+    Write-Host "`nNo NVIDIA GPU detected — using CPU-only PyTorch index" -ForegroundColor Yellow
 }
+# Always install/upgrade torch stack from correct index
+# (pip install is a no-op if already at the right version)
+Write-Host "Installing PyTorch + torchaudio + torchvision..."
+pip install torch torchaudio torchvision --index-url $torchIndex
 
 # ── Python deps ───────────────────────────────────────────
 Write-Host "`nInstalling project dependencies..."
