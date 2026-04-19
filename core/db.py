@@ -49,6 +49,7 @@ class ProcessedDB:
                 "  spread          REAL    NOT NULL DEFAULT 3.0,"
                 "  profile         TEXT    NOT NULL DEFAULT 'default',"
                 "  source_path     TEXT    NOT NULL DEFAULT '',"
+                "  scan_export     INTEGER NOT NULL DEFAULT 0,"
                 "  processed_at    TEXT    NOT NULL"
                 ")"
             )

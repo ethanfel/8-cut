@@ -697,12 +697,31 @@ class ScanResultsPanel(QWidget):
         self._tabs.setTabText(tab_idx, f"{model} ({count})")
         self.tab_changed.emit()
 
+    def filter_by_threshold(self, threshold: float) -> None:
+        """Show/hide rows based on score threshold across all tabs."""
+        for i in range(self._tabs.count()):
+            table = self._tabs.widget(i)
+            if not isinstance(table, QTableWidget):
+                continue
+            visible = 0
+            for row in range(table.rowCount()):
+                score = float(table.item(row, 2).text())
+                hide = score < threshold
+                table.setRowHidden(row, hide)
+                if not hide:
+                    visible += 1
+            model = self._tabs.tabText(i).rsplit(" (", 1)[0]
+            self._tabs.setTabText(i, f"{model} ({visible})")
+        self.regions_edited.emit()
+
     def _get_tab_regions(self, table: QTableWidget,
                          include_disabled: bool = False
                          ) -> list[tuple[float, float, float]]:
-        """Extract (start, end, score) from a table widget, skipping disabled rows."""
+        """Extract (start, end, score) from a table widget, skipping disabled/hidden rows."""
         regions = []
         for row in range(table.rowCount()):
+            if table.isRowHidden(row):
+                continue
             if not include_disabled:
                 disabled = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 2)
                 if disabled:
@@ -714,12 +733,14 @@ class ScanResultsPanel(QWidget):
         return regions
 
     def current_regions_with_orig(self) -> list[tuple[float, float, float, float, float]]:
-        """Return (start, end, score, orig_start, orig_end) for enabled rows."""
+        """Return (start, end, score, orig_start, orig_end) for enabled, visible rows."""
         table = self._tabs.currentWidget()
         if not isinstance(table, QTableWidget):
             return []
         regions = []
         for row in range(table.rowCount()):
+            if table.isRowHidden(row):
+                continue
             item0 = table.item(row, 0)
             disabled = item0.data(Qt.ItemDataRole.UserRole + 2)
             if disabled:
@@ -961,6 +982,8 @@ class ScanResultsPanel(QWidget):
             self.undo()
         elif event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.toggle_disable_selected()
+        elif event.key() == Qt.Key.Key_N:
+            self._on_add_negatives()
         else:
             super().keyPressEvent(event)
 
@@ -2700,6 +2723,7 @@ class MainWindow(QMainWindow):
         self._scan_panel.negatives_removed.connect(self._on_scan_negatives_removed)
         self._scan_panel.tab_changed.connect(self._update_scan_export_count)
         self._scan_panel.regions_edited.connect(self._on_scan_regions_edited)
+        self._sld_threshold.valueChanged.connect(self._on_threshold_changed)
 
         # Root: horizontal splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -2783,6 +2807,7 @@ class MainWindow(QMainWindow):
             "<tr><td><b>G</b></td><td>Toggle cursor lock</td></tr>"
             "<tr><td><b>A</b></td><td>Autoclip — fit clip count to pause position</td></tr>"
             "<tr><td><b>Delete / Backspace</b></td><td>Toggle disable on selected scan regions</td></tr>"
+            "<tr><td><b>N</b></td><td>Toggle hard negative on selected scan regions</td></tr>"
             "<tr><td><b>Ctrl+Z</b></td><td>Undo last scan panel action</td></tr>"
             "<tr><td><b>? / F1</b></td><td>This help</td></tr>"
             "<tr><td colspan='2'><hr></td></tr>"
@@ -3693,6 +3718,10 @@ class MainWindow(QMainWindow):
         )
         self._update_scan_export_count()
         self._show_status(f"Removed {len(times)} hard negative(s)")
+
+    def _on_threshold_changed(self, value: float) -> None:
+        """Filter existing scan results by threshold without rescanning."""
+        self._scan_panel.filter_by_threshold(value)
 
     def _on_scan_regions_edited(self) -> None:
         """A scan region was disabled/enabled or resized — refresh timeline and count."""
