@@ -38,7 +38,7 @@ pip install torch torchaudio torchvision --index-url $torchIndex
 
 # ── Python deps ───────────────────────────────────────────
 Write-Host "`nInstalling project dependencies..."
-pip install -r (Join-Path $root "requirements.txt")
+pip install -r (Join-Path $root "requirements.txt") --extra-index-url $torchIndex
 
 # ── libmpv ────────────────────────────────────────────────
 $mpvDll = Join-Path $root "libmpv-2.dll"

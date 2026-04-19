@@ -69,7 +69,7 @@ setup_conda() {
     pip install torch torchaudio torchvision --index-url "$TORCH_INDEX"
 
     echo "  Installing project dependencies..."
-    pip install -r "$SCRIPT_DIR/requirements.txt"
+    pip install -r "$SCRIPT_DIR/requirements.txt" --extra-index-url "$TORCH_INDEX"
 
     echo ""
     echo "Done! Activate with:"
@@ -94,7 +94,7 @@ setup_venv() {
     pip install torch torchaudio torchvision --index-url "$TORCH_INDEX"
 
     echo "  Installing project dependencies..."
-    pip install -r "$SCRIPT_DIR/requirements.txt"
+    pip install -r "$SCRIPT_DIR/requirements.txt" --extra-index-url "$TORCH_INDEX"
 
     echo ""
     echo "Done! Activate with:"
