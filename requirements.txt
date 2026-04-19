@@ -13,7 +13,7 @@ soundfile>=0.12
 # or manually: pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
 torch>=2.0
 torchaudio>=2.0
-transformers>=4.30
+transformers>=4.30,<5.0  # EAT remote model code incompatible with transformers 5.x
 timm>=0.9
 
 # Object detection
