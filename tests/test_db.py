@@ -1,6 +1,5 @@
 import os
 import tempfile
-import time
 
 from core.db import ProcessedDB
 
@@ -32,12 +31,10 @@ def test_scan_result_history():
         path = f.name
     try:
         db = ProcessedDB(path)
-        # Save three versions with small delays so timestamps differ
+        # Save three versions (microsecond-precision timestamps avoid collisions)
         db.save_scan_results("v.mp4", "test", "MODEL_A", [(0, 8, 0.9)])
-        time.sleep(1.1)
         db.save_scan_results("v.mp4", "test", "MODEL_A",
                              [(0, 8, 0.8), (10, 18, 0.7)])
-        time.sleep(1.1)
         db.save_scan_results("v.mp4", "test", "MODEL_A", [(5, 13, 0.95)])
         versions = db.get_scan_versions("v.mp4", "test", "MODEL_A")
         assert len(versions) == 3

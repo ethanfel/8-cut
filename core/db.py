@@ -504,7 +504,7 @@ class ProcessedDB:
         """
         if not self._enabled:
             return
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         with self._lock:
             self._con.executemany(
                 "INSERT INTO scan_results"

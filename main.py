@@ -8,6 +8,7 @@ import random
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -407,14 +408,22 @@ class HardNegativesDialog(QDialog):
             self._load()
 
     def _clear_all(self):
+        all_rows = self._db.get_hard_negatives(self._profile)
+        model_filter = self._cmb_filter.currentText()
+        if model_filter != "(all)":
+            target = [r for r in all_rows if r["source_model"] == model_filter]
+            msg = f"Delete {len(target)} hard negatives for model '{model_filter}'?"
+        else:
+            target = all_rows
+            msg = f"Delete all {len(target)} hard negatives for profile '{self._profile}'?"
+        if not target:
+            return
         reply = QMessageBox.question(
-            self, "Clear All",
-            f"Delete all hard negatives for profile '{self._profile}'?",
+            self, "Clear All", msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            all_rows = self._db.get_hard_negatives(self._profile)
-            self._db.delete_hard_negatives_by_ids([r["id"] for r in all_rows])
+            self._db.delete_hard_negatives_by_ids([r["id"] for r in target])
             self._load()
 
 
@@ -888,8 +897,13 @@ class ScanResultsPanel(QWidget):
             cmb.clear()
             for v in versions:
                 ts = v["timestamp"]
-                # Format: "2026-04-19 14:30 (12 regions, best: 0.95)"
-                label = (f"{ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}"
+                # Parse timestamp to readable date string
+                try:
+                    dt = datetime.strptime(ts[:15], "%Y%m%d_%H%M%S")
+                    date_str = dt.strftime("%Y-%m-%d %H:%M")
+                except (ValueError, IndexError):
+                    date_str = ts
+                label = (f"{date_str}"
                          f" ({v['count']} regions, best: {v['max_score']:.2f})")
                 cmb.addItem(label, userData=ts)
             cmb.blockSignals(False)
@@ -899,6 +913,7 @@ class ScanResultsPanel(QWidget):
         """Reload a tab's results when the user selects a different version."""
         if idx < 0:
             return
+        self._undo_stack.clear()  # version context changed, old undo entries invalid
         # Find the tab for this model
         for i in range(self._tabs.count()):
             if self._tabs.tabText(i).rsplit(" (", 1)[0] == model:
