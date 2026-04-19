@@ -171,7 +171,18 @@ def _extract_w2v_windows(y: np.ndarray, sr: int = _SR,
     import torch
     model, device = _get_w2v_model(model_name)
     is_beats = (model_name or _DEFAULT_EMBED_MODEL) == "BEATS"
+    # Auto-size batches based on available GPU memory
     batch_size = 16
+    if device == "cuda":
+        try:
+            vram_gb = torch.cuda.get_device_properties(0).total_mem / 1e9
+            if vram_gb >= 16:
+                batch_size = 64
+            elif vram_gb >= 8:
+                batch_size = 32
+            _log(f"audio_scan: batch_size={batch_size} (VRAM {vram_gb:.1f} GB)")
+        except Exception:
+            pass
     timestamps = np.arange(n_windows) * hop
     embeddings = []
 
