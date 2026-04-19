@@ -629,6 +629,28 @@ class ScanResultsPanel(QWidget):
             pass
         return None
 
+    def _current_table(self) -> QTableWidget | None:
+        """Return the QTableWidget from the active tab (unwrapping container)."""
+        w = self._tabs.currentWidget()
+        if isinstance(w, QTableWidget):
+            return w
+        if w is not None:
+            table = w.findChild(QTableWidget)
+            if table is not None:
+                return table
+        return None
+
+    def _tab_table(self, index: int) -> QTableWidget | None:
+        """Return the QTableWidget from a tab by index."""
+        w = self._tabs.widget(index)
+        if isinstance(w, QTableWidget):
+            return w
+        if w is not None:
+            table = w.findChild(QTableWidget)
+            if table is not None:
+                return table
+        return None
+
     def load_for_file(self, filename: str, profile: str) -> None:
         """Load saved scan results from DB for a file."""
         self._filename = filename
@@ -638,6 +660,7 @@ class ScanResultsPanel(QWidget):
         results = self._db.get_scan_results(filename, profile)
         for model, rows in results.items():
             self._add_tab(model, rows)
+        self._populate_version_combos()
 
     def add_scan_results(self, model: str,
                          regions: list[tuple[float, float, float]]) -> None:
@@ -650,6 +673,7 @@ class ScanResultsPanel(QWidget):
                 self._tabs.removeTab(i)
                 break
         self._add_tab(model, rows)
+        self._populate_version_combos()
         for i in range(self._tabs.count()):
             if self._tabs.tabText(i).rsplit(" (", 1)[0] == model:
                 self._tabs.setCurrentIndex(i)
@@ -657,10 +681,23 @@ class ScanResultsPanel(QWidget):
 
     def _add_tab(self, model: str,
                  rows: list[tuple[int, float, float, float, bool, float, float]]) -> None:
-        """Create a table tab.
+        """Create a table tab wrapped in a container with a version combo.
 
         rows: [(row_id, start, end, score, disabled, orig_start, orig_end), ...]
         """
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(2)
+
+        cmb_version = QComboBox()
+        cmb_version.setMaximumWidth(260)
+        cmb_version.setToolTip("Scan version history")
+        cmb_version.hide()  # Hidden when only 1 version
+        cmb_version.currentIndexChanged.connect(
+            lambda idx, m=model: self._on_version_changed(m, idx))
+        container_layout.addWidget(cmb_version)
+
         table = QTableWidget(len(rows), 3)
         table.setHorizontalHeaderLabels(["Time", "End", "Score"])
         table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -706,7 +743,88 @@ class ScanResultsPanel(QWidget):
             lambda t=table: self._on_selection_changed(t))
         table.cellChanged.connect(
             lambda r, c, t=table: self._on_cell_changed(t, r, c))
-        self._tabs.addTab(table, f"{model} ({len(rows)})")
+        container_layout.addWidget(table)
+        self._tabs.addTab(container, f"{model} ({len(rows)})")
+
+    def _populate_version_combos(self) -> None:
+        """Populate version combo boxes for all tabs from DB."""
+        for i in range(self._tabs.count()):
+            w = self._tabs.widget(i)
+            if w is None:
+                continue
+            cmb = w.findChild(QComboBox)
+            if cmb is None:
+                continue
+            model = self._tabs.tabText(i).rsplit(" (", 1)[0]
+            versions = self._db.get_scan_versions(
+                self._filename, self._profile, model)
+            cmb.blockSignals(True)
+            cmb.clear()
+            for v in versions:
+                ts = v["timestamp"]
+                # Format: "2026-04-19 14:30 (12 regions, best: 0.95)"
+                label = (f"{ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}"
+                         f" ({v['count']} regions, best: {v['max_score']:.2f})")
+                cmb.addItem(label, userData=ts)
+            cmb.blockSignals(False)
+            cmb.setVisible(cmb.count() > 1)
+
+    def _on_version_changed(self, model: str, idx: int) -> None:
+        """Reload a tab's results when the user selects a different version."""
+        if idx < 0:
+            return
+        # Find the tab for this model
+        for i in range(self._tabs.count()):
+            if self._tabs.tabText(i).rsplit(" (", 1)[0] == model:
+                w = self._tabs.widget(i)
+                cmb = w.findChild(QComboBox) if w else None
+                if cmb is None:
+                    return
+                ts = cmb.itemData(idx)
+                if ts is None:
+                    return
+                results = self._db.get_scan_results(
+                    self._filename, self._profile, scan_timestamp=ts)
+                rows = results.get(model, [])
+                # Replace the table contents
+                table = self._tab_table(i)
+                if table is None:
+                    return
+                self._editing = True
+                table.setRowCount(len(rows))
+                red = QColor(220, 60, 60)
+                gray = QColor(100, 100, 100)
+                for r, (row_id, start, end, score, disabled, os_, oe) in enumerate(rows):
+                    t_item = QTableWidgetItem(format_time(start))
+                    t_item.setData(Qt.ItemDataRole.UserRole, row_id)
+                    t_item.setData(Qt.ItemDataRole.UserRole + 1, start)
+                    t_item.setData(Qt.ItemDataRole.UserRole + 2, disabled)
+                    t_item.setData(Qt.ItemDataRole.UserRole + 3, os_)
+                    t_item.setData(Qt.ItemDataRole.UserRole + 4, oe)
+                    table.setItem(r, 0, t_item)
+                    e_item = QTableWidgetItem(format_time(end))
+                    e_item.setData(Qt.ItemDataRole.UserRole, end)
+                    table.setItem(r, 1, e_item)
+                    sc_item = QTableWidgetItem(f"{score:.2f}")
+                    sc_item.setFlags(sc_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    table.setItem(r, 2, sc_item)
+                    if disabled:
+                        for col in range(3):
+                            table.item(r, col).setForeground(gray)
+                    elif start in self._neg_times:
+                        for col in range(3):
+                            table.item(r, col).setForeground(red)
+                self._editing = False
+                self._tabs.setTabText(i, f"{model} ({len(rows)})")
+                self.regions_edited.emit()
+                return
+
+    def current_model_name(self) -> str:
+        """Return the model name of the currently active tab."""
+        idx = self._tabs.currentIndex()
+        if idx >= 0:
+            return self._tabs.tabText(idx).split(" (")[0]
+        return ""
 
     def _on_selection_changed(self, table: QTableWidget) -> None:
         items = table.selectedItems()
@@ -735,7 +853,7 @@ class ScanResultsPanel(QWidget):
             self._editing = False
             return
         # Record undo: (action, tab_index, row, col, old_value)
-        tab_idx = self._tabs.indexOf(table)
+        tab_idx = self._tabs.indexOf(table.parent() or table)
         self._undo_stack.append(("resize", tab_idx, row, col, float(old_val)))
         # Update stored data
         self._editing = True
@@ -755,8 +873,8 @@ class ScanResultsPanel(QWidget):
 
     def toggle_disable_selected(self) -> None:
         """Toggle disabled state on selected rows."""
-        table = self._tabs.currentWidget()
-        if not isinstance(table, QTableWidget):
+        table = self._current_table()
+        if table is None:
             return
         selected_rows = sorted({idx.row() for idx in table.selectedIndexes()})
         if not selected_rows:
@@ -791,8 +909,8 @@ class ScanResultsPanel(QWidget):
 
     def delete_selected(self) -> None:
         """Permanently delete selected rows from active tab and DB."""
-        table = self._tabs.currentWidget()
-        if not isinstance(table, QTableWidget):
+        table = self._current_table()
+        if table is None:
             return
         rows_to_delete = sorted(
             {idx.row() for idx in table.selectedIndexes()}, reverse=True)
@@ -810,8 +928,8 @@ class ScanResultsPanel(QWidget):
     def filter_by_threshold(self, threshold: float) -> None:
         """Show/hide rows based on score threshold across all tabs."""
         for i in range(self._tabs.count()):
-            table = self._tabs.widget(i)
-            if not isinstance(table, QTableWidget):
+            table = self._tab_table(i)
+            if table is None:
                 continue
             visible = 0
             for row in range(table.rowCount()):
@@ -844,8 +962,8 @@ class ScanResultsPanel(QWidget):
 
     def current_regions_with_orig(self) -> list[tuple[float, float, float, float, float]]:
         """Return (start, end, score, orig_start, orig_end) for enabled, visible rows."""
-        table = self._tabs.currentWidget()
-        if not isinstance(table, QTableWidget):
+        table = self._current_table()
+        if table is None:
             return []
         regions = []
         for row in range(table.rowCount()):
@@ -870,8 +988,8 @@ class ScanResultsPanel(QWidget):
     def update_region_times(self, start_match: float, end_match: float,
                             new_start: float, new_end: float) -> None:
         """Update the table row matching (start, end) with new times. Called from timeline drag."""
-        table = self._tabs.currentWidget()
-        if not isinstance(table, QTableWidget):
+        table = self._current_table()
+        if table is None:
             return
         for row in range(table.rowCount()):
             item0 = table.item(row, 0)
@@ -881,7 +999,7 @@ class ScanResultsPanel(QWidget):
                 continue
             if abs(float(s) - start_match) < 0.01 and abs(float(e) - end_match) < 0.01:
                 # Record undo
-                tab_idx = self._tabs.indexOf(table)
+                tab_idx = self._tabs.currentIndex()
                 self._undo_stack.append(("drag", tab_idx, row, float(s), float(e)))
                 # Update stored values
                 self._editing = True
@@ -898,8 +1016,8 @@ class ScanResultsPanel(QWidget):
 
     def _on_add_negatives(self) -> None:
         """Toggle selected rows as hard negatives (red = negative, toggle off to remove)."""
-        table = self._tabs.currentWidget()
-        if not isinstance(table, QTableWidget):
+        table = self._current_table()
+        if table is None:
             return
         selected_rows = sorted({idx.row() for idx in table.selectedIndexes()})
         if not selected_rows:
@@ -938,8 +1056,8 @@ class ScanResultsPanel(QWidget):
             self.negatives_removed.emit(remove_times)
 
     def _on_export(self) -> None:
-        table = self._tabs.currentWidget()
-        if not isinstance(table, QTableWidget):
+        table = self._current_table()
+        if table is None:
             return
         # _get_tab_regions already skips disabled; also skip negatives
         regions = [r for r in self._get_tab_regions(table) if r[0] not in self._neg_times]
@@ -948,22 +1066,22 @@ class ScanResultsPanel(QWidget):
 
     def current_regions(self) -> list[tuple[float, float, float]]:
         """Return (start, end, score) for enabled rows in the active tab."""
-        table = self._tabs.currentWidget()
-        if not isinstance(table, QTableWidget):
+        table = self._current_table()
+        if table is None:
             return []
         return self._get_tab_regions(table)
 
     def all_regions(self) -> list[tuple[float, float, float]]:
         """Return (start, end, score) for ALL rows including disabled."""
-        table = self._tabs.currentWidget()
-        if not isinstance(table, QTableWidget):
+        table = self._current_table()
+        if table is None:
             return []
         return self._get_tab_regions(table, include_disabled=True)
 
     def highlight_time(self, t: float) -> None:
         """Select the row containing time t, scrolling to it."""
-        table = self._tabs.currentWidget()
-        if not isinstance(table, QTableWidget):
+        table = self._current_table()
+        if table is None:
             return
         for row in range(table.rowCount()):
             start = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
@@ -994,8 +1112,8 @@ class ScanResultsPanel(QWidget):
         kind = action[0]
         if kind == "disable":
             _, tab_idx, prev = action
-            table = self._tabs.widget(tab_idx)
-            if not isinstance(table, QTableWidget):
+            table = self._tab_table(tab_idx)
+            if table is None:
                 return
             gray = QColor(100, 100, 100)
             red = QColor(220, 60, 60)
@@ -1021,8 +1139,8 @@ class ScanResultsPanel(QWidget):
 
         elif kind == "resize":
             _, tab_idx, row, col, old_val = action
-            table = self._tabs.widget(tab_idx)
-            if not isinstance(table, QTableWidget) or row >= table.rowCount():
+            table = self._tab_table(tab_idx)
+            if table is None or row >= table.rowCount():
                 return
             self._editing = True
             if col == 0:
@@ -1041,8 +1159,8 @@ class ScanResultsPanel(QWidget):
 
         elif kind == "drag":
             _, tab_idx, row, old_start, old_end = action
-            table = self._tabs.widget(tab_idx)
-            if not isinstance(table, QTableWidget) or row >= table.rowCount():
+            table = self._tab_table(tab_idx)
+            if table is None or row >= table.rowCount():
                 return
             self._editing = True
             table.item(row, 0).setData(Qt.ItemDataRole.UserRole + 1, old_start)
@@ -1057,8 +1175,8 @@ class ScanResultsPanel(QWidget):
 
         elif kind == "neg":
             _, tab_idx, was_neg = action
-            table = self._tabs.widget(tab_idx)
-            if not isinstance(table, QTableWidget):
+            table = self._tab_table(tab_idx)
+            if table is None:
                 return
             add_back: list[float] = []
             remove_back: list[float] = []
@@ -4409,8 +4527,11 @@ class MainWindow(QMainWindow):
         folder = self._txt_folder.text()
         name = self._txt_name.text() or "clip"
         is_seq = self._cmb_format.currentText() == "WebP sequence"
-        # Find the first counter whose group folder does not exist on disk.
-        self._export_counter = 1
+        # Start from the highest counter the DB knows about, so we never
+        # reuse a counter if the folder is temporarily empty / unmounted.
+        db_max = self._db.get_max_counter(folder, name) if self._db else 0
+        self._export_counter = max(1, db_max + 1)
+        # Then also skip any directories that exist on disk.
         while True:
             group_dir = os.path.join(folder, f"{name}_{self._export_counter:03d}")
             if not os.path.exists(group_dir):
@@ -4482,7 +4603,8 @@ class MainWindow(QMainWindow):
             n_clips = self._spn_clips.value()
             # For subprofile exports, calculate counter independently.
             if folder_suffix:
-                counter = 1
+                db_max_sub = self._db.get_max_counter(folder, name) if self._db else 0
+                counter = max(1, db_max_sub + 1)
                 while True:
                     if image_sequence:
                         p = build_sequence_dir(folder, name, counter, sub=0)
