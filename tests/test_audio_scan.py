@@ -25,6 +25,28 @@ def test_default_model_path_contains_profile():
     assert path.endswith(".joblib")
 
 
+def test_embed_dim_multi_layer():
+    from core.audio_scan import _embed_dim
+    # Multi-layer models should report concatenated dimension
+    assert _embed_dim("HUBERT_XLARGE_ML") == 5120
+    assert _embed_dim("HUBERT_LARGE_ML") == 4096
+    assert _embed_dim("HUBERT_BASE_ML") == 3072
+    # Single-layer unchanged
+    assert _embed_dim("HUBERT_XLARGE") == 1280
+
+
+def test_ml_config():
+    from core.audio_scan import _ml_config
+    assert _ml_config("HUBERT_XLARGE") is None
+    assert _ml_config("BEATS_ML") is None  # BEATS has no ML variant
+    base, layers = _ml_config("HUBERT_XLARGE_ML")
+    assert base == "HUBERT_XLARGE"
+    assert layers == [11, 23, 35, 47]
+    base, layers = _ml_config("HUBERT_BASE_ML")
+    assert base == "HUBERT_BASE"
+    assert layers == [2, 5, 8, 11]
+
+
 def test_db_get_all_export_paths():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         path = f.name
