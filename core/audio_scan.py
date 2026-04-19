@@ -560,6 +560,17 @@ def train_classifier(video_infos: list[tuple[str, list[float], list[float]]],
     clf.fit(X[train_idx], y_arr[train_idx])
     _log("audio_scan: classifier trained")
 
+    # Calibrate probabilities for better threshold behavior
+    from sklearn.calibration import CalibratedClassifierCV
+    min_class = min(int(n_pos), int(n_neg_sample))
+    if min_class >= 6:
+        cal_clf = CalibratedClassifierCV(clf, cv=3, method='isotonic')
+        cal_clf.fit(X[train_idx], y_arr[train_idx])
+        clf = cal_clf
+        _log("audio_scan: classifier calibrated (isotonic, 3-fold)")
+    else:
+        _log(f"audio_scan: skipping calibration (min class size {min_class} < 6)")
+
     model = {"classifier": clf, "n_features": X.shape[1],
              "embed_model": embed_model or _DEFAULT_EMBED_MODEL}
 
