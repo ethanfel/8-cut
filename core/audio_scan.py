@@ -135,7 +135,7 @@ def _eat_preprocess(chunks: list[np.ndarray], sr: int, device: str):
 
     mels = []
     for chunk in chunks:
-        wav = torch.from_numpy(chunk).unsqueeze(0).float()
+        wav = torch.from_numpy(np.array(chunk)).unsqueeze(0).float()
         fbank = kaldi.fbank(
             wav, htk_compat=True, sample_frequency=sr, use_energy=False,
             window_type='hanning', num_mel_bins=128, dither=0.0, frame_shift=10,
