@@ -418,6 +418,21 @@ class ProcessedDB:
                 pass
         return max_n
 
+    def delete_scan_exports(self, filename: str, profile: str) -> int:
+        """Delete all scan_export entries for *filename* in *profile*.
+
+        Returns the number of rows deleted.
+        """
+        if not self._enabled:
+            return 0
+        cur = self._con.execute(
+            "DELETE FROM processed"
+            " WHERE filename = ? AND profile = ? AND scan_export = 1",
+            (filename, profile),
+        )
+        self._con.commit()
+        return cur.rowcount
+
     def get_vid_folder(self, filename: str, profile: str,
                        export_folder: str) -> str:
         """Return the vid_NNN folder name for a source video.

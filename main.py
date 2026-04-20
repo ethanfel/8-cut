@@ -4666,6 +4666,13 @@ class MainWindow(QMainWindow):
         self._auto_export_no_markers = batch["is_scan"]
         self._export_batch_file = batch["file_path"]
 
+        # Replace old scan export entries for this video
+        if batch["is_scan"]:
+            fname = os.path.basename(batch["file_path"])
+            n_old = self._db.delete_scan_exports(fname, batch["profile"])
+            if n_old:
+                _log(f"Replacing {n_old} old scan export entries for {fname}")
+
         n_queued = len(self._export_queue)
         q_msg = f" ({n_queued} queued)" if n_queued else ""
         self._show_status(f"Auto: exporting {len(batch['jobs'])} clips...{q_msg}")
