@@ -128,7 +128,16 @@ def build_ffmpeg_command(
             os.path.join(output_path, "frame_%04d.webp"),
         ]
     else:
-        cmd += ["-c:v", encoder, "-c:a", "pcm_s16le", output_path]
+        cmd += ["-c:v", encoder]
+        if "nvenc" in encoder:
+            cmd += ["-preset", "p4", "-cq", "28"]
+        elif "vaapi" in encoder:
+            cmd += ["-qp", "28"]
+        elif "qsv" in encoder:
+            cmd += ["-global_quality", "28"]
+        elif "amf" in encoder:
+            cmd += ["-qp_i", "28", "-qp_p", "28"]
+        cmd += ["-c:a", "pcm_s16le", output_path]
     return cmd
 
 
