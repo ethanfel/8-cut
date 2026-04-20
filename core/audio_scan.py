@@ -737,7 +737,7 @@ def prefetch_audio(video_path: str, embed_model: str | None = None,
 def scan_video(
     video_path: str,
     model: dict = None,
-    threshold: float = 0.30,
+    threshold: float = 0.50,
     hop: float = 1.0,
     window: float = _WINDOW,
     cancel_flag: object = None,
