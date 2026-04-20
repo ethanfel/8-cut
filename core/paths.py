@@ -24,17 +24,23 @@ def _log(*args) -> None:
     print(f"[8-cut {ts}]", *args, file=sys.stderr)
 
 
-def build_export_path(folder: str, basename: str, counter: int, sub: int | None = None) -> str:
+def build_export_path(folder: str, basename: str, counter: int,
+                      sub: int | None = None, tag: str | None = None) -> str:
     """Build clip output path.  *folder* should be the vid folder (e.g. .../mp4/vid_001)."""
     name = f"{basename}_{counter:03d}"
+    if tag is not None:
+        name = f"{name}_{tag}"
     if sub is not None:
         name = f"{name}_{sub}"
     return os.path.join(folder, name + ".mp4")
 
 
-def build_sequence_dir(folder: str, basename: str, counter: int, sub: int | None = None) -> str:
+def build_sequence_dir(folder: str, basename: str, counter: int,
+                       sub: int | None = None, tag: str | None = None) -> str:
     """Build WebP sequence output dir.  *folder* should be the vid folder."""
     name = f"{basename}_{counter:03d}"
+    if tag is not None:
+        name = f"{name}_{tag}"
     if sub is not None:
         name = f"{name}_{sub}"
     return os.path.join(folder, name)

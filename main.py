@@ -4743,18 +4743,17 @@ class MainWindow(QMainWindow):
         name = self._txt_name.text() or "clip"
         vid_name = self._get_vid_folder(folder)
         vid_folder = os.path.join(folder, vid_name)
-        # Start from the highest counter the DB knows about, so we never
-        # reuse a counter if the folder is temporarily empty / unmounted.
-        db_max = self._db.get_max_counter(vid_folder, name) if self._db else 0
-        self._export_counter = max(1, db_max + 1)
-        # Then also skip any files that exist on disk.
+        vid_num = int(vid_name.split("_")[-1])
+        # Find next manual export number (m1, m2, ...)
+        self._export_counter = 1
         while True:
-            test_path = build_export_path(vid_folder, name, self._export_counter, sub=0)
+            tag = f"m{self._export_counter}"
+            test_path = build_export_path(vid_folder, name, vid_num, sub=0, tag=tag)
             if not os.path.exists(test_path):
                 break
             self._export_counter += 1
         n = self._spn_clips.value()
-        base = f"{name}_{self._export_counter:03d}"
+        base = f"{name}_{vid_num:03d}_m{self._export_counter}"
         if n == 1:
             self._lbl_next.setText(f"→ {vid_name}/{base}_0")
         else:
@@ -4820,27 +4819,29 @@ class MainWindow(QMainWindow):
             vid_name = self._get_vid_folder(folder)
             vid_folder = os.path.join(folder, vid_name)
             os.makedirs(vid_folder, exist_ok=True)
-            # For subprofile exports, calculate counter independently.
+            vid_num = int(vid_name.split("_")[-1])
+            # For subprofile exports, calculate manual counter independently.
             if folder_suffix:
-                db_max_sub = self._db.get_max_counter(vid_folder, name) if self._db else 0
-                counter = max(1, db_max_sub + 1)
+                manual_n = 1
                 while True:
+                    tag = f"m{manual_n}"
                     if image_sequence:
-                        p = build_sequence_dir(vid_folder, name, counter, sub=0)
+                        p = build_sequence_dir(vid_folder, name, vid_num, sub=0, tag=tag)
                     else:
-                        p = build_export_path(vid_folder, name, counter, sub=0)
+                        p = build_export_path(vid_folder, name, vid_num, sub=0, tag=tag)
                     if not os.path.exists(p):
                         break
-                    counter += 1
+                    manual_n += 1
             else:
-                counter = self._export_counter
+                manual_n = self._export_counter
+            tag = f"m{manual_n}"
             jobs = []
             for sub in range(n_clips):
                 start = self._cursor + sub * spread
                 if image_sequence:
-                    out = build_sequence_dir(vid_folder, name, counter, sub=sub)
+                    out = build_sequence_dir(vid_folder, name, vid_num, sub=sub, tag=tag)
                 else:
-                    out = build_export_path(vid_folder, name, counter, sub=sub)
+                    out = build_export_path(vid_folder, name, vid_num, sub=sub, tag=tag)
                 jobs.append((start, out, base_ratio, base_center))
 
             # Apply crop keyframes (or fall back to base state).
