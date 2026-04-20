@@ -973,10 +973,9 @@ class ScanResultsPanel(QWidget):
         return ""
 
     def _on_selection_changed(self, table: QTableWidget) -> None:
-        items = table.selectedItems()
-        if items:
-            row = items[0].row()
-            start = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
+        cur = table.currentItem()
+        if cur is not None:
+            start = table.item(cur.row(), 0).data(Qt.ItemDataRole.UserRole + 1)
             if start is not None:
                 self.seek_requested.emit(float(start))
 
