@@ -881,6 +881,8 @@ class ScanResultsPanel(QWidget):
 
         table.itemSelectionChanged.connect(
             lambda t=table: self._on_selection_changed(t))
+        table.cellClicked.connect(
+            lambda r, c, t=table: self._on_cell_clicked(t, r, c))
         table.cellChanged.connect(
             lambda r, c, t=table: self._on_cell_changed(t, r, c))
         container_layout.addWidget(table)
@@ -973,18 +975,27 @@ class ScanResultsPanel(QWidget):
         return ""
 
     def _on_selection_changed(self, table: QTableWidget) -> None:
-        selected = table.selectedItems()
+        """Handle keyboard navigation (arrows) — seek to start of current row."""
         cur = table.currentItem()
-        # If current item was deselected, fall back to last selected row
-        if cur is not None and cur.isSelected():
-            row = cur.row()
-        elif selected:
-            row = selected[-1].row()
-        else:
-            return
-        start = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
+        if cur is None or not cur.isSelected():
+            selected = table.selectedItems()
+            if not selected:
+                return
+            cur = selected[-1]
+        start = table.item(cur.row(), 0).data(Qt.ItemDataRole.UserRole + 1)
         if start is not None:
             self.seek_requested.emit(float(start))
+
+    def _on_cell_clicked(self, table: QTableWidget, row: int, col: int) -> None:
+        """Click Time → seek to start; click End → seek to last 3s of clip."""
+        if col == 1:
+            end = table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+            if end is not None:
+                self.seek_requested.emit(max(0.0, float(end) - 3.0))
+        else:
+            start = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
+            if start is not None:
+                self.seek_requested.emit(float(start))
 
     def _on_cell_changed(self, table: QTableWidget, row: int, col: int) -> None:
         """Handle user editing a Time or End cell — parse and update DB."""
