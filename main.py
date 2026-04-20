@@ -4182,6 +4182,8 @@ class MainWindow(QMainWindow):
     def _on_scan_seek(self, t: float) -> None:
         """Seek player when a scan result row is clicked."""
         if self._file_path:
+            if not self._btn_scan_mode.isChecked():
+                self._btn_scan_mode.setChecked(True)
             self._cursor = t
             self._mpv.seek(t)
             self._timeline.set_cursor(t)
