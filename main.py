@@ -195,7 +195,7 @@ class ScanWorker(QThread):
     progress = pyqtSignal(str)    # status message
 
     def __init__(self, video_path: str, model: dict,
-                 threshold: float = 0.30,
+                 threshold: float = 0.50,
                  prefetched_audio=None):
         super().__init__()
         self._video_path = video_path
@@ -2694,6 +2694,7 @@ class MainWindow(QMainWindow):
         self._cursor: float = 0.0
         self._export_counter: int = 1
         self._export_worker: ExportWorker | None = None
+        self._export_queue: list[dict] = []
         self._last_export_path: str = ""
         self._overwrite_path: str = ""   # set when a marker is selected for re-export
         self._overwrite_group: list[str] = []  # all output_paths in the selected group
@@ -2959,7 +2960,7 @@ class MainWindow(QMainWindow):
         self._sld_threshold.setDecimals(2)
         self._sld_threshold.setRange(0.0, 1.0)
         self._sld_threshold.setSingleStep(0.01)
-        self._sld_threshold.setValue(0.30)
+        self._sld_threshold.setValue(0.50)
         self._sld_threshold.setPrefix("Thr: ")
         self._sld_threshold.setToolTip("Similarity threshold (0=match everything, 1=exact match)")
 
@@ -4491,9 +4492,6 @@ class MainWindow(QMainWindow):
         if not self._file_path:
             self._show_status("No video loaded")
             return
-        if self._export_worker and self._export_worker.isRunning():
-            self._show_status("Export already running…")
-            return
         if self._scan_worker and self._scan_worker.isRunning():
             self._show_status("Scan already running")
             return
@@ -4614,38 +4612,70 @@ class MainWindow(QMainWindow):
 
         # Clips go flat inside vid folder, numbered by video
         jobs = []
-        self._auto_export_positions = []
+        positions = []
         for area_idx, group in enumerate(groups):
             group_name = f"{name}_{vid_num:03d}_a{area_idx + 1}"
             for sub, start_t in enumerate(group):
                 fname = f"{group_name}_{sub}{ext}"
                 out = os.path.join(vid_folder, fname)
                 jobs.append((start_t, out, None, 0.5))
-                self._auto_export_positions.append((start_t, out))
-
-        self._show_status(f"Auto: exporting {len(jobs)} clips...")
+                positions.append((start_t, out))
 
         short_side = self._spn_resize.value() or None
-        self._export_short_side = short_side
-        self._export_portrait = "Off"
-        self._export_crop_center = 0.5
-        self._export_format = fmt
-        self._export_clip_count = 1
-        self._export_spread = spread
-        self._export_folder = folder
-        self._export_folder_suffix = ""
-        self._export_profile = self._profile
-
         hw_on = self._chk_hw.isChecked() and self._hw_encoders
         encoder = self._hw_encoders[0] if hw_on else "libx264"
         max_workers = min(self._spn_workers.value(), 3) if hw_on else self._spn_workers.value()
+        is_scan = getattr(self, '_auto_export_no_markers', False)
+
+        batch = {
+            "jobs": jobs,
+            "positions": positions,
+            "file_path": self._file_path,
+            "short_side": short_side,
+            "image_sequence": image_sequence,
+            "max_workers": max_workers,
+            "encoder": encoder,
+            "spread": spread,
+            "folder": folder,
+            "format": fmt,
+            "profile": self._profile,
+            "is_scan": is_scan,
+        }
+
+        if self._export_worker and self._export_worker.isRunning():
+            self._export_queue.append(batch)
+            n = len(self._export_queue)
+            self._show_status(f"Auto: queued ({n} pending)")
+            self._btn_auto_export.setEnabled(True)
+            return
+
+        self._start_export_batch(batch)
+
+    def _start_export_batch(self, batch: dict) -> None:
+        """Start an export batch immediately."""
+        self._auto_export_positions = batch["positions"]
+        self._export_short_side = batch["short_side"]
+        self._export_portrait = "Off"
+        self._export_crop_center = 0.5
+        self._export_format = batch["format"]
+        self._export_clip_count = 1
+        self._export_spread = batch["spread"]
+        self._export_folder = batch["folder"]
+        self._export_folder_suffix = ""
+        self._export_profile = batch["profile"]
+        self._auto_export_no_markers = batch["is_scan"]
+        self._export_batch_file = batch["file_path"]
+
+        n_queued = len(self._export_queue)
+        q_msg = f" ({n_queued} queued)" if n_queued else ""
+        self._show_status(f"Auto: exporting {len(batch['jobs'])} clips...{q_msg}")
 
         self._export_worker = ExportWorker(
-            self._file_path, jobs,
-            short_side=short_side,
-            image_sequence=image_sequence,
-            max_workers=max_workers,
-            encoder=encoder,
+            batch["file_path"], batch["jobs"],
+            short_side=batch["short_side"],
+            image_sequence=batch["image_sequence"],
+            max_workers=batch["max_workers"],
+            encoder=batch["encoder"],
         )
         self._export_worker.finished.connect(self._on_auto_clip_done)
         self._export_worker.all_done.connect(self._on_auto_batch_done)
@@ -4664,10 +4694,11 @@ class MainWindow(QMainWindow):
                 start_t = t
                 break
         is_scan = getattr(self, '_auto_export_no_markers', False)
+        batch_file = getattr(self, '_export_batch_file', self._file_path)
         label = self._txt_label.currentText().strip()
         category = self._cmb_category.currentText()
         self._db.add(
-            os.path.basename(self._file_path),
+            os.path.basename(batch_file),
             start_t,
             path,
             label=label,
@@ -4679,27 +4710,45 @@ class MainWindow(QMainWindow):
             clip_count=1,
             spread=self._export_spread,
             profile=self._export_profile,
-            source_path=self._file_path,
+            source_path=batch_file,
             scan_export=is_scan,
         )
         if not is_scan:
             upsert_clip_annotation(self._export_folder, path, label)
-        self._show_status(f"Auto: {os.path.basename(path)}")
+        n_queued = len(self._export_queue)
+        q_msg = f" ({n_queued} queued)" if n_queued else ""
+        self._show_status(f"Auto: {os.path.basename(path)}{q_msg}")
         _log(f"  auto clip done: {os.path.basename(path)}")
 
     def _on_auto_batch_done(self):
         n = len(self._auto_export_positions)
+        batch_file = getattr(self, '_export_batch_file', self._file_path)
+        batch_profile = self._export_profile
+
+        # Mark the batch's video as done in playlist
+        n_clips = self._db.get_clip_count(os.path.basename(batch_file), batch_profile)
+        self._playlist.mark_done(batch_file, n_clips)
+
+        # If current video matches the batch, refresh its markers
+        if self._file_path == batch_file:
+            self._refresh_markers()
+            self._update_next_label()
+
+        _log(f"Auto export complete: {n} clips ({os.path.basename(batch_file)})")
+
+        # Drain queue
+        if self._export_queue:
+            next_batch = self._export_queue.pop(0)
+            self._show_status(f"Auto: starting next batch ({len(self._export_queue)} remaining)")
+            self._start_export_batch(next_batch)
+            return
+
         self._btn_auto_export.setEnabled(True)
         self._btn_cancel.setEnabled(False)
         self._btn_export.setEnabled(True)
         self._set_subprofile_btns_enabled(True)
         self._auto_export_no_markers = False
-        self._refresh_markers()
-        n_clips = self._db.get_clip_count(os.path.basename(self._file_path), self._profile)
-        self._playlist.mark_done(self._file_path, n_clips)
-        self._update_next_label()
         self._show_status(f"Auto export complete: {n} clips")
-        _log(f"Auto export complete: {n} clips")
 
     def _jump_to_next_scan_region(self) -> None:
         regions = sorted(self._timeline._scan_regions, key=lambda r: r[0])
@@ -5005,7 +5054,9 @@ class MainWindow(QMainWindow):
             self._show_status("Cancelling export…")
 
     def _on_export_cancelled(self):
-        _log("Export cancelled")
+        n_dropped = len(self._export_queue)
+        self._export_queue.clear()
+        _log(f"Export cancelled (dropped {n_dropped} queued)")
         self._btn_export.setEnabled(True)
         self._btn_auto_export.setEnabled(True)
         self._set_subprofile_btns_enabled(True)
@@ -5016,7 +5067,10 @@ class MainWindow(QMainWindow):
         n_clips = self._db.get_clip_count(os.path.basename(self._file_path), self._profile)
         if n_clips:
             self._playlist.mark_done(self._file_path, n_clips)
-        self._show_status("Export cancelled", 4000)
+        msg = "Export cancelled"
+        if n_dropped:
+            msg += f" ({n_dropped} queued batches dropped)"
+        self._show_status(msg, 4000)
 
     def changeEvent(self, event):
         super().changeEvent(event)
