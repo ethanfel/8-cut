@@ -4609,23 +4609,19 @@ class MainWindow(QMainWindow):
         vid_folder = os.path.join(folder, vid_name)
         os.makedirs(vid_folder, exist_ok=True)
 
-        # Find next counter within the vid folder
-        db_max = self._db.get_max_counter(vid_folder, name) if self._db else 0
-        counter = max(1, db_max + 1)
-        while os.path.exists(build_export_path(vid_folder, name, counter, sub=0)):
-            counter += 1
+        # Extract vid number to use as clip number (vid_003 → 3)
+        vid_num = int(vid_name.split("_")[-1])
 
-        # Clips go flat inside vid folder, numbered sequentially
+        # Clips go flat inside vid folder, numbered by video
         jobs = []
         self._auto_export_positions = []
         for area_idx, group in enumerate(groups):
-            group_name = f"{name}_{counter:03d}"
+            group_name = f"{name}_{vid_num:03d}_a{area_idx + 1}"
             for sub, start_t in enumerate(group):
-                fname = f"{group_name}_a{area_idx + 1}_{sub}{ext}"
+                fname = f"{group_name}_{sub}{ext}"
                 out = os.path.join(vid_folder, fname)
                 jobs.append((start_t, out, None, 0.5))
                 self._auto_export_positions.append((start_t, out))
-            counter += 1
 
         self._show_status(f"Auto: exporting {len(jobs)} clips...")
 
