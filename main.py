@@ -973,11 +973,18 @@ class ScanResultsPanel(QWidget):
         return ""
 
     def _on_selection_changed(self, table: QTableWidget) -> None:
+        selected = table.selectedItems()
         cur = table.currentItem()
-        if cur is not None:
-            start = table.item(cur.row(), 0).data(Qt.ItemDataRole.UserRole + 1)
-            if start is not None:
-                self.seek_requested.emit(float(start))
+        # If current item was deselected, fall back to last selected row
+        if cur is not None and cur.isSelected():
+            row = cur.row()
+        elif selected:
+            row = selected[-1].row()
+        else:
+            return
+        start = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
+        if start is not None:
+            self.seek_requested.emit(float(start))
 
     def _on_cell_changed(self, table: QTableWidget, row: int, col: int) -> None:
         """Handle user editing a Time or End cell — parse and update DB."""
