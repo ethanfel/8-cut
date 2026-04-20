@@ -423,22 +423,25 @@ class ProcessedDB:
         """Return the vid_NNN folder name for a source video.
 
         Checks existing DB output_paths first; if the video already has a
-        vid_NNN folder, returns it.  Otherwise assigns the next available
-        number, also checking disk for orphan vid folders.
+        vid_NNN folder, returns it.  Otherwise assigns max(existing) + 1,
+        also checking disk for orphan vid folders.
         """
         if not self._enabled:
             return "vid_001"
+        # Use the most recent entry (ORDER BY rowid DESC) for determinism
+        # when a file has entries across multiple vid folders.
         row = self._con.execute(
             "SELECT output_path FROM processed"
-            " WHERE filename = ? AND profile = ? LIMIT 1",
+            " WHERE filename = ? AND profile = ?"
+            " ORDER BY rowid DESC LIMIT 1",
             (filename, profile),
         ).fetchone()
         if row:
             parent = os.path.basename(os.path.dirname(row[0]))
             if parent.startswith("vid_"):
                 return parent
-        # Collect all existing vid_NNN names from DB + disk
-        existing: set[str] = set()
+        # Collect max vid_NNN number from DB + disk (never reuse old numbers)
+        max_n = 0
         rows = self._con.execute(
             "SELECT DISTINCT output_path FROM processed WHERE profile = ?",
             (profile,),
@@ -446,17 +449,20 @@ class ProcessedDB:
         for (op,) in rows:
             p = os.path.basename(os.path.dirname(op))
             if p.startswith("vid_"):
-                existing.add(p)
+                try:
+                    max_n = max(max_n, int(p.split("_")[1]))
+                except (IndexError, ValueError):
+                    pass
         if os.path.isdir(export_folder):
             for d in os.listdir(export_folder):
                 if d.startswith("vid_") and os.path.isdir(
                     os.path.join(export_folder, d)
                 ):
-                    existing.add(d)
-        n = 1
-        while f"vid_{n:03d}" in existing:
-            n += 1
-        return f"vid_{n:03d}"
+                    try:
+                        max_n = max(max_n, int(d.split("_")[1]))
+                    except (IndexError, ValueError):
+                        pass
+        return f"vid_{max_n + 1:03d}"
 
     def get_export_folders(self, profile: str = "default",
                            include_scan_exports: bool = False) -> list[str]:
