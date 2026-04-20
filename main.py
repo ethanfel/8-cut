@@ -1368,8 +1368,14 @@ class ScanResultsPanel(QWidget):
             super().keyPressEvent(event)
 
 
+_WAVEFORM_CACHE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "cache", "waveforms",
+)
+
+
 class WaveformWorker(QThread):
-    """Extract a low-res waveform envelope in the background."""
+    """Extract a low-res waveform envelope in the background (with disk cache)."""
     done = pyqtSignal(object)  # emits numpy array of peak values
 
     def __init__(self, video_path: str, n_bins: int = 2000):
@@ -1377,9 +1383,22 @@ class WaveformWorker(QThread):
         self._path = video_path
         self._n_bins = n_bins
 
+    @staticmethod
+    def _cache_path(video_path: str) -> str:
+        import hashlib
+        h = hashlib.md5(video_path.encode()).hexdigest()
+        return os.path.join(_WAVEFORM_CACHE_DIR, f"{h}.npy")
+
     def run(self):
         import numpy as np
         try:
+            # Check cache first
+            cache = self._cache_path(self._path)
+            if os.path.exists(cache):
+                peaks = np.load(cache)
+                self.done.emit(peaks)
+                return
+
             cmd = [
                 _bin("ffmpeg"), "-i", self._path,
                 "-vn", "-ac", "1", "-ar", "8000",
@@ -1399,6 +1418,9 @@ class WaveformWorker(QThread):
             mx = peaks.max()
             if mx > 0:
                 peaks = peaks / mx
+            # Save to cache
+            os.makedirs(_WAVEFORM_CACHE_DIR, exist_ok=True)
+            np.save(cache, peaks)
             self.done.emit(peaks)
         except Exception:
             pass
