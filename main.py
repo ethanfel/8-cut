@@ -709,6 +709,7 @@ class TrainWorker(QThread):
 class ScanResultsPanel(QWidget):
     """Tabbed panel showing scan results per model, with disable/resize/negatives."""
     seek_requested = pyqtSignal(float)   # request main window to seek to time
+    active_region_changed = pyqtSignal(float, float)  # (start, end) of focused row
     export_requested = pyqtSignal(list)  # emit list of (start, end, score) to export
     negatives_requested = pyqtSignal(list)  # emit list of start times to mark as hard negatives
     negatives_removed = pyqtSignal(list)   # emit list of start times to un-mark as negatives
@@ -974,6 +975,12 @@ class ScanResultsPanel(QWidget):
             return self._tabs.tabText(idx).split(" (")[0]
         return ""
 
+    def _emit_active_region(self, table: QTableWidget, row: int) -> None:
+        start = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
+        end = table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+        if start is not None and end is not None:
+            self.active_region_changed.emit(float(start), float(end))
+
     def _on_selection_changed(self, table: QTableWidget) -> None:
         """Handle keyboard navigation (arrows) — seek to start of current row."""
         cur = table.currentItem()
@@ -985,6 +992,7 @@ class ScanResultsPanel(QWidget):
         start = table.item(cur.row(), 0).data(Qt.ItemDataRole.UserRole + 1)
         if start is not None:
             self.seek_requested.emit(float(start))
+            self._emit_active_region(table, cur.row())
 
     def _on_cell_clicked(self, table: QTableWidget, row: int, col: int) -> None:
         """Click Time → seek to start; click End → seek to last 3s of clip."""
@@ -996,6 +1004,7 @@ class ScanResultsPanel(QWidget):
             start = table.item(row, 0).data(Qt.ItemDataRole.UserRole + 1)
             if start is not None:
                 self.seek_requested.emit(float(start))
+        self._emit_active_region(table, row)
 
     def _on_cell_changed(self, table: QTableWidget, row: int, col: int) -> None:
         """Handle user editing a Time or End cell — parse and update DB."""
@@ -1468,6 +1477,7 @@ class TimelineWidget(QWidget):
         # (start, end, score, orig_start, orig_end)
         self._scan_regions: list[tuple[float, float, float, float, float]] = []
         self._scan_neg_times: set[float] = set()
+        self._active_scan_region: tuple[float, float] | None = None
 
         # Waveform data (numpy array of 0-1 peak values, or None)
         self._waveform = None
@@ -1538,13 +1548,24 @@ class TimelineWidget(QWidget):
                 normed.append((r[0], r[1], r[2], r[0], r[1]))
         self._scan_regions = normed
         self._scan_neg_times = neg_times or set()
+        self._active_scan_region = None
         self._drag_idx = None
         self.update()
 
     def clear_scan_regions(self) -> None:
         self._scan_regions = []
+        self._active_scan_region = None
         self._drag_idx = None
         self.update()
+
+    def set_active_scan_region(self, start: float, end: float) -> None:
+        self._active_scan_region = (start, end)
+        self.update()
+
+    def clear_active_scan_region(self) -> None:
+        if self._active_scan_region is not None:
+            self._active_scan_region = None
+            self.update()
 
     def set_play_position(self, t: float | None) -> None:
         # In lock mode, ignore mpv position updates while the user is dragging
@@ -1714,6 +1735,15 @@ class TimelineWidget(QWidget):
                     p.setPen(QPen(QColor(255, 255, 255, 140), 1))
                     p.drawLine(x1, rh, x1, h)
                     p.drawLine(x2, rh, x2, h)
+
+                # Active region highlight (bright yellow outline)
+                if self._active_scan_region is not None:
+                    a_start, a_end = self._active_scan_region
+                    ax1 = int(a_start / self._duration * w)
+                    ax2 = int(a_end / self._duration * w)
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.setPen(QPen(QColor(255, 210, 0), 2))
+                    p.drawRect(ax1, rh + 1, max(ax2 - ax1, 1), h - rh - 2)
 
             # ── export markers ────────────────────────────────────────────
             if not self._scan_mode:
@@ -3199,6 +3229,8 @@ class MainWindow(QMainWindow):
         # Scan results panel (right side)
         self._scan_panel = ScanResultsPanel(self._db)
         self._scan_panel.seek_requested.connect(self._on_scan_seek)
+        self._scan_panel.active_region_changed.connect(
+            self._timeline.set_active_scan_region)
         self._scan_panel.export_requested.connect(self._on_scan_export)
         self._scan_panel.negatives_requested.connect(self._on_scan_negatives)
         self._scan_panel.negatives_removed.connect(self._on_scan_negatives_removed)
