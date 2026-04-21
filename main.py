@@ -716,6 +716,7 @@ class ScanResultsPanel(QWidget):
     negatives_removed = pyqtSignal(list)   # emit list of start times to un-mark as negatives
     tab_changed = pyqtSignal()           # active tab changed
     regions_edited = pyqtSignal()        # a region was resized or toggled
+    selection_changed = pyqtSignal()     # user's row selection changed
 
     # UserRole slots per item:
     #   col 0: UserRole   = row_id (int)
@@ -1028,6 +1029,7 @@ class ScanResultsPanel(QWidget):
 
     def _on_selection_changed(self, table: QTableWidget) -> None:
         """Handle keyboard navigation (arrows) — seek to start of current row."""
+        self.selection_changed.emit()
         cur = table.currentItem()
         if cur is None or not cur.isSelected():
             selected = table.selectedItems()
@@ -1290,30 +1292,14 @@ class ScanResultsPanel(QWidget):
         table = self._current_table()
         if table is None:
             return
-        selected_rows = sorted({idx.row() for idx in table.selectedIndexes()})
-        if selected_rows:
-            regions: list[tuple[float, float, float]] = []
-            for r in selected_rows:
-                item0 = table.item(r, 0)
-                if item0 is None:
-                    continue
-                if item0.data(Qt.ItemDataRole.UserRole + 2):
-                    continue  # disabled
-                start = item0.data(Qt.ItemDataRole.UserRole + 1)
-                end = table.item(r, 1).data(Qt.ItemDataRole.UserRole)
-                if start is None or end is None:
-                    continue
-                if float(start) in self._neg_times:
-                    continue
-                score = float(table.item(r, 2).text())
-                regions.append((float(start), float(end), score))
-            replace_all = False
+        sel = self.selected_regions()
+        if sel:
+            self.export_requested.emit(sel, False)
         else:
             regions = [r for r in self._get_tab_regions(table)
                        if r[0] not in self._neg_times]
-            replace_all = True
-        if regions:
-            self.export_requested.emit(regions, replace_all)
+            if regions:
+                self.export_requested.emit(regions, True)
 
     def current_regions(self) -> list[tuple[float, float, float]]:
         """Return (start, end, score) for enabled rows in the active tab."""
@@ -1345,12 +1331,36 @@ class ScanResultsPanel(QWidget):
                     table.blockSignals(False)
                 return
 
-    def set_export_count(self, n: int) -> None:
+    def set_export_count(self, n: int, partial: bool = False) -> None:
         """Update the export button label with estimated clip count."""
-        if n > 0:
+        if partial and n > 0:
+            self._btn_export.setText(f"Export Selected ({n})")
+        elif n > 0:
             self._btn_export.setText(f"Export Scan Results ({n})")
         else:
             self._btn_export.setText("Export Scan Results")
+
+    def selected_regions(self) -> list[tuple[float, float, float]]:
+        """Return (start, end, score) for rows selected in the active tab,
+        excluding disabled and negative rows."""
+        table = self._current_table()
+        if table is None:
+            return []
+        rows = sorted({idx.row() for idx in table.selectedIndexes()})
+        out: list[tuple[float, float, float]] = []
+        for r in rows:
+            item0 = table.item(r, 0)
+            if item0 is None or item0.data(Qt.ItemDataRole.UserRole + 2):
+                continue
+            start = item0.data(Qt.ItemDataRole.UserRole + 1)
+            end = table.item(r, 1).data(Qt.ItemDataRole.UserRole)
+            if start is None or end is None:
+                continue
+            if float(start) in self._neg_times:
+                continue
+            score = float(table.item(r, 2).text())
+            out.append((float(start), float(end), score))
+        return out
 
     def has_results(self) -> bool:
         return self._tabs.count() > 0
@@ -1817,17 +1827,16 @@ class TimelineWidget(QWidget):
                     p.drawRect(ax1, rh + 1, max(ax2 - ax1, 1), h - rh - 2)
 
             # ── export markers ────────────────────────────────────────────
-            if not self._scan_mode:
-                p.setFont(self._marker_font)
-                for (t, num, _path) in self._markers:
-                    mx = int(t / self._duration * w)
-                    p.setPen(self._marker_pen)
-                    p.drawLine(mx, rh, mx, h)
-                    # small filled rectangle label
-                    p.fillRect(mx, rh + 2, 14, 12, QColor(200, 50, 50))
-                    p.setPen(QColor(255, 255, 255))
-                    p.drawText(mx + 1, rh + 2, 13, 12,
-                               Qt.AlignmentFlag.AlignCenter, str(num))
+            p.setFont(self._marker_font)
+            for (t, num, _path) in self._markers:
+                mx = int(t / self._duration * w)
+                p.setPen(self._marker_pen)
+                p.drawLine(mx, rh, mx, h)
+                # small filled rectangle label
+                p.fillRect(mx, rh + 2, 14, 12, QColor(200, 50, 50))
+                p.setPen(QColor(255, 255, 255))
+                p.drawText(mx + 1, rh + 2, 13, 12,
+                           Qt.AlignmentFlag.AlignCenter, str(num))
 
             # ── scan mode cursor + playback line ─────────────────────────
             if self._scan_mode:
@@ -3308,6 +3317,7 @@ class MainWindow(QMainWindow):
         self._scan_panel.negatives_removed.connect(self._on_scan_negatives_removed)
         self._scan_panel.tab_changed.connect(self._on_scan_regions_edited)
         self._scan_panel.regions_edited.connect(self._on_scan_regions_edited)
+        self._scan_panel.selection_changed.connect(self._update_scan_export_count)
         self._sld_threshold.valueChanged.connect(self._on_threshold_changed)
 
         # Root: horizontal splitter
@@ -4336,7 +4346,13 @@ class MainWindow(QMainWindow):
     def _update_scan_export_count(self) -> None:
         """Recalculate and display estimated clip count on the export button."""
         neg = self._scan_panel._neg_times
-        regions = [r for r in self._scan_panel.current_regions() if r[0] not in neg]
+        sel = self._scan_panel.selected_regions()
+        if sel:
+            regions = sel
+            partial = True
+        else:
+            regions = [r for r in self._scan_panel.current_regions() if r[0] not in neg]
+            partial = False
         if not regions:
             self._scan_panel.set_export_count(0)
             return
@@ -4345,7 +4361,7 @@ class MainWindow(QMainWindow):
             spread=self._spn_spread.value(),
         )
         n = sum(len(g) for g in groups)
-        self._scan_panel.set_export_count(n)
+        self._scan_panel.set_export_count(n, partial=partial)
 
     def _on_scan_export(self, regions: list, replace_all: bool = True) -> None:
         """Export clips from scan results panel. replace_all=False for partial."""
