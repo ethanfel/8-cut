@@ -1681,11 +1681,19 @@ class TimelineWidget(QWidget):
         self._locked = False                 # when True, clicks scrub playback, not cursor
         self._crop_keyframes: list[tuple[float, float, str | None, bool, bool]] = []
         self._markers: list[tuple[float, int, str]] = []
-        self._hover_cache: list[tuple[float, str]] = []  # (t/duration, path)
         # (start, end, score, orig_start, orig_end)
         self._scan_regions: list[tuple[float, float, float, float, float]] = []
         self._scan_neg_times: set[float] = set()
         self._active_scan_region: tuple[float, float] | None = None
+
+        # View window for zoom/pan. When _view_span <= 0 the full duration is shown.
+        self._view_start: float = 0.0
+        self._view_span: float = 0.0
+        self._MIN_VIEW_SPAN = 0.25  # seconds — hard floor on zoom-in
+        # Middle-mouse pan state
+        self._pan_active = False
+        self._pan_start_x = 0.0
+        self._pan_start_view = 0.0
 
         # Waveform data (numpy array of 0-1 peak values, or None)
         self._waveform = None
@@ -1719,7 +1727,8 @@ class TimelineWidget(QWidget):
         self._duration = duration
         self._cursor = 0.0
         self._play_pos = None
-        self._rebuild_hover_cache()
+        self._view_start = 0.0
+        self._view_span = 0.0
         self.update()
 
     def set_waveform(self, peaks) -> None:
@@ -1743,7 +1752,6 @@ class TimelineWidget(QWidget):
     def set_markers(self, markers: list[tuple[float, int, str]]) -> None:
         """markers: list of (start_time, number, output_path)"""
         self._markers = markers
-        self._rebuild_hover_cache()
         self.update()
 
     def set_scan_regions(self, regions: list, neg_times: set[float] | None = None) -> None:
@@ -1787,30 +1795,44 @@ class TimelineWidget(QWidget):
         self._crop_keyframes = kfs
         self.update()
 
-    def _rebuild_hover_cache(self) -> None:
-        """Pre-compute (pixel_x_fraction, output_path) for hover detection."""
-        if self._duration > 0:
-            self._hover_cache = [
-                (t / self._duration, path)
-                for (t, _num, path) in self._markers
-            ]
-        else:
-            self._hover_cache: list[tuple[float, str]] = []
+    def _view_span_eff(self) -> float:
+        """Current visible time span (falls back to full duration)."""
+        if self._view_span > 0:
+            return self._view_span
+        return self._duration if self._duration > 0 else 1.0
+
+    def _time_to_x(self, t: float) -> float:
+        """Map a time (seconds) to pixel x in the current view window."""
+        w = self.width()
+        if w <= 0 or self._duration <= 0:
+            return 0.0
+        return (t - self._view_start) / self._view_span_eff() * w
 
     def _pos_to_time(self, x: int) -> float:
         if self._duration <= 0 or self.width() <= 0:
             return 0.0
-        ratio = max(0.0, min(1.0, x / self.width()))
-        return ratio * self._duration
+        t = self._view_start + (x / self.width()) * self._view_span_eff()
+        return max(0.0, min(t, self._duration))
+
+    def _clamp_view(self) -> None:
+        """Keep the view window inside [0, duration]."""
+        if self._duration <= 0:
+            self._view_start = 0.0
+            self._view_span = 0.0
+            return
+        if self._view_span <= 0 or self._view_span >= self._duration:
+            self._view_start = 0.0
+            self._view_span = 0.0
+            return
+        self._view_start = max(0.0, min(self._view_start, self._duration - self._view_span))
 
     def _hit_scan_edge(self, x: float) -> tuple[int, str] | None:
         """Return (region_index, 'left'|'right') if x is near a scan region edge."""
         if not self._scan_regions or self._duration <= 0:
             return None
-        w = self.width()
         for i, (start, end, score, os_, oe) in enumerate(self._scan_regions):
-            x1 = start / self._duration * w
-            x2 = end / self._duration * w
+            x1 = self._time_to_x(start)
+            x2 = self._time_to_x(end)
             if abs(x - x1) <= self._EDGE_PX:
                 return (i, "left")
             if abs(x - x2) <= self._EDGE_PX:
@@ -1842,9 +1864,11 @@ class TimelineWidget(QWidget):
                 return
 
             # ── time ruler ticks & labels ─────────────────────────────────
-            # Pick a tick interval so we get ~8-12 major ticks across the width
-            raw_step = self._duration / 10.0
-            for candidate in (0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300):
+            # Pick a tick interval so we get ~8-12 major ticks across the view
+            view_span = self._view_span_eff()
+            view_end = self._view_start + view_span
+            raw_step = view_span / 10.0
+            for candidate in (0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300):
                 if candidate >= raw_step:
                     major_step = candidate
                     break
@@ -1854,17 +1878,24 @@ class TimelineWidget(QWidget):
             minor_step = major_step / 5.0
             p.setFont(self._ruler_font)
 
-            t = 0.0
-            while t <= self._duration + minor_step * 0.1:
-                rx = int(t / self._duration * w)
-                is_major = (round(t / major_step) * major_step - t) < minor_step * 0.1
+            # Start at the first minor tick ≥ view_start
+            first_tick = (int(self._view_start / minor_step)) * minor_step
+            if first_tick < self._view_start:
+                first_tick += minor_step
+            t = first_tick
+            while t <= view_end + minor_step * 0.1:
+                rx = int(self._time_to_x(t))
+                is_major = abs(round(t / major_step) * major_step - t) < minor_step * 0.1
                 if is_major:
                     p.setPen(self._ruler_pen)
                     p.drawLine(rx, rh - 10, rx, rh)
-                    # label
-                    mins = int(t) // 60
-                    secs = int(t) % 60
-                    label = f"{mins}:{secs:02d}" if mins else f"{secs}s"
+                    # label — include decimals when zoomed in tight
+                    if major_step < 1.0:
+                        label = f"{t:.2f}s"
+                    else:
+                        mins = int(t) // 60
+                        secs = int(t) % 60
+                        label = f"{mins}:{secs:02d}" if mins else f"{secs}s"
                     p.setPen(QColor(160, 160, 160))
                     p.drawText(rx + 3, 0, 60, rh - 2,
                                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
@@ -1887,30 +1918,33 @@ class TimelineWidget(QWidget):
                 p.setBrush(QColor(80, 180, 80, 50))
                 from PyQt6.QtGui import QPolygonF
                 from PyQt6.QtCore import QPointF
+                # Only iterate peaks overlapping the view window — keeps zoomed-in detail sharp.
+                peak_dt = self._duration / n
+                i_start = max(0, int(self._view_start / peak_dt) - 1)
+                i_end = min(n, int((self._view_start + view_span) / peak_dt) + 2)
                 pts = []
-                # Top half (positive peaks)
-                for i in range(n):
-                    x = i * w / n
+                for i in range(i_start, i_end):
+                    x = self._time_to_x(i * peak_dt)
                     y = mid_y - self._waveform[i] * half_h
                     pts.append(QPointF(x, y))
-                # Bottom half (mirror)
-                for i in range(n - 1, -1, -1):
-                    x = i * w / n
+                for i in range(i_end - 1, i_start - 1, -1):
+                    x = self._time_to_x(i * peak_dt)
                     y = mid_y + self._waveform[i] * half_h
                     pts.append(QPointF(x, y))
-                p.drawPolygon(QPolygonF(pts))
+                if pts:
+                    p.drawPolygon(QPolygonF(pts))
 
             # ── selection region (full clip span) ─────────────────────────
-            x_start = int(self._cursor / self._duration * w)
+            x_start = int(self._time_to_x(self._cursor))
             if not self._scan_mode:
-                x_end   = int(min(self._cursor + self._clip_span, self._duration) / self._duration * w)
+                x_end   = int(self._time_to_x(min(self._cursor + self._clip_span, self._duration)))
                 sel_w   = max(x_end - x_start, 1)
                 p.fillRect(x_start, rh, sel_w, th, QColor(60, 130, 220, 90))
 
             # ── playback progress fill ────────────────────────────────────
             if not self._scan_mode and self._play_pos is not None and self._play_pos > self._cursor:
                 prog_end = min(self._play_pos, self._cursor + self._clip_span, self._duration)
-                x_prog = int(prog_end / self._duration * w)
+                x_prog = int(self._time_to_x(prog_end))
                 prog_w = max(x_prog - x_start, 0)
                 if prog_w > 0:
                     p.fillRect(x_start, rh, prog_w, th, QColor(100, 200, 255, 60))
@@ -1924,12 +1958,12 @@ class TimelineWidget(QWidget):
             # ── scan regions ──────────────────────────────────────────────
             if self._scan_regions and self._duration > 0:
                 for (start, end, score, os_, oe) in self._scan_regions:
-                    x1 = int(start / self._duration * w)
-                    x2 = int(end / self._duration * w)
+                    x1 = int(self._time_to_x(start))
+                    x2 = int(self._time_to_x(end))
                     alpha = int(40 + score * 80)  # 40–120 opacity
                     # Grey ghost for trimmed portions
-                    ox1 = int(os_ / self._duration * w)
-                    ox2 = int(oe / self._duration * w)
+                    ox1 = int(self._time_to_x(os_))
+                    ox2 = int(self._time_to_x(oe))
                     if ox1 < x1:
                         p.fillRect(ox1, rh, x1 - ox1, h - rh, QColor(120, 120, 120, 40))
                     if ox2 > x2:
@@ -1947,8 +1981,8 @@ class TimelineWidget(QWidget):
                 # Active region highlight (bright yellow outline)
                 if self._active_scan_region is not None:
                     a_start, a_end = self._active_scan_region
-                    ax1 = int(a_start / self._duration * w)
-                    ax2 = int(a_end / self._duration * w)
+                    ax1 = int(self._time_to_x(a_start))
+                    ax2 = int(self._time_to_x(a_end))
                     p.setBrush(Qt.BrushStyle.NoBrush)
                     p.setPen(QPen(QColor(255, 210, 0), 2))
                     p.drawRect(ax1, rh + 1, max(ax2 - ax1, 1), h - rh - 2)
@@ -1956,7 +1990,9 @@ class TimelineWidget(QWidget):
             # ── export markers ────────────────────────────────────────────
             p.setFont(self._marker_font)
             for (t, num, _path) in self._markers:
-                mx = int(t / self._duration * w)
+                mx = int(self._time_to_x(t))
+                if mx < -20 or mx > w + 20:
+                    continue
                 p.setPen(self._marker_pen)
                 p.drawLine(mx, rh, mx, h)
                 # small filled rectangle label
@@ -1972,7 +2008,7 @@ class TimelineWidget(QWidget):
                 p.drawLine(x_start, rh, x_start, h)
                 # Playback position (bright green)
                 if self._play_pos is not None and self._play_pos >= 0:
-                    px = int(self._play_pos / self._duration * w)
+                    px = int(self._time_to_x(self._play_pos))
                     p.setPen(QPen(QColor(80, 255, 80, 220), 2))
                     p.drawLine(px, rh, px, h)
 
@@ -1985,7 +2021,7 @@ class TimelineWidget(QWidget):
                     kt = kf[0]
                     rp = kf[3] if len(kf) > 3 else False
                     rs = kf[4] if len(kf) > 4 else False
-                    kx = int(kt / self._duration * w)
+                    kx = int(self._time_to_x(kt))
                     d = 4  # half-size of diamond
                     ky = h - d - 2  # near bottom of track
                     if rp and rs:
@@ -2037,6 +2073,13 @@ class TimelineWidget(QWidget):
 
     def mousePressEvent(self, event):
         x = event.position().x()
+        # Middle-mouse drag pans the view window.
+        if event.button() == Qt.MouseButton.MiddleButton and self._view_span > 0:
+            self._pan_active = True
+            self._pan_start_x = x
+            self._pan_start_view = self._view_start
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
         # Check for scan region edge drag — require Shift to avoid accidental resizes
         mods = event.modifiers()
         if mods & Qt.KeyboardModifier.ShiftModifier:
@@ -2055,23 +2098,41 @@ class TimelineWidget(QWidget):
         from PyQt6.QtCore import Qt as _Qt
         if event.button() == _Qt.MouseButton.LeftButton:
             x = event.position().x()
-            if self._hover_cache:
-                w = self.width()
-                for (frac, output_path) in self._hover_cache:
-                    if abs(x - frac * w) <= 10:
-                        t = frac * self._duration
-                        self.marker_clicked.emit(t, output_path)
-                        if not self._locked:
-                            self._seek(x)
-                        return
+            for (t, _num, output_path) in self._markers:
+                if abs(x - self._time_to_x(t)) <= 10:
+                    self.marker_clicked.emit(t, output_path)
+                    if not self._locked:
+                        self._seek(x)
+                    return
             self.marker_deselected.emit()
             self._seek(x)
 
     def mouseMoveEvent(self, event):
         x = event.position().x()
+        w = self.width()
 
-        # Active edge drag
+        # Active middle-mouse pan
+        if self._pan_active and event.buttons() & Qt.MouseButton.MiddleButton:
+            dx = x - self._pan_start_x
+            dt = -dx / max(w, 1) * self._view_span_eff()
+            self._view_start = self._pan_start_view + dt
+            self._clamp_view()
+            self.update()
+            return
+
+        # Active edge drag (with auto-pan near borders when zoomed)
         if self._drag_idx is not None and event.buttons():
+            if self._view_span > 0:
+                margin = 20
+                if x < margin:
+                    self._view_start = max(0.0, self._view_start - self._view_span * 0.05)
+                    self._clamp_view()
+                elif x > w - margin:
+                    self._view_start = min(
+                        self._duration - self._view_span,
+                        self._view_start + self._view_span * 0.05,
+                    )
+                    self._clamp_view()
             t = self._pos_to_time(int(x))
             r = self._scan_regions[self._drag_idx]
             start, end, score, os_, oe = r
@@ -2091,15 +2152,13 @@ class TimelineWidget(QWidget):
         else:
             self.unsetCursor()
 
-        # Check marker hover using pre-computed fractions.
-        if self._hover_cache:
-            w = self.width()
-            for (frac, output_path) in self._hover_cache:
-                if abs(x - frac * w) <= 8:
-                    QToolTip.showText(QCursor.pos(), os.path.basename(output_path), self)
-                    if event.buttons():
-                        self._seek(x)
-                    return
+        # Marker hover tooltip
+        for (t, _num, output_path) in self._markers:
+            if abs(x - self._time_to_x(t)) <= 8:
+                QToolTip.showText(QCursor.pos(), os.path.basename(output_path), self)
+                if event.buttons():
+                    self._seek(x)
+                return
         QToolTip.hideText()
         if event.buttons():
             self._seek(x)
@@ -2111,6 +2170,10 @@ class TimelineWidget(QWidget):
             self.cursor_changed.emit(self._cursor)
 
     def mouseReleaseEvent(self, event):
+        if self._pan_active and event.button() == Qt.MouseButton.MiddleButton:
+            self._pan_active = False
+            self.unsetCursor()
+            return
         if self._drag_idx is not None:
             # Emit resize signal with old and new bounds
             idx = self._drag_idx
@@ -2124,26 +2187,51 @@ class TimelineWidget(QWidget):
         self._seek_timer.stop()
         self._emit_seek()
 
+    def wheelEvent(self, event):
+        """Ctrl+wheel zooms the view around the mouse. Plain wheel is ignored
+        so the parent scroll area (if any) can consume it."""
+        if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            super().wheelEvent(event)
+            return
+        if self._duration <= 0 or self.width() <= 0:
+            return
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+        factor = 1.25 if delta > 0 else 1.0 / 1.25
+        mx = event.position().x()
+        t_mouse = self._pos_to_time(int(mx))
+        current_span = self._view_span_eff()
+        new_span = current_span / factor
+        new_span = max(self._MIN_VIEW_SPAN, min(new_span, self._duration))
+        if new_span >= self._duration:
+            self._view_start = 0.0
+            self._view_span = 0.0
+        else:
+            frac = mx / self.width()
+            self._view_start = t_mouse - frac * new_span
+            self._view_span = new_span
+            self._clamp_view()
+        self.update()
+        event.accept()
+
     def contextMenuEvent(self, event):
         if self._duration <= 0:
             return
         x = event.pos().x()
-        w = self.width()
         # Check keyframe diamonds first.
         hit_kf_time = None
         for kf in self._crop_keyframes:
             kt = kf[0]
-            kx = kt / self._duration * w
-            if abs(x - kx) <= 8:
+            if abs(x - self._time_to_x(kt)) <= 8:
                 hit_kf_time = kt
                 break
         # Check export markers.
         hit_path = None
-        if self._hover_cache:
-            for (frac, output_path) in self._hover_cache:
-                if abs(x - frac * w) <= 10:
-                    hit_path = output_path
-                    break
+        for (t, _num, output_path) in self._markers:
+            if abs(x - self._time_to_x(t)) <= 10:
+                hit_path = output_path
+                break
         from PyQt6.QtWidgets import QMenu
         menu = QMenu(self)
         act_kf = None
