@@ -1776,7 +1776,25 @@ class TimelineWidget(QWidget):
 
     def set_active_scan_region(self, start: float, end: float) -> None:
         self._active_scan_region = (start, end)
+        self._ensure_range_visible(start, end)
         self.update()
+
+    def _ensure_range_visible(self, start: float, end: float) -> None:
+        """If a zoomed view is active and [start, end] is partially/fully outside
+        it, pan (and if needed widen) the view so the range is visible."""
+        if self._view_span <= 0 or self._duration <= 0:
+            return
+        span = self._view_span
+        # If the range is wider than the view, widen the view to fit it (+10% margin).
+        needed = (end - start) * 1.1
+        if needed > span:
+            span = min(self._duration, needed)
+            self._view_span = span
+        view_end = self._view_start + span
+        if start < self._view_start or end > view_end:
+            center = (start + end) / 2.0
+            self._view_start = center - span / 2.0
+            self._clamp_view()
 
     def clear_active_scan_region(self) -> None:
         if self._active_scan_region is not None:
