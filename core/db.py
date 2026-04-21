@@ -418,6 +418,17 @@ class ProcessedDB:
                 pass
         return max_n
 
+    def get_scan_export_times(self, filename: str, profile: str) -> list[float]:
+        """Return start_times of scan_export=1 rows for this file/profile."""
+        if not self._enabled:
+            return []
+        rows = self._con.execute(
+            "SELECT start_time FROM processed"
+            " WHERE filename = ? AND profile = ? AND scan_export = 1",
+            (filename, profile),
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def delete_scan_exports(self, filename: str, profile: str) -> int:
         """Delete all scan_export entries for *filename* in *profile*.
 

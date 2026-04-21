@@ -728,6 +728,7 @@ class ScanResultsPanel(QWidget):
         self._filename = ""
         self._profile = ""
         self._neg_times: set[float] = set()
+        self._exported_times: list[float] = []
         self._editing = False  # guard against cellChanged during programmatic updates
         self._undo_stack: list[tuple] = []  # list of (action, *data)
 
@@ -792,6 +793,7 @@ class ScanResultsPanel(QWidget):
         self._filename = filename
         self._profile = profile
         self._neg_times = self._db.get_hard_negative_times(filename, profile)
+        self._exported_times = self._db.get_scan_export_times(filename, profile)
         self._tabs.blockSignals(True)
         self._tabs.clear()
         results = self._db.get_scan_results(filename, profile)
@@ -799,6 +801,51 @@ class ScanResultsPanel(QWidget):
             self._add_tab(model, rows)
         self._populate_version_combos()
         self._tabs.blockSignals(False)
+
+    def _is_row_exported(self, start: float, end: float) -> bool:
+        for t in self._exported_times:
+            if start <= t <= end:
+                return True
+        return False
+
+    def _row_fg(self, table: QTableWidget, row: int, disabled: bool,
+                default_fg: QColor) -> QColor:
+        if disabled:
+            return QColor(100, 100, 100)
+        item0 = table.item(row, 0)
+        item1 = table.item(row, 1)
+        start = item0.data(Qt.ItemDataRole.UserRole + 1) if item0 else None
+        end = item1.data(Qt.ItemDataRole.UserRole) if item1 else None
+        if start is not None and float(start) in self._neg_times:
+            return QColor(220, 60, 60)
+        if (start is not None and end is not None
+                and self._is_row_exported(float(start), float(end))):
+            return QColor(90, 200, 120)
+        return default_fg
+
+    def refresh_exported_state(self) -> None:
+        """Reload exported times from DB and recolor all visible rows."""
+        if not self._filename:
+            return
+        self._exported_times = self._db.get_scan_export_times(
+            self._filename, self._profile)
+        self._editing = True
+        for i in range(self._tabs.count()):
+            table = self._tab_table(i)
+            if table is None:
+                continue
+            default_fg = table.palette().color(table.foregroundRole())
+            for r in range(table.rowCount()):
+                item0 = table.item(r, 0)
+                if item0 is None:
+                    continue
+                disabled = item0.data(Qt.ItemDataRole.UserRole + 2) or False
+                fg = self._row_fg(table, r, disabled, default_fg)
+                for col in range(3):
+                    it = table.item(r, col)
+                    if it is not None:
+                        it.setForeground(fg)
+        self._editing = False
 
     def add_scan_results(self, model: str,
                          regions: list[tuple[float, float, float]]) -> None:
@@ -851,8 +898,7 @@ class ScanResultsPanel(QWidget):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
 
-        red = QColor(220, 60, 60)
-        gray = QColor(100, 100, 100)
+        default_fg = table.palette().color(table.foregroundRole())
         self._editing = True
         for i, (row_id, start, end, score, disabled, os_, oe) in enumerate(rows):
             t_item = QTableWidgetItem(format_time(start))
@@ -871,13 +917,11 @@ class ScanResultsPanel(QWidget):
             sc_item.setFlags(sc_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             table.setItem(i, 2, sc_item)
 
-            # Color: disabled (gray) > negative (red) > default
-            if disabled:
+            # Color: disabled (gray) > negative (red) > exported (green) > default
+            fg = self._row_fg(table, i, disabled, default_fg)
+            if fg != default_fg:
                 for col in range(3):
-                    table.item(i, col).setForeground(gray)
-            elif start in self._neg_times:
-                for col in range(3):
-                    table.item(i, col).setForeground(red)
+                    table.item(i, col).setForeground(fg)
         self._editing = False
 
         table.itemSelectionChanged.connect(
@@ -941,8 +985,7 @@ class ScanResultsPanel(QWidget):
                     return
                 self._editing = True
                 table.setRowCount(len(rows))
-                red = QColor(220, 60, 60)
-                gray = QColor(100, 100, 100)
+                default_fg = table.palette().color(table.foregroundRole())
                 for r, (row_id, start, end, score, disabled, os_, oe) in enumerate(rows):
                     t_item = QTableWidgetItem(format_time(start))
                     t_item.setData(Qt.ItemDataRole.UserRole, row_id)
@@ -957,12 +1000,10 @@ class ScanResultsPanel(QWidget):
                     sc_item = QTableWidgetItem(f"{score:.2f}")
                     sc_item.setFlags(sc_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     table.setItem(r, 2, sc_item)
-                    if disabled:
+                    fg = self._row_fg(table, r, disabled, default_fg)
+                    if fg != default_fg:
                         for col in range(3):
-                            table.item(r, col).setForeground(gray)
-                    elif start in self._neg_times:
-                        for col in range(3):
-                            table.item(r, col).setForeground(red)
+                            table.item(r, col).setForeground(fg)
                 self._editing = False
                 self._tabs.setTabText(i, f"{model} ({len(rows)})")
                 self.regions_edited.emit()
@@ -1056,25 +1097,16 @@ class ScanResultsPanel(QWidget):
                 for r in selected_rows]
         self._undo_stack.append(("disable", self._tabs.currentIndex(), prev))
 
-        gray = QColor(100, 100, 100)
-        red = QColor(220, 60, 60)
         default_fg = table.palette().color(table.foregroundRole())
         for row in selected_rows:
             item0 = table.item(row, 0)
             row_id = item0.data(Qt.ItemDataRole.UserRole)
-            start = item0.data(Qt.ItemDataRole.UserRole + 1)
             currently_disabled = item0.data(Qt.ItemDataRole.UserRole + 2) or False
             new_disabled = not currently_disabled
             item0.setData(Qt.ItemDataRole.UserRole + 2, new_disabled)
             if row_id is not None:
                 self._db.toggle_scan_result_disabled(row_id, new_disabled)
-            # Update visual
-            if new_disabled:
-                fg = gray
-            elif start is not None and float(start) in self._neg_times:
-                fg = red
-            else:
-                fg = default_fg
+            fg = self._row_fg(table, row, new_disabled, default_fg)
             for col in range(3):
                 table.item(row, col).setForeground(fg)
         self.regions_edited.emit()
@@ -1202,8 +1234,6 @@ class ScanResultsPanel(QWidget):
 
         add_times: list[float] = []
         remove_times: list[float] = []
-        red = QColor(220, 60, 60)
-        gray = QColor(100, 100, 100)
         default_fg = table.palette().color(table.foregroundRole())
         for row in selected_rows:
             item0 = table.item(row, 0)
@@ -1215,11 +1245,10 @@ class ScanResultsPanel(QWidget):
             if t in self._neg_times:
                 remove_times.append(t)
                 self._neg_times.discard(t)
-                fg = gray if disabled else default_fg
             else:
                 add_times.append(t)
                 self._neg_times.add(t)
-                fg = gray if disabled else red
+            fg = self._row_fg(table, row, disabled, default_fg)
             for col in range(3):
                 table.item(row, col).setForeground(fg)
         if add_times:
@@ -1287,8 +1316,6 @@ class ScanResultsPanel(QWidget):
             table = self._tab_table(tab_idx)
             if table is None:
                 return
-            gray = QColor(100, 100, 100)
-            red = QColor(220, 60, 60)
             default_fg = table.palette().color(table.foregroundRole())
             for row, was_disabled in prev:
                 if row >= table.rowCount():
@@ -1298,13 +1325,7 @@ class ScanResultsPanel(QWidget):
                 row_id = item0.data(Qt.ItemDataRole.UserRole)
                 if row_id is not None:
                     self._db.toggle_scan_result_disabled(row_id, was_disabled)
-                start = item0.data(Qt.ItemDataRole.UserRole + 1)
-                if was_disabled:
-                    fg = gray
-                elif start is not None and float(start) in self._neg_times:
-                    fg = red
-                else:
-                    fg = default_fg
+                fg = self._row_fg(table, row, was_disabled, default_fg)
                 for col in range(3):
                     table.item(row, col).setForeground(fg)
             self.regions_edited.emit()
@@ -4813,6 +4834,7 @@ class MainWindow(QMainWindow):
         if self._file_path == batch_file:
             self._refresh_markers()
             self._update_next_label()
+            self._scan_panel.refresh_exported_state()
 
         _log(f"Auto export complete: {n} clips ({os.path.basename(batch_file)})")
 
