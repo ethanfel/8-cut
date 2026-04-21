@@ -803,6 +803,41 @@ class ProcessedDB:
             )
             self._con.commit()
 
+    def insert_scan_result(self, filename: str, profile: str, model: str,
+                           start: float, end: float, score: float,
+                           disabled: bool, orig_start: float, orig_end: float,
+                           scan_timestamp: str = "") -> int:
+        """Insert a single scan result row; returns its new id."""
+        if not self._enabled:
+            return -1
+        with self._lock:
+            cur = self._con.execute(
+                "INSERT INTO scan_results"
+                " (filename, profile, model, start_time, end_time, score,"
+                "  disabled, orig_start_time, orig_end_time, scan_timestamp)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (filename, profile, model, start, end, score,
+                 1 if disabled else 0, orig_start, orig_end, scan_timestamp),
+            )
+            self._con.commit()
+            return int(cur.lastrowid or -1)
+
+    def update_scan_result_full(self, row_id: int, start: float, end: float,
+                                score: float, orig_start: float,
+                                orig_end: float) -> None:
+        """Update bounds, score and orig_* fields — used after merging rows."""
+        if not self._enabled:
+            return
+        with self._lock:
+            self._con.execute(
+                "UPDATE scan_results"
+                " SET start_time = ?, end_time = ?, score = ?,"
+                "     orig_start_time = ?, orig_end_time = ?"
+                " WHERE id = ?",
+                (start, end, score, orig_start, orig_end, row_id),
+            )
+            self._con.commit()
+
     def get_scan_models(self, filename: str, profile: str) -> list[str]:
         """Return model names that have scan results for this file."""
         if not self._enabled:

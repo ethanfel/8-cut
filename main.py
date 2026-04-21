@@ -1057,15 +1057,95 @@ class ScanResultsPanel(QWidget):
                 continue
             if self._is_row_exported(float(start), float(end)):
                 ranges.append((float(start), float(end)))
-        if not ranges:
-            return
         from PyQt6.QtWidgets import QMenu
         menu = QMenu(table)
-        n = len(ranges)
-        act = menu.addAction(f"Delete export{'s' if n > 1 else ''} for {n} row{'s' if n > 1 else ''}")
+        act_merge = None
+        act_delete = None
+        if len(selected_rows) >= 2:
+            act_merge = menu.addAction(f"Merge {len(selected_rows)} rows")
+        if ranges:
+            n = len(ranges)
+            act_delete = menu.addAction(
+                f"Delete export{'s' if n > 1 else ''} for {n} row{'s' if n > 1 else ''}")
+        if menu.isEmpty():
+            return
         chosen = menu.exec(table.viewport().mapToGlobal(pos))
-        if chosen == act:
+        if chosen is None:
+            return
+        if chosen == act_merge:
+            self._merge_rows(table, selected_rows)
+        elif chosen == act_delete:
             self.delete_exports_requested.emit(ranges)
+
+    def _merge_rows(self, table: QTableWidget, rows: list[int]) -> None:
+        """Merge selected rows into the first — min start, max end, max score."""
+        if len(rows) < 2:
+            return
+        data = []
+        for r in rows:
+            item0 = table.item(r, 0)
+            item1 = table.item(r, 1)
+            item2 = table.item(r, 2)
+            if item0 is None or item1 is None or item2 is None:
+                continue
+            row_id = item0.data(Qt.ItemDataRole.UserRole)
+            start = item0.data(Qt.ItemDataRole.UserRole + 1)
+            end = item1.data(Qt.ItemDataRole.UserRole)
+            os_ = item0.data(Qt.ItemDataRole.UserRole + 3)
+            oe = item0.data(Qt.ItemDataRole.UserRole + 4)
+            try:
+                score = float(item2.text())
+            except ValueError:
+                score = 0.0
+            if start is None or end is None or row_id is None:
+                continue
+            data.append((r, row_id, float(start), float(end), score,
+                         float(os_) if os_ is not None else float(start),
+                         float(oe) if oe is not None else float(end)))
+        if len(data) < 2:
+            return
+        keeper_row, keeper_id, k_start, k_end, k_score, k_os, k_oe = data[0]
+        new_start = min(d[2] for d in data)
+        new_end = max(d[3] for d in data)
+        new_score = max(d[4] for d in data)
+        new_os = min(d[5] for d in data)
+        new_oe = max(d[6] for d in data)
+
+        # Record undo: keeper's old state + data for rows we are about to delete
+        tab_idx = self._tabs.currentIndex()
+        model = self._tabs.tabText(tab_idx).rsplit(" (", 1)[0]
+        removed = []
+        for r, rid, s, e, sc, os_, oe in data[1:]:
+            disabled = table.item(r, 0).data(Qt.ItemDataRole.UserRole + 2) or False
+            removed.append((s, e, sc, bool(disabled), os_, oe))
+        self._undo_stack.append((
+            "merge", tab_idx, model, keeper_id,
+            (k_start, k_end, k_score, k_os, k_oe), removed,
+        ))
+
+        self._db.update_scan_result_full(keeper_id, new_start, new_end,
+                                         new_score, new_os, new_oe)
+        self._editing = True
+        keeper_item0 = table.item(keeper_row, 0)
+        keeper_item0.setText(format_time(new_start))
+        keeper_item0.setData(Qt.ItemDataRole.UserRole + 1, new_start)
+        keeper_item0.setData(Qt.ItemDataRole.UserRole + 3, new_os)
+        keeper_item0.setData(Qt.ItemDataRole.UserRole + 4, new_oe)
+        keeper_item1 = table.item(keeper_row, 1)
+        keeper_item1.setText(format_time(new_end))
+        keeper_item1.setData(Qt.ItemDataRole.UserRole, new_end)
+        table.item(keeper_row, 2).setText(f"{new_score:.2f}")
+        self._editing = False
+
+        # Delete the other rows from DB and table (bottom-up)
+        for r, row_id, *_ in sorted(data[1:], key=lambda d: d[0], reverse=True):
+            self._db.delete_scan_result(row_id)
+            table.removeRow(r)
+
+        tab_idx = self._tabs.currentIndex()
+        model = self._tabs.tabText(tab_idx).rsplit(" (", 1)[0]
+        self._tabs.setTabText(tab_idx, f"{model} ({table.rowCount()})")
+        self.regions_edited.emit()
 
     def _on_cell_clicked(self, table: QTableWidget, row: int, col: int) -> None:
         """Click Time → seek to start; click End → seek to last 3s of clip."""
@@ -1433,8 +1513,6 @@ class ScanResultsPanel(QWidget):
                 return
             add_back: list[float] = []
             remove_back: list[float] = []
-            gray = QColor(100, 100, 100)
-            red = QColor(220, 60, 60)
             default_fg = table.palette().color(table.foregroundRole())
             for row, t_val, was_in_neg in was_neg:
                 if row >= table.rowCount():
@@ -1444,13 +1522,12 @@ class ScanResultsPanel(QWidget):
                 if was_in_neg and t not in self._neg_times:
                     self._neg_times.add(t)
                     add_back.append(t)
-                    fg = gray if disabled else red
                 elif not was_in_neg and t in self._neg_times:
                     self._neg_times.discard(t)
                     remove_back.append(t)
-                    fg = gray if disabled else default_fg
                 else:
                     continue
+                fg = self._row_fg(table, row, disabled, default_fg)
                 for col in range(3):
                     table.item(row, col).setForeground(fg)
             if add_back:
@@ -1458,10 +1535,60 @@ class ScanResultsPanel(QWidget):
             if remove_back:
                 self.negatives_removed.emit(remove_back)
 
+        elif kind == "merge":
+            _, tab_idx, model, keeper_id, keeper_old, removed = action
+            table = self._tab_table(tab_idx)
+            if table is None:
+                return
+            k_start, k_end, k_score, k_os, k_oe = keeper_old
+            # Revert keeper to its previous state
+            self._db.update_scan_result_full(
+                keeper_id, k_start, k_end, k_score, k_os, k_oe)
+            # Find keeper's row in the table and update cells
+            self._editing = True
+            for row in range(table.rowCount()):
+                item0 = table.item(row, 0)
+                if item0 and item0.data(Qt.ItemDataRole.UserRole) == keeper_id:
+                    item0.setText(format_time(k_start))
+                    item0.setData(Qt.ItemDataRole.UserRole + 1, k_start)
+                    item0.setData(Qt.ItemDataRole.UserRole + 3, k_os)
+                    item0.setData(Qt.ItemDataRole.UserRole + 4, k_oe)
+                    item1 = table.item(row, 1)
+                    item1.setText(format_time(k_end))
+                    item1.setData(Qt.ItemDataRole.UserRole, k_end)
+                    table.item(row, 2).setText(f"{k_score:.2f}")
+                    break
+            # Re-insert deleted rows (new ids)
+            default_fg = table.palette().color(table.foregroundRole())
+            for (s, e, sc, disabled, os_, oe) in removed:
+                new_id = self._db.insert_scan_result(
+                    self._filename, self._profile, model,
+                    s, e, sc, disabled, os_, oe)
+                row = table.rowCount()
+                table.insertRow(row)
+                t_item = QTableWidgetItem(format_time(s))
+                t_item.setData(Qt.ItemDataRole.UserRole, new_id)
+                t_item.setData(Qt.ItemDataRole.UserRole + 1, s)
+                t_item.setData(Qt.ItemDataRole.UserRole + 2, disabled)
+                t_item.setData(Qt.ItemDataRole.UserRole + 3, os_)
+                t_item.setData(Qt.ItemDataRole.UserRole + 4, oe)
+                table.setItem(row, 0, t_item)
+                e_item = QTableWidgetItem(format_time(e))
+                e_item.setData(Qt.ItemDataRole.UserRole, e)
+                table.setItem(row, 1, e_item)
+                sc_item = QTableWidgetItem(f"{sc:.2f}")
+                sc_item.setFlags(sc_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                table.setItem(row, 2, sc_item)
+                fg = self._row_fg(table, row, disabled, default_fg)
+                if fg != default_fg:
+                    for col in range(3):
+                        table.item(row, col).setForeground(fg)
+            self._editing = False
+            self._tabs.setTabText(tab_idx, f"{model} ({table.rowCount()})")
+            self.regions_edited.emit()
+
     def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Z and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self.undo()
-        elif event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
+        if event.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.toggle_disable_selected()
         elif event.key() == Qt.Key.Key_N:
             self._on_add_negatives()
@@ -3371,6 +3498,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("N"), self, context=ctx).activated.connect(self._playlist.advance)
         QShortcut(QKeySequence("G"), self, context=ctx).activated.connect(self._btn_lock.toggle)
         QShortcut(QKeySequence("A"), self, context=ctx).activated.connect(self._autoclip)
+        QShortcut(QKeySequence("Ctrl+Z"), self, context=ctx).activated.connect(self._scan_panel.undo)
         for key in ("?", "F1"):
             QShortcut(QKeySequence(key), self, context=ctx).activated.connect(self._show_shortcuts)
 
