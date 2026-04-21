@@ -710,7 +710,8 @@ class ScanResultsPanel(QWidget):
     """Tabbed panel showing scan results per model, with disable/resize/negatives."""
     seek_requested = pyqtSignal(float)   # request main window to seek to time
     active_region_changed = pyqtSignal(float, float)  # (start, end) of focused row
-    export_requested = pyqtSignal(list)  # emit list of (start, end, score) to export
+    export_requested = pyqtSignal(list, bool)  # (regions, replace_all)
+    delete_exports_requested = pyqtSignal(list)  # list of (start, end) ranges
     negatives_requested = pyqtSignal(list)  # emit list of start times to mark as hard negatives
     negatives_removed = pyqtSignal(list)   # emit list of start times to un-mark as negatives
     tab_changed = pyqtSignal()           # active tab changed
@@ -930,6 +931,9 @@ class ScanResultsPanel(QWidget):
             lambda r, c, t=table: self._on_cell_clicked(t, r, c))
         table.cellChanged.connect(
             lambda r, c, t=table: self._on_cell_changed(t, r, c))
+        table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        table.customContextMenuRequested.connect(
+            lambda pos, t=table: self._on_table_context_menu(t, pos))
         container_layout.addWidget(table)
         self._tabs.addTab(container, f"{model} ({len(rows)})")
 
@@ -1034,6 +1038,32 @@ class ScanResultsPanel(QWidget):
         if start is not None:
             self.seek_requested.emit(float(start))
             self._emit_active_region(table, cur.row())
+
+    def _on_table_context_menu(self, table: QTableWidget, pos) -> None:
+        selected_rows = sorted({idx.row() for idx in table.selectedIndexes()})
+        if not selected_rows:
+            return
+        ranges: list[tuple[float, float]] = []
+        for r in selected_rows:
+            item0 = table.item(r, 0)
+            item1 = table.item(r, 1)
+            if item0 is None or item1 is None:
+                continue
+            start = item0.data(Qt.ItemDataRole.UserRole + 1)
+            end = item1.data(Qt.ItemDataRole.UserRole)
+            if start is None or end is None:
+                continue
+            if self._is_row_exported(float(start), float(end)):
+                ranges.append((float(start), float(end)))
+        if not ranges:
+            return
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(table)
+        n = len(ranges)
+        act = menu.addAction(f"Delete export{'s' if n > 1 else ''} for {n} row{'s' if n > 1 else ''}")
+        chosen = menu.exec(table.viewport().mapToGlobal(pos))
+        if chosen == act:
+            self.delete_exports_requested.emit(ranges)
 
     def _on_cell_clicked(self, table: QTableWidget, row: int, col: int) -> None:
         """Click Time → seek to start; click End → seek to last 3s of clip."""
@@ -1260,10 +1290,30 @@ class ScanResultsPanel(QWidget):
         table = self._current_table()
         if table is None:
             return
-        # _get_tab_regions already skips disabled; also skip negatives
-        regions = [r for r in self._get_tab_regions(table) if r[0] not in self._neg_times]
+        selected_rows = sorted({idx.row() for idx in table.selectedIndexes()})
+        if selected_rows:
+            regions: list[tuple[float, float, float]] = []
+            for r in selected_rows:
+                item0 = table.item(r, 0)
+                if item0 is None:
+                    continue
+                if item0.data(Qt.ItemDataRole.UserRole + 2):
+                    continue  # disabled
+                start = item0.data(Qt.ItemDataRole.UserRole + 1)
+                end = table.item(r, 1).data(Qt.ItemDataRole.UserRole)
+                if start is None or end is None:
+                    continue
+                if float(start) in self._neg_times:
+                    continue
+                score = float(table.item(r, 2).text())
+                regions.append((float(start), float(end), score))
+            replace_all = False
+        else:
+            regions = [r for r in self._get_tab_regions(table)
+                       if r[0] not in self._neg_times]
+            replace_all = True
         if regions:
-            self.export_requested.emit(regions)
+            self.export_requested.emit(regions, replace_all)
 
     def current_regions(self) -> list[tuple[float, float, float]]:
         """Return (start, end, score) for enabled rows in the active tab."""
@@ -3253,6 +3303,7 @@ class MainWindow(QMainWindow):
         self._scan_panel.active_region_changed.connect(
             self._timeline.set_active_scan_region)
         self._scan_panel.export_requested.connect(self._on_scan_export)
+        self._scan_panel.delete_exports_requested.connect(self._on_scan_delete_exports)
         self._scan_panel.negatives_requested.connect(self._on_scan_negatives)
         self._scan_panel.negatives_removed.connect(self._on_scan_negatives_removed)
         self._scan_panel.tab_changed.connect(self._on_scan_regions_edited)
@@ -4296,15 +4347,67 @@ class MainWindow(QMainWindow):
         n = sum(len(g) for g in groups)
         self._scan_panel.set_export_count(n)
 
-    def _on_scan_export(self, regions: list) -> None:
-        """Export clips from scan results panel."""
+    def _on_scan_export(self, regions: list, replace_all: bool = True) -> None:
+        """Export clips from scan results panel. replace_all=False for partial."""
         if not self._file_path or not regions:
             return
         if self._export_worker and self._export_worker.isRunning():
             self._show_status("Export already running…")
             return
         self._auto_export_no_markers = True
-        self._auto_export_regions(regions)
+        self._auto_export_regions(regions, replace_scan_exports=replace_all)
+
+    def _on_scan_delete_exports(self, ranges: list) -> None:
+        """Delete exported clips whose start_time falls within each (start, end) range."""
+        if not self._file_path or not ranges:
+            return
+        filename = os.path.basename(self._file_path)
+        all_paths: list[str] = []
+        seen: set[str] = set()
+        for (s, e) in ranges:
+            rep_paths = self._db.get_scan_export_rep_paths_in_range(
+                filename, self._profile, s, e)
+            for rp in rep_paths:
+                for p in self._db.get_group(rp, self._profile):
+                    if p not in seen:
+                        seen.add(p)
+                        all_paths.append(p)
+        if not all_paths:
+            self._show_status("No export files found to delete")
+            return
+        n = len(all_paths)
+        reply = QMessageBox.question(
+            self, "Delete scan exports",
+            f"Delete {n} exported clip{'s' if n != 1 else ''} from disk and database?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        folder = self._txt_folder.text() or ""
+        vid_dirs: set[str] = set()
+        for p in all_paths:
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+            elif os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            remove_clip_annotation(folder, p)
+            self._db.delete_by_output_path(p)
+            vid_dirs.add(os.path.dirname(p))
+        for d in vid_dirs:
+            try:
+                if os.path.isdir(d) and not os.listdir(d):
+                    os.rmdir(d)
+            except OSError:
+                pass
+        self._refresh_markers()
+        self._scan_panel.refresh_exported_state()
+        self._update_scan_export_count()
+        n_clips = self._db.get_clip_count(filename, self._profile)
+        self._playlist.mark_done(self._file_path, n_clips)
+        self._show_status(f"Deleted {n} exported clip{'s' if n != 1 else ''}")
 
     def _on_scan_negatives(self, times: list) -> None:
         """Save selected scan result timestamps as hard negatives for training."""
@@ -4675,8 +4778,14 @@ class MainWindow(QMainWindow):
         self._auto_export_no_markers = True
         self._auto_export_regions(regions)
 
-    def _auto_export_regions(self, regions: list) -> None:
-        """Export clips from a list of (start, end, score) regions."""
+    def _auto_export_regions(self, regions: list,
+                             replace_scan_exports: bool = True) -> None:
+        """Export clips from a list of (start, end, score) regions.
+
+        replace_scan_exports=False for a partial export that preserves prior
+        scan clips; filenames are offset by existing a-suffixes to avoid
+        collisions.
+        """
         if not regions:
             self._show_status("Auto: no regions found")
             self._btn_auto_export.setEnabled(True)
@@ -4704,11 +4813,24 @@ class MainWindow(QMainWindow):
         # Extract vid number to use as clip number (vid_003 → 3)
         vid_num = int(vid_name.split("_")[-1])
 
+        # For partial export: find max existing a-suffix to avoid overwrites
+        area_offset = 0
+        if not replace_scan_exports and os.path.isdir(vid_folder):
+            import re
+            pat = re.compile(rf"^{re.escape(name)}_{vid_num:03d}_a(\d+)_")
+            for f in os.listdir(vid_folder):
+                m = pat.match(f)
+                if m:
+                    try:
+                        area_offset = max(area_offset, int(m.group(1)))
+                    except ValueError:
+                        pass
+
         # Clips go flat inside vid folder, numbered by video
         jobs = []
         positions = []
         for area_idx, group in enumerate(groups):
-            group_name = f"{name}_{vid_num:03d}_a{area_idx + 1}"
+            group_name = f"{name}_{vid_num:03d}_a{area_offset + area_idx + 1}"
             for sub, start_t in enumerate(group):
                 fname = f"{group_name}_{sub}{ext}"
                 out = os.path.join(vid_folder, fname)
@@ -4734,6 +4856,7 @@ class MainWindow(QMainWindow):
             "format": fmt,
             "profile": self._profile,
             "is_scan": is_scan,
+            "replace_scan_exports": replace_scan_exports,
         }
 
         if self._export_worker and self._export_worker.isRunning():
@@ -4760,8 +4883,8 @@ class MainWindow(QMainWindow):
         self._auto_export_no_markers = batch["is_scan"]
         self._export_batch_file = batch["file_path"]
 
-        # Replace old scan export entries for this video
-        if batch["is_scan"]:
+        # Replace old scan export entries for this video (skip for partial)
+        if batch["is_scan"] and batch.get("replace_scan_exports", True):
             fname = os.path.basename(batch["file_path"])
             n_old = self._db.delete_scan_exports(fname, batch["profile"])
             if n_old:

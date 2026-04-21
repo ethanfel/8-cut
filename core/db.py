@@ -418,6 +418,21 @@ class ProcessedDB:
                 pass
         return max_n
 
+    def get_scan_export_rep_paths_in_range(self, filename: str, profile: str,
+                                           start: float, end: float) -> list[str]:
+        """Return one representative output_path per distinct scan-export
+        start_time inside [start, end] for (filename, profile)."""
+        if not self._enabled:
+            return []
+        rows = self._con.execute(
+            "SELECT output_path FROM processed"
+            " WHERE filename = ? AND profile = ? AND scan_export = 1"
+            " AND start_time BETWEEN ? AND ?"
+            " GROUP BY start_time",
+            (filename, profile, start, end),
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def get_scan_export_times(self, filename: str, profile: str) -> list[float]:
         """Return start_times of scan_export=1 rows for this file/profile."""
         if not self._enabled:
