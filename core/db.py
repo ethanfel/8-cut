@@ -284,12 +284,30 @@ class ProcessedDB:
         ).fetchone()
         return dict(row) if row else None
 
-    def delete_by_output_path(self, output_path: str) -> None:
+    def delete_by_output_path(self, output_path: str, profile: str = "") -> None:
         if not self._enabled:
             return
         with self._lock:
-            self._con.execute("DELETE FROM processed WHERE output_path = ?", (output_path,))
+            if profile:
+                self._con.execute(
+                    "DELETE FROM processed WHERE output_path = ? AND profile = ?",
+                    (output_path, profile),
+                )
+            else:
+                self._con.execute(
+                    "DELETE FROM processed WHERE output_path = ?", (output_path,),
+                )
             self._con.commit()
+
+    def is_path_used_by_other_profiles(self, output_path: str, profile: str) -> bool:
+        """Return True if *output_path* is referenced by any profile other than *profile*."""
+        if not self._enabled:
+            return False
+        row = self._con.execute(
+            "SELECT 1 FROM processed WHERE output_path = ? AND profile != ? LIMIT 1",
+            (output_path, profile),
+        ).fetchone()
+        return row is not None
 
     def get_group(self, output_path: str, profile: str = "") -> list[str]:
         """Return all output_paths sharing the same (filename, start_time, profile) as *output_path*."""
@@ -416,16 +434,33 @@ class ProcessedDB:
         return [r[0] for r in rows]
 
     def duplicate_profile(self, src: str, dst: str) -> int:
-        """Copy scan_results, hard_negatives, and hidden_files from *src* to *dst*.
+        """Copy all profile data from *src* to *dst*.
 
-        Exports (processed) are NOT copied because their output_paths
-        reference files in the source profile's folder structure.
-        Returns total number of rows copied.
+        Copies processed (exports), scan_results, hard_negatives, and
+        hidden_files.  Returns total number of rows copied.
         """
         if not self._enabled or src == dst:
             return 0
         total = 0
         with self._lock:
+            # processed (exports)
+            rows = self._con.execute(
+                "SELECT filename, start_time, output_path, label, category,"
+                " short_side, portrait_ratio, crop_center, format,"
+                " clip_count, spread, source_path, scan_export, processed_at"
+                " FROM processed WHERE profile = ?", (src,),
+            ).fetchall()
+            for r in rows:
+                self._con.execute(
+                    "INSERT INTO processed"
+                    " (filename, start_time, output_path, label, category,"
+                    "  short_side, portrait_ratio, crop_center, format,"
+                    "  clip_count, spread, profile, source_path, scan_export,"
+                    "  processed_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (*r[:11], dst, *r[11:]),
+                )
+            total += len(rows)
             # scan_results
             rows = self._con.execute(
                 "SELECT filename, model, start_time, end_time, score,"
@@ -467,6 +502,29 @@ class ProcessedDB:
             total += len(rows)
             self._con.commit()
         return total
+
+    def count_profile_rows(self, profile: str) -> int:
+        """Return total number of rows across all tables for *profile*."""
+        if not self._enabled:
+            return 0
+        n = 0
+        for table in ("processed", "scan_results", "hard_negatives", "hidden_files"):
+            row = self._con.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE profile = ?", (profile,),
+            ).fetchone()
+            n += row[0] if row else 0
+        return n
+
+    def delete_profile(self, profile: str) -> None:
+        """Delete all rows for *profile* from every table."""
+        if not self._enabled:
+            return
+        with self._lock:
+            for table in ("processed", "scan_results", "hard_negatives", "hidden_files"):
+                self._con.execute(
+                    f"DELETE FROM {table} WHERE profile = ?", (profile,),
+                )
+            self._con.commit()
 
     def get_all_export_paths(self, profile: str = "default") -> list[str]:
         """Return all unique output_path values for a given profile."""

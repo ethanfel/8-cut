@@ -3254,7 +3254,7 @@ class MainWindow(QMainWindow):
         self._spn_spread.valueChanged.connect(lambda: self._update_scan_export_count())
 
         self._btn_reexport = QPushButton("Re-export")
-        self._btn_reexport.setToolTip("Re-export all manual clips for this file with the current spread")
+        self._btn_reexport.setToolTip("Re-export all manual clips for this file into the current folder with the current spread")
         self._btn_reexport.clicked.connect(self._reexport_all_manual)
 
         self._chk_rand_portrait = QCheckBox("1 random portrait")
@@ -3716,6 +3716,7 @@ class MainWindow(QMainWindow):
 
     _NEW_PROFILE_SENTINEL = "+ New profile..."
     _DUP_PROFILE_SENTINEL = "Duplicate profile..."
+    _DEL_PROFILE_SENTINEL = "Delete profile..."
 
     def _populate_profile_combo(self) -> None:
         """Rebuild profile combo items from DB, preserving selection."""
@@ -3729,34 +3730,40 @@ class MainWindow(QMainWindow):
             self._cmb_profile.addItem("default")
         self._cmb_profile.addItem(self._NEW_PROFILE_SENTINEL)
         self._cmb_profile.addItem(self._DUP_PROFILE_SENTINEL)
+        self._cmb_profile.addItem(self._DEL_PROFILE_SENTINEL)
         idx = self._cmb_profile.findText(prev)
         if idx >= 0:
             self._cmb_profile.setCurrentIndex(idx)
         self._cmb_profile.blockSignals(False)
 
+    _PROFILE_SENTINELS = (
+        _NEW_PROFILE_SENTINEL, _DUP_PROFILE_SENTINEL, _DEL_PROFILE_SENTINEL,
+    )
+
     @property
     def _profile(self) -> str:
         text = self._cmb_profile.currentText()
-        if text in (self._NEW_PROFILE_SENTINEL, self._DUP_PROFILE_SENTINEL):
+        if text in self._PROFILE_SENTINELS:
             return "default"
         return text.strip() or "default"
 
     def _on_profile_activated(self, index: int) -> None:
         text = self._cmb_profile.itemText(index)
+        prev = self._settings.value("profile", "default")
+        if text == self._DEL_PROFILE_SENTINEL:
+            self._delete_current_profile(prev)
+            return
         if text in (self._NEW_PROFILE_SENTINEL, self._DUP_PROFILE_SENTINEL):
             is_dup = text == self._DUP_PROFILE_SENTINEL
-            prev = self._settings.value("profile", "default")
             prompt = f"Duplicate '{prev}' as:" if is_dup else "Profile name:"
             title = "Duplicate profile" if is_dup else "New profile"
             name, ok = QInputDialog.getText(self, title, prompt)
             name = name.strip()
-            sentinels = (self._NEW_PROFILE_SENTINEL, self._DUP_PROFILE_SENTINEL)
-            if ok and name and name not in sentinels:
+            if ok and name and name not in self._PROFILE_SENTINELS:
                 if is_dup:
                     n = self._db.duplicate_profile(prev, name)
                     _log(f"Duplicated profile '{prev}' → '{name}' ({n} rows)")
-                # Insert before the sentinels and select it
-                sentinel_idx = self._cmb_profile.count() - 2
+                sentinel_idx = self._cmb_profile.count() - 3
                 self._cmb_profile.insertItem(sentinel_idx, name)
                 self._cmb_profile.setCurrentIndex(sentinel_idx)
             else:
@@ -3782,6 +3789,34 @@ class MainWindow(QMainWindow):
             self._refresh_markers()
             _log(f"Profile switched: {text}")
             self._show_status(f"Profile: {text}", 3000)
+
+    def _delete_current_profile(self, name: str) -> None:
+        prev = name
+        # Revert combo to previous selection first
+        idx = self._cmb_profile.findText(prev)
+        if idx >= 0:
+            self._cmb_profile.setCurrentIndex(idx)
+        if prev == "default":
+            self._show_status("Cannot delete the default profile", 3000)
+            return
+        n = self._db.count_profile_rows(prev)
+        reply = QMessageBox.question(
+            self, "Delete profile",
+            f"Delete profile '{prev}' and all its data ({n} rows)?\n\n"
+            f"This does NOT delete exported files from disk.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._db.delete_profile(prev)
+        _log(f"Deleted profile '{prev}' ({n} rows)")
+        self._settings.setValue("profile", "default")
+        self._populate_profile_combo()
+        idx = self._cmb_profile.findText("default")
+        if idx >= 0:
+            self._cmb_profile.setCurrentIndex(idx)
+        self._on_profile_activated(self._cmb_profile.currentIndex())
+        self._show_status(f"Deleted profile '{prev}'", 3000)
 
     # ── Subprofiles ──────────────────────────────────────────
 
@@ -5573,26 +5608,63 @@ class MainWindow(QMainWindow):
         if not groups:
             self._show_status("No manual exports to re-export")
             return
-        total = sum(len(g["paths"]) for g in groups)
-        spread = self._spn_spread.value()
-        reply = QMessageBox.question(
-            self, "Re-export manual clips",
-            f"Re-export {total} clip(s) across {len(groups)} marker(s)\n"
-            f"with spread = {spread}s?\n\n"
-            f"Old files will be deleted and re-rendered.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
         folder = self._txt_folder.text()
+        spread = self._spn_spread.value()
+
+        # Compute clip counts for both modes.
+        keep_length_total = 0
+        keep_count_total = 0
+        for g in groups:
+            orig_span = 8.0 + (g["clip_count"] - 1) * g["spread"]
+            keep_length_n = max(1, int((orig_span - 8.0) / spread) + 1)
+            keep_length_total += keep_length_n
+            keep_count_total += g["clip_count"]
+
+        # Dialog with two radio options.
+        from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QRadioButton, QVBoxLayout
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Re-export manual clips")
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel(
+            f"{len(groups)} marker(s), spread {spread}s → {folder}"
+        ))
+        rb_length = QRadioButton(
+            f"Keep section length, adjust clip count ({keep_length_total} clips)"
+        )
+        rb_count = QRadioButton(
+            f"Keep clip count, adjust section length ({keep_count_total} clips)"
+        )
+        rb_length.setChecked(True)
+        layout.addWidget(rb_length)
+        layout.addWidget(rb_count)
+        layout.addWidget(QLabel("Old files are removed unless shared with another profile."))
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        layout.addWidget(btns)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        keep_length = rb_length.isChecked()
+
         name = self._txt_name.text() or "clip"
         fmt = self._cmb_format.currentText()
         image_sequence = fmt == "WebP sequence"
 
+        # Resolve vid folder BEFORE deleting DB rows, so we reuse the same one.
+        vid_name = self._get_vid_folder(folder)
+
         # Delete old files from their original locations.
+        # Skip file deletion if another profile still references the same path.
+        profile = self._profile
         for g in groups:
             old_folder = os.path.dirname(os.path.dirname(g["paths"][0])) if g["paths"] else folder
             for path in g["paths"]:
+                shared = self._db.is_path_used_by_other_profiles(path, profile)
+                self._db.delete_by_output_path(path, profile)
+                if shared:
+                    continue
                 if os.path.isdir(path):
                     shutil.rmtree(path, ignore_errors=True)
                     wav = path + ".wav"
@@ -5601,10 +5673,8 @@ class MainWindow(QMainWindow):
                 elif os.path.exists(path):
                     os.remove(path)
                 remove_clip_annotation(old_folder, path)
-                self._db.delete_by_output_path(path)
 
         # Build new jobs in the CURRENT folder.
-        vid_name = self._get_vid_folder(folder)
         vid_folder = os.path.join(folder, vid_name)
         os.makedirs(vid_folder, exist_ok=True)
         vid_num = int(vid_name.split("_")[-1])
@@ -5622,7 +5692,11 @@ class MainWindow(QMainWindow):
             cursor_t = g["start_time"]
             ratio = g["portrait_ratio"] or None
             center = g["crop_center"]
-            n_clips = len(g["paths"])
+            if keep_length:
+                orig_span = 8.0 + (g["clip_count"] - 1) * g["spread"]
+                n_clips = max(1, int((orig_span - 8.0) / spread) + 1)
+            else:
+                n_clips = g["clip_count"]
             tag = f"m{manual_n}"
             manual_n += 1
             for i in range(n_clips):
