@@ -78,6 +78,7 @@ def build_ffmpeg_command(
     crop_center: float = 0.5,
     image_sequence: bool = False,
     encoder: str = "libx264",
+    duration: float = 8.0,
 ) -> list[str]:
     # -ss before -i: fast input-seeking. Safe here because we always re-encode,
     # so there is no keyframe-alignment issue from pre-input seek.
@@ -96,7 +97,7 @@ def build_ffmpeg_command(
         "-threads", "0",
         "-ss", str(start),
         "-i", input_path,
-        "-t", "8",
+        "-t", str(duration),
     ]
 
     filters: list[str] = []
@@ -141,14 +142,15 @@ def build_ffmpeg_command(
     return cmd
 
 
-def build_audio_extract_command(input_path: str, start: float, sequence_dir: str) -> list[str]:
+def build_audio_extract_command(input_path: str, start: float, sequence_dir: str,
+                                duration: float = 8.0) -> list[str]:
     """Return an ffmpeg command that extracts audio to <sequence_dir>.wav."""
     audio_path = sequence_dir + ".wav"
     return [
         _bin("ffmpeg"), "-y",
         "-ss", str(start),
         "-i", input_path,
-        "-t", "8",
+        "-t", str(duration),
         "-vn",
         "-c:a", "pcm_s16le",
         audio_path,

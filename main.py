@@ -71,7 +71,8 @@ class ExportWorker(QThread):
                  short_side: int | None = None,
                  image_sequence: bool = False,
                  max_workers: int | None = None,
-                 encoder: str = "libx264"):
+                 encoder: str = "libx264",
+                 duration: float = 8.0):
         super().__init__()
         self._input = input_path
         self._jobs = jobs  # [(start, output, portrait_ratio, crop_center), ...]
@@ -79,6 +80,7 @@ class ExportWorker(QThread):
         self._image_sequence = image_sequence
         self._max_workers = max_workers
         self._encoder = encoder
+        self._duration = duration
         self._cancel = False
         self._procs: list[subprocess.Popen] = []
         self._procs_lock = __import__('threading').Lock()
@@ -106,6 +108,7 @@ class ExportWorker(QThread):
             crop_center=crop_center,
             image_sequence=self._image_sequence,
             encoder=self._encoder,
+            duration=self._duration,
         )
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         with self._procs_lock:
@@ -124,7 +127,8 @@ class ExportWorker(QThread):
             msg = stderr.decode(errors='replace')[-500:] if stderr else "ffmpeg failed"
             raise RuntimeError(msg)
         if self._image_sequence:
-            audio_cmd = build_audio_extract_command(self._input, start, output)
+            audio_cmd = build_audio_extract_command(self._input, start, output,
+                                                       duration=self._duration)
             subprocess.run(audio_cmd, capture_output=True, text=True, timeout=60)
         return output
 
@@ -2287,18 +2291,64 @@ class TimelineWidget(QWidget):
 import ctypes
 
 
-class MpvWidget(QWidget):
-    """Embeds mpv using an off-screen OpenGL FBO with QPainter readback.
+class _CropOverlayWidget(QWidget):
+    """Transparent child widget for drawing crop overlays on top of native mpv window (WId mode)."""
 
-    mpv renders each frame into a QOpenGLFramebufferObject on an off-screen
-    surface.  The FBO is read back to a QImage and displayed via QPainter,
-    bypassing Wayland sub-surface compositing issues that affect both
-    QOpenGLWidget and QOpenGLWindow+createWindowContainer.
+    def __init__(self, mpv_widget: "MpvWidget"):
+        super().__init__(mpv_widget)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._mpv = mpv_widget
+
+    def paintEvent(self, event):
+        mw = self._mpv
+        if not mw._overlays or not mw._player or not mw._player.pause:
+            return
+        vw, vh = mw._video_w, mw._video_h
+        vr = mw._video_rect()
+        p = QPainter(self)
+        for ov in mw._overlays:
+            if ov["_fracs"] is None and vw > 0 and vh > 0:
+                num, den = ov["ratio"]
+                crop_w_frac = min((vh * num / den) / vw, 1.0)
+                half = crop_w_frac / 2.0
+                center = ov["center"]
+                ov["_fracs"] = (
+                    max(0.0, center - half),
+                    min(1.0, center + half),
+                )
+            if ov["_fracs"] is None:
+                continue
+            left_frac, right_frac = ov["_fracs"]
+            left_px = vr.x() + int(left_frac * vr.width())
+            right_px = vr.x() + int(right_frac * vr.width())
+            color = ov["color"]
+            if ov["lines_only"]:
+                line_pen = QPen(color)
+                line_pen.setWidth(2)
+                p.setPen(line_pen)
+                p.drawLine(left_px, vr.y(), left_px, vr.y() + vr.height())
+                p.drawLine(right_px, vr.y(), right_px, vr.y() + vr.height())
+            else:
+                cut_color = QColor(color.red(), color.green(), color.blue(), 140)
+                if left_px > vr.x():
+                    p.fillRect(vr.x(), vr.y(), left_px - vr.x(), vr.height(), cut_color)
+                if right_px < vr.x() + vr.width():
+                    p.fillRect(right_px, vr.y(), vr.x() + vr.width() - right_px, vr.height(), cut_color)
+        p.end()
+
+
+class MpvWidget(QWidget):
+    """Embeds mpv for video playback.
+
+    On Windows, mpv renders directly into the widget's native window handle
+    (WId embedding) for best performance.  On Linux, an off-screen OpenGL FBO
+    is used with QPainter readback to avoid Wayland compositing issues.
     """
     file_loaded = pyqtSignal()
     crop_clicked = pyqtSignal(float)
-    time_pos_changed = pyqtSignal(float)  # emits current playback position in seconds
-    _do_file_loaded = pyqtSignal()  # mpv thread → Qt main thread for file-loaded event
+    time_pos_changed = pyqtSignal(float)
+    _do_file_loaded = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -2310,55 +2360,66 @@ class MpvWidget(QWidget):
         self._video_w: int = 0
         self._video_h: int = 0
         self._fbo = None
-        self._needs_render = False  # set True by mpv update_cb (any thread)
+        self._needs_render = False
+        self._overlays: list[dict] = []
+        self._overlay_widget: "_CropOverlayWidget | None" = None
 
-        from PyQt6.QtGui import QOffscreenSurface, QOpenGLContext, QSurfaceFormat
-        from PyQt6.QtOpenGL import QOpenGLFramebufferObject
+        self._wid_mode = sys.platform == "win32"
 
-        fmt = QSurfaceFormat.defaultFormat()
-        self._gl_surface = QOffscreenSurface()
-        self._gl_surface.setFormat(fmt)
-        self._gl_surface.create()
-
-        self._gl_ctx = QOpenGLContext()
-        self._gl_ctx.setFormat(fmt)
-        self._gl_ctx.create()
-        self._gl_ctx.makeCurrent(self._gl_surface)
-
-        _PROC_ADDR_T = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)
-
-        @_PROC_ADDR_T
-        def _get_proc_addr(_, name):
-            addr = self._gl_ctx.getProcAddress(name)
-            return int(addr) if addr else 0
-
-        self._get_proc_addr_fn = _get_proc_addr
-
-        self._player = mpv.MPV(keep_open=True, pause=True, vo="libmpv", hwdec="auto")
-        _log("mpv created (hwdec=auto)")
-        try:
-            self._render_ctx = mpv.MpvRenderContext(
-                self._player, "opengl",
-                opengl_init_params={"get_proc_address": self._get_proc_addr_fn},
+        if self._wid_mode:
+            self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
+            self._player = mpv.MPV(
+                keep_open=True, pause=True,
+                wid=str(int(self.winId())),
+                hwdec="auto",
             )
-            self._render_ctx.update_cb = self._on_mpv_update
-            _log("OpenGL render context ready")
-        except Exception as e:
-            _log(f"MpvRenderContext failed: {e}")
+            _log("mpv created with WId embedding (Windows)")
+            self._overlay_widget = _CropOverlayWidget(self)
+            self._overlay_widget.setGeometry(self.rect())
+            self._overlay_widget.show()
+        else:
+            from PyQt6.QtGui import QOffscreenSurface, QOpenGLContext, QSurfaceFormat
+            from PyQt6.QtOpenGL import QOpenGLFramebufferObject
 
-        self._gl_ctx.doneCurrent()
+            fmt = QSurfaceFormat.defaultFormat()
+            self._gl_surface = QOffscreenSurface()
+            self._gl_surface.setFormat(fmt)
+            self._gl_surface.create()
 
-        # Timer polls for new frames at ~60 fps; avoids flooding the event loop
-        # from mpv's C thread which calls update_cb at playback rate.
+            self._gl_ctx = QOpenGLContext()
+            self._gl_ctx.setFormat(fmt)
+            self._gl_ctx.create()
+            self._gl_ctx.makeCurrent(self._gl_surface)
+
+            _PROC_ADDR_T = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p)
+
+            @_PROC_ADDR_T
+            def _get_proc_addr(_, name):
+                addr = self._gl_ctx.getProcAddress(name)
+                return int(addr) if addr else 0
+
+            self._get_proc_addr_fn = _get_proc_addr
+
+            self._player = mpv.MPV(keep_open=True, pause=True, vo="libmpv", hwdec="auto")
+            _log("mpv created (FBO readback, hwdec=auto)")
+            try:
+                self._render_ctx = mpv.MpvRenderContext(
+                    self._player, "opengl",
+                    opengl_init_params={"get_proc_address": self._get_proc_addr_fn},
+                )
+                self._render_ctx.update_cb = self._on_mpv_update
+                _log("OpenGL render context ready")
+            except Exception as e:
+                _log(f"MpvRenderContext failed: {e}")
+
+            self._gl_ctx.doneCurrent()
+
         self._render_timer = QTimer(self)
         self._render_timer.setInterval(16)
         self._render_timer.timeout.connect(self._poll_render)
         self._render_timer.start()
 
         self._do_file_loaded.connect(self._on_file_loaded_qt)
-        # Each overlay: {"ratio": (num,den), "center": float, "lines_only": bool,
-        #                "color": QColor, "_fracs": (left,right)|None}
-        self._overlays: list[dict] = []
 
         @self._player.event_callback("file-loaded")
         def _on_file_loaded(event):
@@ -2385,6 +2446,8 @@ class MpvWidget(QWidget):
                 "color": color or QColor(220, 60, 60, 200),
                 "_fracs": None,
             })
+        if self._overlay_widget:
+            self._overlay_widget.update()
         self.update()
 
     def set_crop_overlay(self, ratio: "tuple[int,int] | None", crop_center: float,
@@ -2394,6 +2457,9 @@ class MpvWidget(QWidget):
             self._overlays = []
         else:
             self.set_crop_overlays([(ratio, crop_center, lines_only, None)])
+            return
+        if self._overlay_widget:
+            self._overlay_widget.update()
         self.update()
 
     def _on_mpv_update(self):
@@ -2401,9 +2467,12 @@ class MpvWidget(QWidget):
         self._needs_render = True
 
     def _poll_render(self):
-        if self._needs_render and self._render_ctx and self._render_ctx.update():
-            self._needs_render = False
-            self._render_frame()
+        if not self._player:
+            return
+        if not self._wid_mode:
+            if self._needs_render and self._render_ctx and self._render_ctx.update():
+                self._needs_render = False
+                self._render_frame()
         if not self._player.pause:
             tp = self._player.time_pos
             if tp is not None:
@@ -2432,9 +2501,10 @@ class MpvWidget(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Re-render the current frame at the new widget size so it isn't
-        # stretched from the old FBO dimensions.
-        if self._render_ctx:
+        if self._wid_mode:
+            if self._overlay_widget:
+                self._overlay_widget.setGeometry(self.rect())
+        elif self._render_ctx:
             self._render_frame()
 
     def _video_rect(self) -> QRect:
@@ -2457,6 +2527,8 @@ class MpvWidget(QWidget):
             return QRect(0, (wh - draw_h) // 2, draw_w, draw_h)
 
     def paintEvent(self, event):
+        if self._wid_mode:
+            return
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(0, 0, 0))
         if self._frame and not self._frame.isNull():
@@ -2527,6 +2599,8 @@ class MpvWidget(QWidget):
         self._player["ab-loop-a"] = "no"
         self._player["ab-loop-b"] = "no"
         self._player.pause = True
+        if self._overlay_widget:
+            self._overlay_widget.update()
 
     def get_duration(self) -> float:
         d = self._player.duration
@@ -3121,7 +3195,8 @@ class MainWindow(QMainWindow):
         self._timeline.setFixedHeight(160)
         _init_clips = int(self._settings.value("clip_count", "3"))
         _init_spread = float(self._settings.value("spread", "3.0"))
-        self._timeline.set_clip_span(8.0 + (_init_clips - 1) * _init_spread)
+        _init_dur = float(self._settings.value("clip_duration", "8.0"))
+        self._timeline.set_clip_span(_init_dur + (_init_clips - 1) * _init_spread)
         self._timeline.cursor_changed.connect(self._on_cursor_changed)
         self._timeline.seek_changed.connect(self._on_seek_changed)
         self._timeline.marker_delete_requested.connect(self._on_delete_marker)
@@ -3149,6 +3224,18 @@ class MainWindow(QMainWindow):
         self._btn_pause.setEnabled(False)
         self._btn_pause.setToolTip("Pause playback (Space / K)")
         self._btn_pause.clicked.connect(self._on_pause)
+
+        self._btn_speed2 = QPushButton("x2")
+        self._btn_speed2.setCheckable(True)
+        self._btn_speed2.setFixedWidth(32)
+        self._btn_speed2.setToolTip("Playback at 2× speed")
+        self._btn_speed2.clicked.connect(lambda: self._set_playback_speed(2.0))
+
+        self._btn_speed4 = QPushButton("x4")
+        self._btn_speed4.setCheckable(True)
+        self._btn_speed4.setFixedWidth(32)
+        self._btn_speed4.setToolTip("Playback at 4× speed")
+        self._btn_speed4.clicked.connect(lambda: self._set_playback_speed(4.0))
 
         self._btn_lock = QPushButton("🔒 Lock")
         self._btn_lock.setCheckable(True)
@@ -3221,9 +3308,26 @@ class MainWindow(QMainWindow):
             lambda v: self._settings.setValue("hw_encode", "true" if v else "false")
         )
 
+        self._spn_clip_dur = QDoubleSpinBox()
+        self._spn_clip_dur.setRange(2.0, 30.0)
+        self._spn_clip_dur.setSingleStep(0.5)
+        self._spn_clip_dur.setSuffix("s")
+        self._spn_clip_dur.setToolTip("Duration of each exported clip")
+        saved_clip_dur = float(self._settings.value("clip_duration", "8.0"))
+        self._spn_clip_dur.setValue(saved_clip_dur)
+        self._spn_clip_dur.valueChanged.connect(
+            lambda v: self._settings.setValue("clip_duration", str(v))
+        )
+        self._spn_clip_dur.valueChanged.connect(
+            lambda: self._timeline.set_clip_span(self._clip_span)
+        )
+        self._spn_clip_dur.valueChanged.connect(lambda: self._update_next_label())
+        self._spn_clip_dur.valueChanged.connect(lambda: self._preview_timer.start())
+        self._spn_clip_dur.valueChanged.connect(self._update_play_loop)
+
         self._spn_clips = QSpinBox()
         self._spn_clips.setRange(1, 99)
-        self._spn_clips.setToolTip("Number of overlapping 8s clips per export")
+        self._spn_clips.setToolTip("Number of overlapping clips per export")
         saved_clips = int(self._settings.value("clip_count", "3"))
         self._spn_clips.setValue(saved_clips)
         self._spn_clips.valueChanged.connect(
@@ -3240,7 +3344,7 @@ class MainWindow(QMainWindow):
         self._spn_spread.setRange(2.0, 8.0)
         self._spn_spread.setSingleStep(0.5)
         self._spn_spread.setSuffix("s")
-        self._spn_spread.setToolTip("Offset between overlapping 8s clips")
+        self._spn_spread.setToolTip("Offset between overlapping clips")
         saved_spread = float(self._settings.value("spread", "3.0"))
         self._spn_spread.setValue(saved_spread)
         self._spn_spread.valueChanged.connect(
@@ -3304,7 +3408,7 @@ class MainWindow(QMainWindow):
         self._btn_scan.clicked.connect(self._start_scan)
 
         self._btn_auto_export = QPushButton("Auto")
-        self._btn_auto_export.setToolTip("Scan + auto-export best 8s clips")
+        self._btn_auto_export.setToolTip("Scan + auto-export best clips")
         self._btn_auto_export.clicked.connect(self._auto_export)
 
         self._btn_train = QPushButton("Train")
@@ -3438,6 +3542,8 @@ class MainWindow(QMainWindow):
         transport_row = QHBoxLayout()
         transport_row.addWidget(self._btn_play)
         transport_row.addWidget(self._btn_pause)
+        transport_row.addWidget(self._btn_speed2)
+        transport_row.addWidget(self._btn_speed4)
         transport_row.addWidget(self._btn_lock)
         transport_row.addWidget(self._lbl_time)
         transport_row.addStretch()
@@ -3478,6 +3584,8 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(QLabel("Format:"))
         settings_row.addWidget(self._cmb_format)
         settings_row.addWidget(self._chk_hw)
+        settings_row.addWidget(QLabel("Dur:"))
+        settings_row.addWidget(self._spn_clip_dur)
         settings_row.addWidget(QLabel("Clips:"))
         settings_row.addWidget(self._spn_clips)
         settings_row.addWidget(QLabel("Spread:"))
@@ -4063,8 +4171,9 @@ class MainWindow(QMainWindow):
         if self._btn_lock.isChecked():
             meta = self._db.get_by_output_path(output_path)
             clip_count = meta["clip_count"] or self._spn_clips.value() if meta else self._spn_clips.value()
+            clip_dur = meta.get("clip_duration", self._clip_dur) if meta else self._clip_dur
             spread = meta["spread"] or self._spn_spread.value() if meta else self._spn_spread.value()
-            next_pos = start_time + 8.0 + (clip_count - 1) * spread
+            next_pos = start_time + clip_dur + (clip_count - 1) * spread
             self._cursor = next_pos
             self._timeline.set_cursor(next_pos)
             self._mpv.seek(next_pos)
@@ -4110,6 +4219,8 @@ class MainWindow(QMainWindow):
                 self._cmb_format.setCurrentIndex(idx)
             if meta["clip_count"] is not None:
                 self._spn_clips.setValue(meta["clip_count"])
+            if meta.get("clip_duration") is not None:
+                self._spn_clip_dur.setValue(meta["clip_duration"])
             if meta["spread"] is not None:
                 self._spn_spread.setValue(meta["spread"])
             if meta["crop_center"] is not None:
@@ -4391,9 +4502,13 @@ class MainWindow(QMainWindow):
             self._on_play(resume=True)
 
     @property
+    def _clip_dur(self) -> float:
+        return self._spn_clip_dur.value()
+
+    @property
     def _clip_span(self) -> float:
         """Total time covered by the overlapping clips."""
-        return 8.0 + (self._spn_clips.value() - 1) * self._spn_spread.value()
+        return self._clip_dur + (self._spn_clips.value() - 1) * self._spn_spread.value()
 
     def _on_play(self, resume: bool = False):
         if not self._file_path:
@@ -4407,6 +4522,15 @@ class MainWindow(QMainWindow):
     def _on_pause(self):
         self._mpv.stop_loop()
 
+    def _set_playback_speed(self, speed: float) -> None:
+        btn = self._btn_speed2 if speed == 2.0 else self._btn_speed4
+        other = self._btn_speed4 if speed == 2.0 else self._btn_speed2
+        if btn.isChecked():
+            self._mpv._player.speed = speed
+            other.setChecked(False)
+        else:
+            self._mpv._player.speed = 1.0
+
     def _autoclip(self):
         """Set clip count to fit the current pause position."""
         if not self._file_path:
@@ -4416,8 +4540,7 @@ class MainWindow(QMainWindow):
             return
         elapsed = play_t - self._cursor
         spread = self._spn_spread.value()
-        # n clips span 8 + (n-1)*spread seconds
-        n = int((elapsed - 8.0) / spread) + 1
+        n = int((elapsed - self._clip_dur) / spread) + 1
         n = max(1, n)
         self._spn_clips.setValue(n)
 
@@ -4641,6 +4764,7 @@ class MainWindow(QMainWindow):
         groups = self._build_export_spans(
             regions, fuse_gap=self._spn_auto_fuse.value(),
             spread=self._spn_spread.value(),
+            min_dur=self._clip_dur,
         )
         n = sum(len(g) for g in groups)
         self._scan_panel.set_export_count(n, partial=partial)
@@ -5019,7 +5143,7 @@ class MainWindow(QMainWindow):
     def _build_export_spans(regions: list[tuple[float, float, float]],
                             fuse_gap: float = 30.0,
                             spread: float = 3.0,
-                            min_dur: float = 8.0,
+                            min_dur: float = 8.0,  # caller passes self._clip_dur
                             ) -> list[list[float]]:
         """Build export position groups from fused scan regions.
 
@@ -5090,12 +5214,13 @@ class MainWindow(QMainWindow):
             return
 
         spread = self._spn_spread.value()
+        clip_dur = self._clip_dur
         groups = self._build_export_spans(
             regions, fuse_gap=self._spn_auto_fuse.value(),
-            spread=spread,
+            spread=spread, min_dur=clip_dur,
         )
         if not groups:
-            self._show_status("Auto: no regions >= 8s")
+            self._show_status(f"Auto: no regions >= {clip_dur}s")
             self._btn_auto_export.setEnabled(True)
             return
 
@@ -5149,6 +5274,7 @@ class MainWindow(QMainWindow):
             "image_sequence": image_sequence,
             "max_workers": max_workers,
             "encoder": encoder,
+            "clip_duration": self._clip_dur,
             "spread": spread,
             "folder": folder,
             "format": fmt,
@@ -5174,6 +5300,7 @@ class MainWindow(QMainWindow):
         self._export_crop_center = 0.5
         self._export_format = batch["format"]
         self._export_clip_count = 1
+        self._export_clip_duration = batch["clip_duration"]
         self._export_spread = batch["spread"]
         self._export_folder = batch["folder"]
         self._export_folder_suffix = ""
@@ -5198,6 +5325,7 @@ class MainWindow(QMainWindow):
             image_sequence=batch["image_sequence"],
             max_workers=batch["max_workers"],
             encoder=batch["encoder"],
+            duration=batch["clip_duration"],
         )
         self._export_worker.finished.connect(self._on_auto_clip_done)
         self._export_worker.all_done.connect(self._on_auto_batch_done)
@@ -5230,6 +5358,7 @@ class MainWindow(QMainWindow):
             crop_center=0.5,
             fmt=self._export_format,
             clip_count=1,
+            clip_duration=self._export_clip_duration,
             spread=self._export_spread,
             profile=self._export_profile,
             source_path=batch_file,
@@ -5340,11 +5469,11 @@ class MainWindow(QMainWindow):
 
         # Check for overlapping existing markers
         if not self._overwrite_path:
-            clip_end = self._cursor + 8.0 + (self._spn_clips.value() - 1) * self._spn_spread.value()
+            clip_end = self._cursor + self._clip_span
             for t, _num, _path in self._timeline._markers:
                 if abs(t - self._cursor) < 0.1:
                     continue  # same position (overwrite case)
-                marker_end = t + 8.0
+                marker_end = t + self._clip_dur
                 if self._cursor < marker_end and clip_end > t:
                     self._show_status("Warning: overlaps with existing export", 3000)
                     break
@@ -5468,6 +5597,7 @@ class MainWindow(QMainWindow):
         self._export_crop_center = self._crop_center
         self._export_format = fmt
         self._export_clip_count = self._spn_clips.value()
+        self._export_clip_duration = self._clip_dur
         self._export_spread = self._spn_spread.value()
         self._export_folder = folder
         self._export_folder_suffix = folder_suffix
@@ -5497,6 +5627,7 @@ class MainWindow(QMainWindow):
             image_sequence=image_sequence,
             max_workers=max_workers,
             encoder=encoder,
+            duration=self._clip_dur,
         )
         self._export_worker.finished.connect(self._on_clip_done)
         self._export_worker.all_done.connect(self._on_batch_done)
@@ -5521,6 +5652,7 @@ class MainWindow(QMainWindow):
             crop_center=self._export_crop_center,
             fmt=self._export_format,
             clip_count=self._export_clip_count,
+            clip_duration=self._export_clip_duration,
             spread=self._export_spread,
             profile=self._export_profile,
             source_path=self._file_path,
@@ -5611,12 +5743,14 @@ class MainWindow(QMainWindow):
         folder = self._txt_folder.text()
         spread = self._spn_spread.value()
 
+        clip_dur = self._clip_dur
         # Compute clip counts for both modes.
         keep_length_total = 0
         keep_count_total = 0
         for g in groups:
-            orig_span = 8.0 + (g["clip_count"] - 1) * g["spread"]
-            keep_length_n = max(1, int((orig_span - 8.0) / spread) + 1)
+            orig_dur = g.get("clip_duration", 8.0)
+            orig_span = orig_dur + (g["clip_count"] - 1) * g["spread"]
+            keep_length_n = max(1, int((orig_span - clip_dur) / spread) + 1)
             keep_length_total += keep_length_n
             keep_count_total += g["clip_count"]
 
@@ -5693,8 +5827,9 @@ class MainWindow(QMainWindow):
             ratio = g["portrait_ratio"] or None
             center = g["crop_center"]
             if keep_length:
-                orig_span = 8.0 + (g["clip_count"] - 1) * g["spread"]
-                n_clips = max(1, int((orig_span - 8.0) / spread) + 1)
+                orig_dur = g.get("clip_duration", 8.0)
+                orig_span = orig_dur + (g["clip_count"] - 1) * g["spread"]
+                n_clips = max(1, int((orig_span - clip_dur) / spread) + 1)
             else:
                 n_clips = g["clip_count"]
             tag = f"m{manual_n}"
@@ -5719,7 +5854,9 @@ class MainWindow(QMainWindow):
         hw_on = self._chk_hw.isChecked() and self._hw_encoders
         encoder = self._hw_encoders[0] if hw_on else "libx264"
         max_workers = min(self._spn_workers.value(), 3) if hw_on else self._spn_workers.value()
+        clip_dur = self._clip_dur
         self._export_spread = spread
+        self._export_clip_duration = clip_dur
         self._export_folder = folder
         self._export_profile = self._profile
 
@@ -5734,6 +5871,7 @@ class MainWindow(QMainWindow):
             image_sequence=image_sequence,
             max_workers=max_workers,
             encoder=encoder,
+            duration=clip_dur,
         )
         self._export_worker.finished.connect(self._on_reexport_clip_done)
         self._export_worker.all_done.connect(self._on_reexport_batch_done)
@@ -5755,6 +5893,7 @@ class MainWindow(QMainWindow):
             crop_center=meta.get("crop_center", 0.5),
             fmt=self._cmb_format.currentText(),
             clip_count=meta.get("clip_count", 1),
+            clip_duration=self._export_clip_duration,
             spread=self._spn_spread.value(),
             profile=self._export_profile,
             source_path=self._file_path,

@@ -46,6 +46,7 @@ class ProcessedDB:
                 "  crop_center     REAL    NOT NULL DEFAULT 0.5,"
                 "  format          TEXT    NOT NULL DEFAULT 'MP4',"
                 "  clip_count      INTEGER NOT NULL DEFAULT 3,"
+                "  clip_duration   REAL    NOT NULL DEFAULT 8.0,"
                 "  spread          REAL    NOT NULL DEFAULT 3.0,"
                 "  profile         TEXT    NOT NULL DEFAULT 'default',"
                 "  source_path     TEXT    NOT NULL DEFAULT '',"
@@ -63,6 +64,7 @@ class ProcessedDB:
                 "crop_center":    "REAL NOT NULL DEFAULT 0.5",
                 "format":         "TEXT NOT NULL DEFAULT 'MP4'",
                 "clip_count":     "INTEGER NOT NULL DEFAULT 3",
+                "clip_duration":  "REAL NOT NULL DEFAULT 8.0",
                 "spread":         "REAL NOT NULL DEFAULT 3.0",
                 "profile":        "TEXT NOT NULL DEFAULT 'default'",
                 "source_path":    "TEXT NOT NULL DEFAULT ''",
@@ -232,7 +234,8 @@ class ProcessedDB:
             label: str = "", category: str = "",
             short_side: int | None = None, portrait_ratio: str = "",
             crop_center: float = 0.5, fmt: str = "MP4",
-            clip_count: int = 3, spread: float = 3.0,
+            clip_count: int = 3, clip_duration: float = 8.0,
+            spread: float = 3.0,
             profile: str = "default", source_path: str = "",
             scan_export: bool = False) -> None:
         if not self._enabled:
@@ -242,11 +245,12 @@ class ProcessedDB:
                 "INSERT INTO processed"
                 " (filename, start_time, output_path, label, category,"
                 "  short_side, portrait_ratio, crop_center, format,"
-                "  clip_count, spread, profile, source_path, scan_export, processed_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "  clip_count, clip_duration, spread, profile, source_path,"
+                "  scan_export, processed_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (filename, start_time, output_path, label, category,
                  short_side, portrait_ratio, crop_center, fmt,
-                 clip_count, spread, profile, source_path,
+                 clip_count, clip_duration, spread, profile, source_path,
                  1 if scan_export else 0,
                  datetime.now(timezone.utc).isoformat()),
             )
@@ -278,7 +282,7 @@ class ProcessedDB:
         cur.row_factory = sqlite3.Row
         row = cur.execute(
             "SELECT label, category, short_side, portrait_ratio, crop_center, format,"
-            " clip_count, spread"
+            " clip_count, clip_duration, spread"
             " FROM processed WHERE output_path = ?",
             (output_path,),
         ).fetchone()
@@ -383,13 +387,14 @@ class ProcessedDB:
         """Return manual (non-scan) export groups for *filename*.
 
         Each group dict has:
-          start_time, paths (list[str] sorted), clip_count, spread,
-          short_side, portrait_ratio, crop_center, format, label, category
+          start_time, paths (list[str] sorted), clip_count, clip_duration,
+          spread, short_side, portrait_ratio, crop_center, format, label,
+          category
         """
         if not self._enabled:
             return []
         rows = self._con.execute(
-            "SELECT start_time, output_path, clip_count, spread,"
+            "SELECT start_time, output_path, clip_count, clip_duration, spread,"
             " short_side, portrait_ratio, crop_center, format, label, category"
             " FROM processed"
             " WHERE filename = ? AND profile = ? AND scan_export = 0"
@@ -403,10 +408,11 @@ class ProcessedDB:
                 groups[t] = {
                     "start_time": t,
                     "paths": [],
-                    "clip_count": r[2], "spread": r[3],
-                    "short_side": r[4], "portrait_ratio": r[5],
-                    "crop_center": r[6], "format": r[7],
-                    "label": r[8], "category": r[9],
+                    "clip_count": r[2], "clip_duration": r[3],
+                    "spread": r[4],
+                    "short_side": r[5], "portrait_ratio": r[6],
+                    "crop_center": r[7], "format": r[8],
+                    "label": r[9], "category": r[10],
                 }
             groups[t]["paths"].append(r[1])
         return list(groups.values())
@@ -447,7 +453,8 @@ class ProcessedDB:
             rows = self._con.execute(
                 "SELECT filename, start_time, output_path, label, category,"
                 " short_side, portrait_ratio, crop_center, format,"
-                " clip_count, spread, source_path, scan_export, processed_at"
+                " clip_count, clip_duration, spread, source_path, scan_export,"
+                " processed_at"
                 " FROM processed WHERE profile = ?", (src,),
             ).fetchall()
             for r in rows:
@@ -455,10 +462,10 @@ class ProcessedDB:
                     "INSERT INTO processed"
                     " (filename, start_time, output_path, label, category,"
                     "  short_side, portrait_ratio, crop_center, format,"
-                    "  clip_count, spread, profile, source_path, scan_export,"
-                    "  processed_at)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (*r[:11], dst, *r[11:]),
+                    "  clip_count, clip_duration, spread, profile,"
+                    "  source_path, scan_export, processed_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (*r[:12], dst, *r[12:]),
                 )
             total += len(rows)
             # scan_results
