@@ -360,6 +360,39 @@ class ProcessedDB:
             return []
         return self._get_markers_for(filename, profile)
 
+    def get_manual_export_groups(self, filename: str, profile: str = "default"
+                                ) -> list[dict]:
+        """Return manual (non-scan) export groups for *filename*.
+
+        Each group dict has:
+          start_time, paths (list[str] sorted), clip_count, spread,
+          short_side, portrait_ratio, crop_center, format, label, category
+        """
+        if not self._enabled:
+            return []
+        rows = self._con.execute(
+            "SELECT start_time, output_path, clip_count, spread,"
+            " short_side, portrait_ratio, crop_center, format, label, category"
+            " FROM processed"
+            " WHERE filename = ? AND profile = ? AND scan_export = 0"
+            " ORDER BY start_time, output_path",
+            (filename, profile),
+        ).fetchall()
+        groups: dict[float, dict] = {}
+        for r in rows:
+            t = r[0]
+            if t not in groups:
+                groups[t] = {
+                    "start_time": t,
+                    "paths": [],
+                    "clip_count": r[2], "spread": r[3],
+                    "short_side": r[4], "portrait_ratio": r[5],
+                    "crop_center": r[6], "format": r[7],
+                    "label": r[8], "category": r[9],
+                }
+            groups[t]["paths"].append(r[1])
+        return list(groups.values())
+
     def get_clip_count(self, filename: str, profile: str = "default") -> int:
         """Return total number of exported clips (including scan exports)."""
         if not self._enabled:
@@ -371,13 +404,69 @@ class ProcessedDB:
         return row[0] if row else 0
 
     def get_profiles(self) -> list[str]:
-        """Return distinct profile names, ordered alphabetically."""
+        """Return distinct profile names across all tables, ordered alphabetically."""
         if not self._enabled:
             return []
         rows = self._con.execute(
-            "SELECT DISTINCT profile FROM processed ORDER BY profile"
+            "SELECT DISTINCT profile FROM processed"
+            " UNION SELECT DISTINCT profile FROM scan_results"
+            " UNION SELECT DISTINCT profile FROM hard_negatives"
+            " ORDER BY profile"
         ).fetchall()
         return [r[0] for r in rows]
+
+    def duplicate_profile(self, src: str, dst: str) -> int:
+        """Copy scan_results, hard_negatives, and hidden_files from *src* to *dst*.
+
+        Exports (processed) are NOT copied because their output_paths
+        reference files in the source profile's folder structure.
+        Returns total number of rows copied.
+        """
+        if not self._enabled or src == dst:
+            return 0
+        total = 0
+        with self._lock:
+            # scan_results
+            rows = self._con.execute(
+                "SELECT filename, model, start_time, end_time, score,"
+                " disabled, orig_start_time, orig_end_time, scan_timestamp"
+                " FROM scan_results WHERE profile = ?", (src,),
+            ).fetchall()
+            for r in rows:
+                self._con.execute(
+                    "INSERT INTO scan_results"
+                    " (filename, profile, model, start_time, end_time, score,"
+                    "  disabled, orig_start_time, orig_end_time, scan_timestamp)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (r[0], dst, r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8]),
+                )
+            total += len(rows)
+            # hard_negatives
+            rows = self._con.execute(
+                "SELECT filename, start_time, source_path, source_model"
+                " FROM hard_negatives WHERE profile = ?", (src,),
+            ).fetchall()
+            for r in rows:
+                self._con.execute(
+                    "INSERT INTO hard_negatives"
+                    " (filename, profile, start_time, source_path, source_model)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (r[0], dst, r[1], r[2], r[3]),
+                )
+            total += len(rows)
+            # hidden_files
+            rows = self._con.execute(
+                "SELECT filename FROM hidden_files WHERE profile = ?", (src,),
+            ).fetchall()
+            for r in rows:
+                self._con.execute(
+                    "INSERT OR IGNORE INTO hidden_files (filename, profile)"
+                    " VALUES (?, ?)",
+                    (r[0], dst),
+                )
+            total += len(rows)
+            self._con.commit()
+        return total
 
     def get_all_export_paths(self, profile: str = "default") -> list[str]:
         """Return all unique output_path values for a given profile."""

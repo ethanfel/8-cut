@@ -3253,6 +3253,10 @@ class MainWindow(QMainWindow):
         self._spn_spread.valueChanged.connect(self._update_play_loop)
         self._spn_spread.valueChanged.connect(lambda: self._update_scan_export_count())
 
+        self._btn_reexport = QPushButton("Re-export")
+        self._btn_reexport.setToolTip("Re-export all manual clips for this file with the current spread")
+        self._btn_reexport.clicked.connect(self._reexport_all_manual)
+
         self._chk_rand_portrait = QCheckBox("1 random portrait")
         self._chk_rand_portrait.setToolTip(
             "One random clip per batch gets a random portrait crop (9:16 + random position)"
@@ -3478,6 +3482,7 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(self._spn_clips)
         settings_row.addWidget(QLabel("Spread:"))
         settings_row.addWidget(self._spn_spread)
+        settings_row.addWidget(self._btn_reexport)
         settings_row.addWidget(self._chk_rand_portrait)
         settings_row.addWidget(self._chk_rand_square)
         settings_row.addWidget(self._chk_track)
@@ -3710,6 +3715,7 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Keyboard shortcuts", text)
 
     _NEW_PROFILE_SENTINEL = "+ New profile..."
+    _DUP_PROFILE_SENTINEL = "Duplicate profile..."
 
     def _populate_profile_combo(self) -> None:
         """Rebuild profile combo items from DB, preserving selection."""
@@ -3722,6 +3728,7 @@ class MainWindow(QMainWindow):
         else:
             self._cmb_profile.addItem("default")
         self._cmb_profile.addItem(self._NEW_PROFILE_SENTINEL)
+        self._cmb_profile.addItem(self._DUP_PROFILE_SENTINEL)
         idx = self._cmb_profile.findText(prev)
         if idx >= 0:
             self._cmb_profile.setCurrentIndex(idx)
@@ -3730,23 +3737,29 @@ class MainWindow(QMainWindow):
     @property
     def _profile(self) -> str:
         text = self._cmb_profile.currentText()
-        if text == self._NEW_PROFILE_SENTINEL:
+        if text in (self._NEW_PROFILE_SENTINEL, self._DUP_PROFILE_SENTINEL):
             return "default"
         return text.strip() or "default"
 
     def _on_profile_activated(self, index: int) -> None:
         text = self._cmb_profile.itemText(index)
-        if text == self._NEW_PROFILE_SENTINEL:
-            name, ok = QInputDialog.getText(self, "New profile", "Profile name:")
+        if text in (self._NEW_PROFILE_SENTINEL, self._DUP_PROFILE_SENTINEL):
+            is_dup = text == self._DUP_PROFILE_SENTINEL
+            prev = self._settings.value("profile", "default")
+            prompt = f"Duplicate '{prev}' as:" if is_dup else "Profile name:"
+            title = "Duplicate profile" if is_dup else "New profile"
+            name, ok = QInputDialog.getText(self, title, prompt)
             name = name.strip()
-            if ok and name and name != self._NEW_PROFILE_SENTINEL:
-                # Insert before the sentinel and select it
-                sentinel_idx = self._cmb_profile.count() - 1
+            sentinels = (self._NEW_PROFILE_SENTINEL, self._DUP_PROFILE_SENTINEL)
+            if ok and name and name not in sentinels:
+                if is_dup:
+                    n = self._db.duplicate_profile(prev, name)
+                    _log(f"Duplicated profile '{prev}' → '{name}' ({n} rows)")
+                # Insert before the sentinels and select it
+                sentinel_idx = self._cmb_profile.count() - 2
                 self._cmb_profile.insertItem(sentinel_idx, name)
                 self._cmb_profile.setCurrentIndex(sentinel_idx)
             else:
-                # Cancelled — revert to previous profile
-                prev = self._settings.value("profile", "default")
                 idx = self._cmb_profile.findText(prev)
                 if idx >= 0:
                     self._cmb_profile.setCurrentIndex(idx)
@@ -5515,6 +5528,7 @@ class MainWindow(QMainWindow):
         _log(f"Export error: {msg}")
         self._btn_cancel.setEnabled(False)
         self._btn_export.setEnabled(True)
+        self._btn_reexport.setEnabled(True)
         self._btn_auto_export.setEnabled(True)
         self._set_subprofile_btns_enabled(True)
         self._btn_export.setText("Export")
@@ -5533,6 +5547,7 @@ class MainWindow(QMainWindow):
         self._export_queue.clear()
         _log(f"Export cancelled (dropped {n_dropped} queued)")
         self._btn_export.setEnabled(True)
+        self._btn_reexport.setEnabled(True)
         self._btn_auto_export.setEnabled(True)
         self._set_subprofile_btns_enabled(True)
         self._btn_export.setText("Export")
@@ -5546,6 +5561,144 @@ class MainWindow(QMainWindow):
         if n_dropped:
             msg += f" ({n_dropped} queued batches dropped)"
         self._show_status(msg, 4000)
+
+    def _reexport_all_manual(self):
+        if not self._file_path:
+            return
+        if self._export_worker and self._export_worker.isRunning():
+            self._show_status("Export already running")
+            return
+        fname = os.path.basename(self._file_path)
+        groups = self._db.get_manual_export_groups(fname, self._profile)
+        if not groups:
+            self._show_status("No manual exports to re-export")
+            return
+        total = sum(len(g["paths"]) for g in groups)
+        spread = self._spn_spread.value()
+        reply = QMessageBox.question(
+            self, "Re-export manual clips",
+            f"Re-export {total} clip(s) across {len(groups)} marker(s)\n"
+            f"with spread = {spread}s?\n\n"
+            f"Old files will be deleted and re-rendered.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        folder = self._txt_folder.text()
+        name = self._txt_name.text() or "clip"
+        fmt = self._cmb_format.currentText()
+        image_sequence = fmt == "WebP sequence"
+
+        # Delete old files from their original locations.
+        for g in groups:
+            old_folder = os.path.dirname(os.path.dirname(g["paths"][0])) if g["paths"] else folder
+            for path in g["paths"]:
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                    wav = path + ".wav"
+                    if os.path.exists(wav):
+                        os.remove(wav)
+                elif os.path.exists(path):
+                    os.remove(path)
+                remove_clip_annotation(old_folder, path)
+                self._db.delete_by_output_path(path)
+
+        # Build new jobs in the CURRENT folder.
+        vid_name = self._get_vid_folder(folder)
+        vid_folder = os.path.join(folder, vid_name)
+        os.makedirs(vid_folder, exist_ok=True)
+        vid_num = int(vid_name.split("_")[-1])
+        manual_n = 1
+        while True:
+            tag = f"m{manual_n}"
+            test = build_export_path(vid_folder, name, vid_num, sub=0, tag=tag)
+            if not os.path.exists(test):
+                break
+            manual_n += 1
+
+        jobs = []
+        self._reexport_meta: dict[str, dict] = {}
+        for g in groups:
+            cursor_t = g["start_time"]
+            ratio = g["portrait_ratio"] or None
+            center = g["crop_center"]
+            n_clips = len(g["paths"])
+            tag = f"m{manual_n}"
+            manual_n += 1
+            for i in range(n_clips):
+                start = cursor_t + i * spread
+                if image_sequence:
+                    out = build_sequence_dir(vid_folder, name, vid_num, sub=i, tag=tag)
+                else:
+                    out = build_export_path(vid_folder, name, vid_num, sub=i, tag=tag)
+                jobs.append((start, out, ratio, center))
+                self._reexport_meta[os.path.normpath(out)] = {
+                    "cursor": cursor_t,
+                    "label": g["label"],
+                    "category": g["category"],
+                    "clip_count": n_clips,
+                    "portrait_ratio": g["portrait_ratio"],
+                    "crop_center": center,
+                }
+
+        short_side = self._spn_resize.value() or None
+        hw_on = self._chk_hw.isChecked() and self._hw_encoders
+        encoder = self._hw_encoders[0] if hw_on else "libx264"
+        max_workers = min(self._spn_workers.value(), 3) if hw_on else self._spn_workers.value()
+        self._export_spread = spread
+        self._export_folder = folder
+        self._export_profile = self._profile
+
+        self._btn_export.setEnabled(False)
+        self._btn_reexport.setEnabled(False)
+        self._set_subprofile_btns_enabled(False)
+        self._show_status(f"Re-exporting {len(jobs)} clip(s) with spread={spread}s…")
+
+        self._export_worker = ExportWorker(
+            self._file_path, jobs,
+            short_side=short_side,
+            image_sequence=image_sequence,
+            max_workers=max_workers,
+            encoder=encoder,
+        )
+        self._export_worker.finished.connect(self._on_reexport_clip_done)
+        self._export_worker.all_done.connect(self._on_reexport_batch_done)
+        self._export_worker.error.connect(self._on_export_error)
+        self._export_worker.cancelled.connect(self._on_export_cancelled)
+        self._btn_cancel.setEnabled(True)
+        self._export_worker.start()
+
+    def _on_reexport_clip_done(self, path: str):
+        meta = self._reexport_meta.get(os.path.normpath(path), {})
+        self._db.add(
+            os.path.basename(self._file_path),
+            meta.get("cursor", 0.0),
+            path,
+            label=meta.get("label", ""),
+            category=meta.get("category", ""),
+            short_side=self._spn_resize.value() or None,
+            portrait_ratio=meta.get("portrait_ratio", ""),
+            crop_center=meta.get("crop_center", 0.5),
+            fmt=self._cmb_format.currentText(),
+            clip_count=meta.get("clip_count", 1),
+            spread=self._spn_spread.value(),
+            profile=self._export_profile,
+            source_path=self._file_path,
+        )
+        upsert_clip_annotation(self._export_folder, path, meta.get("label", ""))
+        self._show_status(f"Re-exported: {os.path.basename(path)}")
+
+    def _on_reexport_batch_done(self):
+        self._btn_cancel.setEnabled(False)
+        self._btn_export.setEnabled(True)
+        self._btn_reexport.setEnabled(True)
+        self._set_subprofile_btns_enabled(True)
+        self._refresh_markers()
+        self._refresh_playlist_checks()
+        self._update_next_label()
+        total = len(self._reexport_meta)
+        self._reexport_meta = {}
+        self._show_status(f"Re-export complete: {total} clips updated")
 
     def changeEvent(self, event):
         super().changeEvent(event)
