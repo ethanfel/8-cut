@@ -465,7 +465,7 @@ class TrainDialog(QDialog):
         self._cmb_model = QComboBox()
         for name in _EMBED_MODELS:
             self._cmb_model.addItem(name)
-        self._cmb_model.setCurrentText("HUBERT_XLARGE")
+        self._cmb_model.setCurrentText("EAT_LARGE")
         form.addRow("Model:", self._cmb_model)
 
         # Auto-negative margin (0 = disabled)

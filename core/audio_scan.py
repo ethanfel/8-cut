@@ -67,7 +67,7 @@ _EMBED_MODELS = {
     "EAT":                 768,
     "EAT_LARGE":          1024,
 }
-_DEFAULT_EMBED_MODEL = "WAV2VEC2_BASE"
+_DEFAULT_EMBED_MODEL = "EAT_LARGE"
 
 _BEATS_CHECKPOINT = os.path.join(
     _DL_CACHE_DIR, "huggingface", "hub",
