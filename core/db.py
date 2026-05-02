@@ -358,25 +358,26 @@ class ProcessedDB:
             self._con.commit()
             return paths
 
-    def _get_markers_for(self, match: str, profile: str = "default") -> list[tuple[float, int, str]]:
+    def _get_markers_for(self, match: str, profile: str = "default") -> list[tuple[float, int, str, float]]:
         rows = self._con.execute(
-            "SELECT start_time, output_path FROM processed"
+            "SELECT start_time, output_path, clip_duration, clip_count, spread"
+            " FROM processed"
             " WHERE filename = ? AND profile = ? AND scan_export = 0"
             " ORDER BY start_time",
             (match, profile),
         ).fetchall()
-        # Deduplicate by start_time — batch exports share the same cursor.
-        seen_times: dict[float, tuple[float, int, str]] = {}
+        seen_times: dict[float, tuple[float, int, str, float]] = {}
         n = 0
-        for t, p in rows:
+        for t, p, dur, cnt, spr in rows:
             if t not in seen_times:
                 n += 1
-                seen_times[t] = (t, n, p)
+                span = (dur or 8.0) + ((cnt or 1) - 1) * (spr or 3.0)
+                seen_times[t] = (t, n, p, span)
         return list(seen_times.values())
 
-    def get_markers(self, filename: str, profile: str = "default") -> list[tuple[float, int, str]]:
-        """Return [(start_time, marker_number, output_path), ...] for exact
-        filename match, sorted by start_time. Empty list if no match.
+    def get_markers(self, filename: str, profile: str = "default") -> list[tuple[float, int, str, float]]:
+        """Return [(start_time, marker_number, output_path, clip_span), ...]
+        for exact filename match, sorted by start_time. Empty list if no match.
         Excludes scan exports (shown via scan panel instead)."""
         if not self._enabled:
             return []
@@ -691,6 +692,7 @@ class ProcessedDB:
     def get_training_data(self, profile: str, positive_folder: str,
                           negative_folder: str = "",
                           fallback_video_dir: str = "",
+                          playlist_paths: list[str] | None = None,
                           include_scan_exports: bool = False,
                           use_hard_negatives: bool = True,
                           ) -> list[tuple[str, list[float], list[float], list[float]]]:
@@ -701,6 +703,7 @@ class ProcessedDB:
             positive_folder: export folder name for positive class (e.g. "mp4_Intense")
             negative_folder: export folder name for explicit negatives (optional)
             fallback_video_dir: if source_path is empty, try filename in this dir
+            playlist_paths: loaded playlist paths to resolve filenames
             include_scan_exports: if True, include auto-exported scan clips
             use_hard_negatives: if False, skip hard negatives from scan feedback
 
@@ -770,11 +773,19 @@ class ProcessedDB:
                     result.append(t)
             return result
 
+        # Build filename→path lookup from playlist
+        playlist_lookup: dict[str, str] = {}
+        if playlist_paths:
+            for p in playlist_paths:
+                playlist_lookup[os.path.basename(p)] = p
+
         # Include videos that have positives OR explicit negatives
         all_videos = set(pos_by_video) | set(neg_by_video)
         result = []
         for fn in all_videos:
             sp = source_by_filename.get(fn, "")
+            if not sp or not os.path.exists(sp):
+                sp = playlist_lookup.get(fn, "")
             if not sp or not os.path.exists(sp):
                 if fallback_video_dir:
                     sp = os.path.join(fallback_video_dir, fn)

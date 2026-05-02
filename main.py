@@ -435,7 +435,7 @@ class TrainDialog(QDialog):
     """Dialog for configuring and launching classifier training."""
 
     def __init__(self, db: ProcessedDB, profile: str, video_dir: str = "",
-                 parent=None):
+                 playlist_paths: list[str] | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Train Classifier")
         self.setMinimumWidth(400)
@@ -444,6 +444,7 @@ class TrainDialog(QDialog):
         self._db = db
         self._profile = profile
         self._video_dir = video_dir
+        self._playlist_paths = playlist_paths
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -600,12 +601,14 @@ class TrainDialog(QDialog):
         # First check without fallback to see if source_paths are sufficient
         video_infos_no_fb = self._db.get_training_data(
             self._profile, folder, negative_folder=neg_folder,
+            playlist_paths=self._playlist_paths,
             include_scan_exports=inc_scan,
             use_hard_negatives=use_neg,
         )
         video_infos = self._db.get_training_data(
             self._profile, folder, negative_folder=neg_folder,
             fallback_video_dir=self._txt_video_dir.text(),
+            playlist_paths=self._playlist_paths,
             include_scan_exports=inc_scan,
             use_hard_negatives=use_neg,
         )
@@ -1684,7 +1687,7 @@ class TimelineWidget(QWidget):
         self._play_pos: float | None = None  # current playback position (seconds)
         self._locked = False                 # when True, clicks scrub playback, not cursor
         self._crop_keyframes: list[tuple[float, float, str | None, bool, bool]] = []
-        self._markers: list[tuple[float, int, str]] = []
+        self._markers: list[tuple[float, int, str, float]] = []
         # (start, end, score, orig_start, orig_end)
         self._scan_regions: list[tuple[float, float, float, float, float]] = []
         self._scan_neg_times: set[float] = set()
@@ -1753,8 +1756,8 @@ class TimelineWidget(QWidget):
         self._cursor = clamped
         self.update()
 
-    def set_markers(self, markers: list[tuple[float, int, str]]) -> None:
-        """markers: list of (start_time, number, output_path)"""
+    def set_markers(self, markers: list[tuple[float, int, str, float]]) -> None:
+        """markers: list of (start_time, number, output_path, clip_span)"""
         self._markers = markers
         self.update()
 
@@ -2009,9 +2012,16 @@ class TimelineWidget(QWidget):
                     p.setPen(QPen(QColor(255, 210, 0), 2))
                     p.drawRect(ax1, rh + 1, max(ax2 - ax1, 1), h - rh - 2)
 
+            # ── manual clip span areas ────────────────────────────────────
+            for (t, _num, _path, span) in self._markers:
+                mx1 = int(self._time_to_x(t))
+                mx2 = int(self._time_to_x(min(t + span, self._duration)))
+                if mx2 > mx1 and mx2 > 0 and mx1 < w:
+                    p.fillRect(mx1, rh, mx2 - mx1, th, QColor(200, 160, 60, 35))
+
             # ── export markers ────────────────────────────────────────────
             p.setFont(self._marker_font)
-            for (t, num, _path) in self._markers:
+            for (t, num, _path, _span) in self._markers:
                 mx = int(self._time_to_x(t))
                 if mx < -20 or mx > w + 20:
                     continue
@@ -2120,11 +2130,12 @@ class TimelineWidget(QWidget):
         from PyQt6.QtCore import Qt as _Qt
         if event.button() == _Qt.MouseButton.LeftButton:
             x = event.position().x()
-            for (t, _num, output_path) in self._markers:
+            for (t, _num, output_path, _span) in self._markers:
                 if abs(x - self._time_to_x(t)) <= 10:
                     self.marker_clicked.emit(t, output_path)
                     if not self._locked:
-                        self._seek(x)
+                        self.set_cursor(t)
+                        self._seek_timer.start()
                     return
             self.marker_deselected.emit()
             self._seek(x)
@@ -2175,7 +2186,7 @@ class TimelineWidget(QWidget):
             self.unsetCursor()
 
         # Marker hover tooltip
-        for (t, _num, output_path) in self._markers:
+        for (t, _num, output_path, _span) in self._markers:
             if abs(x - self._time_to_x(t)) <= 8:
                 QToolTip.showText(QCursor.pos(), os.path.basename(output_path), self)
                 if event.buttons():
@@ -2250,7 +2261,7 @@ class TimelineWidget(QWidget):
                 break
         # Check export markers.
         hit_path = None
-        for (t, _num, output_path) in self._markers:
+        for (t, _num, output_path, _span) in self._markers:
             if abs(x - self._time_to_x(t)) <= 10:
                 hit_path = output_path
                 break
@@ -2900,6 +2911,14 @@ class PlaylistWidget(QListWidget):
             self.setCurrentRow(row)
             self._decorate_current(row)
         self.blockSignals(False)
+
+    def clear_all(self) -> None:
+        self._paths.clear()
+        self._path_set.clear()
+        self._done_set.clear()
+        self._done_counts.clear()
+        self._selected_path = None
+        self._rebuild()
 
     def add_files(self, paths: list[str]) -> None:
         was_empty = len(self._paths) == 0
@@ -3721,8 +3740,10 @@ class MainWindow(QMainWindow):
         for key in ("?", "F1"):
             QShortcut(QKeySequence(key), self, context=ctx).activated.connect(self._show_shortcuts)
 
-        # Resume last session: reload previous playlist files.
-        session_files = self._settings.value("session_files", [])
+        # Resume last session: reload previous playlist files (per-profile).
+        session_files = self._settings.value(f"session_files/{self._profile}", [])
+        if not session_files:
+            session_files = self._settings.value("session_files", [])
         if session_files:
             valid = [p for p in session_files if os.path.isfile(p)]
             if valid:
@@ -3870,6 +3891,8 @@ class MainWindow(QMainWindow):
             if ok and name and name not in self._PROFILE_SENTINELS:
                 if is_dup:
                     n = self._db.duplicate_profile(prev, name)
+                    self._settings.setValue(f"session_files/{prev}", self._playlist._paths)
+                    self._settings.setValue(f"session_files/{name}", list(self._playlist._paths))
                     _log(f"Duplicated profile '{prev}' → '{name}' ({n} rows)")
                 sentinel_idx = self._cmb_profile.count() - 3
                 self._cmb_profile.insertItem(sentinel_idx, name)
@@ -3880,7 +3903,16 @@ class MainWindow(QMainWindow):
                     self._cmb_profile.setCurrentIndex(idx)
                 return
             text = name
+        # Save current profile's playlist before switching.
+        self._settings.setValue(f"session_files/{prev}", self._playlist._paths)
         self._settings.setValue("profile", text)
+        # Load new profile's playlist.
+        new_files = self._settings.value(f"session_files/{text}", [])
+        self._playlist.clear_all()
+        if new_files:
+            valid = [p for p in new_files if os.path.isfile(p)]
+            if valid:
+                self._playlist.add_files(valid)
         # Clear overwrite state — the selected marker belongs to the old profile
         if self._overwrite_path:
             self._overwrite_path = ""
@@ -3893,10 +3925,11 @@ class MainWindow(QMainWindow):
         self._update_next_label()
         self._apply_playlist_filters()
         self._refresh_scan_models()
-        if self._file_path:
-            self._refresh_markers()
-            _log(f"Profile switched: {text}")
-            self._show_status(f"Profile: {text}", 3000)
+        if self._playlist.count() > 0:
+            self._playlist._select(0)
+        self._refresh_markers()
+        _log(f"Profile switched: {text}")
+        self._show_status(f"Profile: {text}", 3000)
 
     def _delete_current_profile(self, name: str) -> None:
         prev = name
@@ -3917,6 +3950,7 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
         self._db.delete_profile(prev)
+        self._settings.remove(f"session_files/{prev}")
         _log(f"Deleted profile '{prev}' ({n} rows)")
         self._settings.setValue("profile", "default")
         self._populate_profile_combo()
@@ -4027,6 +4061,9 @@ class MainWindow(QMainWindow):
             self._apply_playlist_filters()
 
     def _load_file(self, path: str):
+        if not os.path.isfile(path):
+            self._show_status(f"File not found: {os.path.basename(path)}", 5000)
+            return
         self._file_path = path
         self._lbl_file.setText(os.path.basename(path))
         self.setWindowTitle(f"8-cut — {os.path.basename(path)}")
@@ -5049,7 +5086,8 @@ class MainWindow(QMainWindow):
         saved_dir = self._settings.value("train_video_dir", default_dir)
 
         dlg = TrainDialog(self._db, self._profile,
-                          video_dir=saved_dir or default_dir, parent=self)
+                          video_dir=saved_dir or default_dir,
+                          playlist_paths=self._playlist._paths, parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
@@ -5071,6 +5109,7 @@ class MainWindow(QMainWindow):
         video_infos = self._db.get_training_data(
             self._profile, pos_folder, negative_folder=neg_folder,
             fallback_video_dir=video_dir,
+            playlist_paths=self._playlist._paths,
             include_scan_exports=inc_scan,
             use_hard_negatives=use_neg,
         )
@@ -5611,7 +5650,7 @@ class MainWindow(QMainWindow):
         # Show one pending marker at the cursor position for the whole batch.
         first_out = jobs[0][1]
         pending = list(self._timeline._markers)
-        pending.append((self._cursor, counter, first_out))
+        pending.append((self._cursor, counter, first_out, self._clip_span))
         self._timeline.set_markers(pending)
 
         hw_on = self._chk_hw.isChecked() and self._hw_encoders
@@ -5921,8 +5960,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         _log("Shutting down…")
-        # Save session playlist for resume.
-        self._settings.setValue("session_files", self._playlist._paths)
+        # Save session playlist for resume (per-profile).
+        self._settings.setValue(f"session_files/{self._profile}", self._playlist._paths)
         # Cancel background workers to prevent callbacks into dead objects.
         self._cleanup_scan_worker()
         self._cleanup_train_worker()
