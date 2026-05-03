@@ -1814,6 +1814,15 @@ class TimelineWidget(QWidget):
         if self._locked and self._play_pos is not None and self._seek_timer.isActive():
             return
         self._play_pos = t
+        if t is not None and self._view_span > 0:
+            view_end = self._view_start + self._view_span
+            margin = self._view_span * 0.1
+            if t > view_end - margin:
+                self._view_start = t - self._view_span + margin
+                self._clamp_view()
+            elif t < self._view_start + margin:
+                self._view_start = t - margin
+                self._clamp_view()
         self.update()
 
     def set_crop_keyframes(self, kfs: list[tuple[float, float, str | None, bool, bool]]) -> None:
@@ -2017,7 +2026,7 @@ class TimelineWidget(QWidget):
                 mx1 = int(self._time_to_x(t))
                 mx2 = int(self._time_to_x(min(t + span, self._duration)))
                 if mx2 > mx1 and mx2 > 0 and mx1 < w:
-                    p.fillRect(mx1, rh, mx2 - mx1, th, QColor(200, 160, 60, 70))
+                    p.fillRect(mx1, rh, mx2 - mx1, th, QColor(200, 160, 60, 35))
 
             # ── export markers ────────────────────────────────────────────
             p.setFont(self._marker_font)
