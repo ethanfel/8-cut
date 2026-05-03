@@ -5524,10 +5524,10 @@ class MainWindow(QMainWindow):
         # Check for overlapping existing markers
         if not self._overwrite_path:
             clip_end = self._cursor + self._clip_span
-            for t, _num, _path in self._timeline._markers:
+            for t, _num, _path, m_span in self._timeline._markers:
                 if abs(t - self._cursor) < 0.1:
                     continue  # same position (overwrite case)
-                marker_end = t + self._clip_dur
+                marker_end = t + m_span
                 if self._cursor < marker_end and clip_end > t:
                     self._show_status("Warning: overlaps with existing export", 3000)
                     break
