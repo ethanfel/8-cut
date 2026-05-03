@@ -1672,9 +1672,10 @@ class TimelineWidget(QWidget):
     # (index, new_start, new_end, old_start, old_end)
     scan_region_resized = pyqtSignal(int, float, float, float, float)
 
-    _RULER_H = 22   # pixels reserved for the time ruler
-    _HANDLE_H = 8   # height of the playhead triangle
-    _EDGE_PX = 3    # pixel tolerance for edge hit detection
+    _SCROLLBAR_H = 8  # pixels reserved for the overview scrollbar
+    _RULER_H = 22     # pixels reserved for the time ruler
+    _HANDLE_H = 8     # height of the playhead triangle
+    _EDGE_PX = 3      # pixel tolerance for edge hit detection
 
     def __init__(self):
         super().__init__()
@@ -1701,6 +1702,9 @@ class TimelineWidget(QWidget):
         self._pan_active = False
         self._pan_start_x = 0.0
         self._pan_start_view = 0.0
+        # Scrollbar drag state
+        self._sb_drag = False
+        self._sb_drag_offset = 0.0
 
         # Waveform data (numpy array of 0-1 peak values, or None)
         self._waveform = None
@@ -1880,12 +1884,23 @@ class TimelineWidget(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         try:
             w, h = self.width(), self.height()
-            rh = self._RULER_H
+            zoomed = self._view_span > 0 and self._duration > 0
+            sb_h = self._SCROLLBAR_H if zoomed else 0
+            rh = sb_h + self._RULER_H
             th = h - rh          # track height
 
+            # ── scrollbar (overview minimap) ──────────────────────────────
+            if zoomed:
+                p.fillRect(0, 0, w, sb_h, QColor(18, 18, 18))
+                thumb_w = max(12, int(self._view_span / self._duration * w))
+                thumb_x = int(self._view_start / self._duration * w)
+                p.fillRect(thumb_x, 1, thumb_w, sb_h - 2, QColor(90, 90, 90))
+                p.setPen(QPen(QColor(55, 55, 55)))
+                p.drawLine(0, sb_h - 1, w, sb_h - 1)
+
             # ── backgrounds ──────────────────────────────────────────────
-            p.fillRect(0, 0, w, rh, QColor(22, 22, 22))        # ruler bg
-            p.fillRect(0, rh, w, th, QColor(32, 32, 32))       # track bg
+            p.fillRect(0, sb_h, w, self._RULER_H, QColor(22, 22, 22))  # ruler bg
+            p.fillRect(0, rh, w, th, QColor(32, 32, 32))               # track bg
 
             # subtle track lane (slightly raised strip in the middle)
             lane_y = rh + th // 4
@@ -2114,6 +2129,23 @@ class TimelineWidget(QWidget):
 
     def mousePressEvent(self, event):
         x = event.position().x()
+        y = event.position().y()
+        # Scrollbar drag
+        if event.button() == Qt.MouseButton.LeftButton and self._view_span > 0 and y < self._SCROLLBAR_H:
+            w = self.width()
+            thumb_w = max(12, int(self._view_span / self._duration * w))
+            thumb_x = int(self._view_start / self._duration * w)
+            if thumb_x <= x <= thumb_x + thumb_w:
+                self._sb_drag = True
+                self._sb_drag_offset = x - thumb_x
+            else:
+                center_t = x / w * self._duration - self._view_span / 2
+                self._view_start = center_t
+                self._clamp_view()
+                self._sb_drag = True
+                self._sb_drag_offset = thumb_w / 2
+                self.update()
+            return
         # Middle-mouse drag pans the view window.
         if event.button() == Qt.MouseButton.MiddleButton and self._view_span > 0:
             self._pan_active = True
@@ -2138,6 +2170,8 @@ class TimelineWidget(QWidget):
     def mouseDoubleClickEvent(self, event):
         from PyQt6.QtCore import Qt as _Qt
         if event.button() == _Qt.MouseButton.LeftButton:
+            if self._view_span > 0 and event.position().y() < self._SCROLLBAR_H:
+                return
             x = event.position().x()
             for (t, _num, output_path, _span) in self._markers:
                 if abs(x - self._time_to_x(t)) <= 10:
@@ -2152,6 +2186,14 @@ class TimelineWidget(QWidget):
     def mouseMoveEvent(self, event):
         x = event.position().x()
         w = self.width()
+
+        # Active scrollbar drag
+        if self._sb_drag and event.buttons() & Qt.MouseButton.LeftButton:
+            new_x = x - self._sb_drag_offset
+            self._view_start = new_x / max(w, 1) * self._duration
+            self._clamp_view()
+            self.update()
+            return
 
         # Active middle-mouse pan
         if self._pan_active and event.buttons() & Qt.MouseButton.MiddleButton:
@@ -2212,6 +2254,9 @@ class TimelineWidget(QWidget):
             self.cursor_changed.emit(self._cursor)
 
     def mouseReleaseEvent(self, event):
+        if self._sb_drag and event.button() == Qt.MouseButton.LeftButton:
+            self._sb_drag = False
+            return
         if self._pan_active and event.button() == Qt.MouseButton.MiddleButton:
             self._pan_active = False
             self.unsetCursor()
