@@ -2600,7 +2600,7 @@ class MpvWidget(QWidget):
         if self._player.duration is None:
             return
         try:
-            self._player.seek(t, "absolute")
+            self._player.seek(t, "absolute", "exact")
         except SystemError:
             pass
 
@@ -2608,7 +2608,7 @@ class MpvWidget(QWidget):
         self._player["ab-loop-a"] = a
         self._player["ab-loop-b"] = min(b, self._player.duration or b)
         if not resume:
-            self._player.seek(a, "absolute")
+            self._player.seek(a, "absolute", "exact")
         self._player.pause = False
 
     def update_loop_end(self, b: float):
