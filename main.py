@@ -2017,7 +2017,7 @@ class TimelineWidget(QWidget):
                 mx1 = int(self._time_to_x(t))
                 mx2 = int(self._time_to_x(min(t + span, self._duration)))
                 if mx2 > mx1 and mx2 > 0 and mx1 < w:
-                    p.fillRect(mx1, rh, mx2 - mx1, th, QColor(200, 160, 60, 35))
+                    p.fillRect(mx1, rh, mx2 - mx1, th, QColor(200, 160, 60, 70))
 
             # ── export markers ────────────────────────────────────────────
             p.setFont(self._marker_font)
@@ -4221,6 +4221,10 @@ class MainWindow(QMainWindow):
             group_label = stem.rsplit("_", 1)[0]
             self._show_status(f"Cursor → end of {group_label}", 3000)
             return
+        self._cursor = start_time
+        self._timeline.set_cursor(start_time)
+        self._mpv.seek(start_time)
+        self._lbl_time.setText(f"{format_time(start_time)} / {format_time(self._mpv.get_duration())}")
         self._overwrite_path = output_path
         self._overwrite_group = self._db.get_group(output_path)
         n = len(self._overwrite_group)
@@ -4266,6 +4270,8 @@ class MainWindow(QMainWindow):
                 self._crop_bar.set_crop_center(self._crop_center)
                 if ratio != "Off":
                     self._mpv.set_crop_overlay(_RATIOS[ratio], self._crop_center)
+        self._preview_timer.start()
+        self._update_next_label()
         self._show_status(
             f"Overwrite mode: {group_label} ({n} clip{'s' if n != 1 else ''}) — export to replace", 5000
         )
