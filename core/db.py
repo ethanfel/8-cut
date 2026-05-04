@@ -358,14 +358,25 @@ class ProcessedDB:
             self._con.commit()
             return paths
 
-    def _get_markers_for(self, match: str, profile: str = "default") -> list[tuple[float, int, str, float]]:
-        rows = self._con.execute(
-            "SELECT start_time, output_path, clip_duration, clip_count, spread"
-            " FROM processed"
-            " WHERE filename = ? AND profile = ? AND scan_export = 0"
-            " ORDER BY start_time",
-            (match, profile),
-        ).fetchall()
+    def _get_markers_for(self, match: str, profile: str = "default",
+                         export_folder: str = "") -> list[tuple[float, int, str, float]]:
+        if export_folder:
+            rows = self._con.execute(
+                "SELECT start_time, output_path, clip_duration, clip_count, spread"
+                " FROM processed"
+                " WHERE filename = ? AND profile = ? AND scan_export = 0"
+                "   AND output_path LIKE ?"
+                " ORDER BY start_time",
+                (match, profile, export_folder.rstrip("/") + "/%"),
+            ).fetchall()
+        else:
+            rows = self._con.execute(
+                "SELECT start_time, output_path, clip_duration, clip_count, spread"
+                " FROM processed"
+                " WHERE filename = ? AND profile = ? AND scan_export = 0"
+                " ORDER BY start_time",
+                (match, profile),
+            ).fetchall()
         seen_times: dict[float, tuple[float, int, str, float]] = {}
         n = 0
         for t, p, dur, cnt, spr in rows:
@@ -375,13 +386,15 @@ class ProcessedDB:
                 seen_times[t] = (t, n, p, span)
         return list(seen_times.values())
 
-    def get_markers(self, filename: str, profile: str = "default") -> list[tuple[float, int, str, float]]:
+    def get_markers(self, filename: str, profile: str = "default",
+                    export_folder: str = "") -> list[tuple[float, int, str, float]]:
         """Return [(start_time, marker_number, output_path, clip_span), ...]
         for exact filename match, sorted by start_time. Empty list if no match.
-        Excludes scan exports (shown via scan panel instead)."""
+        Excludes scan exports (shown via scan panel instead).
+        If export_folder is set, only markers in that folder are returned."""
         if not self._enabled:
             return []
-        return self._get_markers_for(filename, profile)
+        return self._get_markers_for(filename, profile, export_folder)
 
     def get_manual_export_groups(self, filename: str, profile: str = "default"
                                 ) -> list[dict]:

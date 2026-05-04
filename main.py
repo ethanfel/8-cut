@@ -46,15 +46,18 @@ class _DBWorker(QThread):
     """Runs ProcessedDB fuzzy-match lookup off the main thread."""
     result = pyqtSignal(str, object, list)  # (queried_filename, match|None, markers)
 
-    def __init__(self, db: "ProcessedDB", filename: str, profile: str = "default"):
+    def __init__(self, db: "ProcessedDB", filename: str, profile: str = "default",
+                 export_folder: str = ""):
         super().__init__()
         self._db = db
         self._filename = filename
         self._profile = profile
+        self._export_folder = export_folder
 
     def run(self):
         try:
-            markers = self._db._get_markers_for(self._filename, self._profile)
+            markers = self._db._get_markers_for(
+                self._filename, self._profile, self._export_folder)
         except Exception:
             markers = []
         self.result.emit(self._filename, self._filename if markers else None, markers)
@@ -4193,7 +4196,8 @@ class MainWindow(QMainWindow):
 
         # Run DB fuzzy match off the main thread — can be slow on large databases.
         filename = os.path.basename(self._file_path)
-        self._db_worker = _DBWorker(self._db, filename, self._profile)
+        self._db_worker = _DBWorker(self._db, filename, self._profile,
+                                    self._txt_folder.text())
         self._db_worker.result.connect(self._on_db_result)
         self._db_worker.start()
 
@@ -4209,7 +4213,8 @@ class MainWindow(QMainWindow):
 
     def _refresh_markers(self) -> None:
         filename = os.path.basename(self._file_path)
-        markers = self._db.get_markers(filename, self._profile)
+        markers = self._db.get_markers(filename, self._profile,
+                                       self._txt_folder.text())
         self._timeline.set_markers(markers)
 
     def _refresh_playlist_checks(self) -> None:
