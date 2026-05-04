@@ -1,10 +1,17 @@
 import os
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .paths import _log
+
+
+def _extract_m_number(output_path: str) -> int | None:
+    """Extract the manual export number from a path like clip_001_m3_0.mp4."""
+    m = re.search(r'_m(\d+)[_.]', os.path.basename(output_path))
+    return int(m.group(1)) if m else None
 
 
 class ProcessedDB:
@@ -378,12 +385,13 @@ class ProcessedDB:
                 (match, profile),
             ).fetchall()
         seen_times: dict[float, tuple[float, int, str, float]] = {}
-        n = 0
+        seq = 0
         for t, p, dur, cnt, spr in rows:
             if t not in seen_times:
-                n += 1
+                seq += 1
+                num = _extract_m_number(p) or seq
                 span = (dur or 8.0) + ((cnt or 1) - 1) * (spr or 3.0)
-                seen_times[t] = (t, n, p, span)
+                seen_times[t] = (t, num, p, span)
         return list(seen_times.values())
 
     def get_markers(self, filename: str, profile: str = "default",
@@ -424,12 +432,13 @@ class ProcessedDB:
         result: dict[str, list[tuple[float, int, str, float]]] = {}
         for folder, folder_rows in by_folder.items():
             seen: dict[float, tuple[float, int, str, float]] = {}
-            n = 0
+            seq = 0
             for t, p, dur, cnt, spr in folder_rows:
                 if t not in seen:
-                    n += 1
+                    seq += 1
+                    num = _extract_m_number(p) or seq
                     span = (dur or 8.0) + ((cnt or 1) - 1) * (spr or 3.0)
-                    seen[t] = (t, n, p, span)
+                    seen[t] = (t, num, p, span)
             name = os.path.basename(folder)
             result[name] = list(seen.values())
         return result
