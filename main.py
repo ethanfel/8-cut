@@ -2349,12 +2349,20 @@ class TimelineWidget(QWidget):
             if abs(x - self._time_to_x(kt)) <= 8:
                 hit_kf_time = kt
                 break
-        # Check export markers.
+        # Check export markers (current folder + other folders).
         hit_path = None
         for (t, _num, output_path, _span) in self._markers:
             if abs(x - self._time_to_x(t)) <= 10:
                 hit_path = output_path
                 break
+        if hit_path is None:
+            for _folder, group in self._other_markers:
+                for (t, _num, output_path, _span) in group:
+                    if abs(x - self._time_to_x(t)) <= 10:
+                        hit_path = output_path
+                        break
+                if hit_path is not None:
+                    break
         from PyQt6.QtWidgets import QMenu
         menu = QMenu(self)
         act_kf = None
