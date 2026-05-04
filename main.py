@@ -1692,6 +1692,7 @@ class TimelineWidget(QWidget):
         self._locked = False                 # when True, clicks scrub playback, not cursor
         self._crop_keyframes: list[tuple[float, float, str | None, bool, bool]] = []
         self._markers: list[tuple[float, int, str, float]] = []
+        self._other_markers: list[tuple[str, list[tuple[float, int, str, float]]]] = []
         # (start, end, score, orig_start, orig_end)
         self._scan_regions: list[tuple[float, float, float, float, float]] = []
         self._scan_neg_times: set[float] = set()
@@ -1743,6 +1744,7 @@ class TimelineWidget(QWidget):
         self._play_pos = None
         self._view_start = 0.0
         self._view_span = 0.0
+        self._other_markers = []
         self.update()
 
     def set_waveform(self, peaks) -> None:
@@ -1766,6 +1768,10 @@ class TimelineWidget(QWidget):
     def set_markers(self, markers: list[tuple[float, int, str, float]]) -> None:
         """markers: list of (start_time, number, output_path, clip_span)"""
         self._markers = markers
+        self.update()
+
+    def set_other_markers(self, groups: dict[str, list[tuple[float, int, str, float]]]) -> None:
+        self._other_markers = list(groups.items())
         self.update()
 
     def set_scan_regions(self, regions: list, neg_times: set[float] | None = None) -> None:
@@ -2059,6 +2065,33 @@ class TimelineWidget(QWidget):
                 p.setPen(QColor(255, 255, 255))
                 p.drawText(mx + 1, rh + 2, 13, 12,
                            Qt.AlignmentFlag.AlignCenter, str(num))
+
+            # ── other-folder markers (subprofile exports) ─────────────────
+            _OTHER_COLORS = [
+                QColor(220, 190, 50),   # yellow
+                QColor(60, 190, 100),   # green
+                QColor(80, 160, 220),   # blue
+                QColor(200, 120, 220),  # purple
+                QColor(220, 140, 60),   # orange
+            ]
+            for gi, (folder_name, group) in enumerate(self._other_markers):
+                color = _OTHER_COLORS[gi % len(_OTHER_COLORS)]
+                dim = QColor(color.red(), color.green(), color.blue(), 35)
+                pen = QPen(color, 1)
+                for (t, num, _path, span) in group:
+                    mx = int(self._time_to_x(t))
+                    if mx < -20 or mx > w + 20:
+                        continue
+                    mx2 = int(self._time_to_x(min(t + span, self._duration)))
+                    if mx2 > mx:
+                        p.fillRect(mx, rh, mx2 - mx, th, dim)
+                    p.setPen(pen)
+                    p.drawLine(mx, rh, mx, h)
+                    p.fillRect(mx, rh + 2, 14, 12, color)
+                    p.setPen(QColor(0, 0, 0))
+                    p.setFont(self._marker_font)
+                    p.drawText(mx + 1, rh + 2, 13, 12,
+                               Qt.AlignmentFlag.AlignCenter, str(num))
 
             # ── scan mode cursor + playback line ─────────────────────────
             if self._scan_mode:
@@ -4210,12 +4243,26 @@ class MainWindow(QMainWindow):
         else:
             self._lbl_status.clear()
         self._timeline.set_markers(markers)
+        self._refresh_other_markers()
 
     def _refresh_markers(self) -> None:
         filename = os.path.basename(self._file_path)
-        markers = self._db.get_markers(filename, self._profile,
-                                       self._txt_folder.text())
+        folder = self._txt_folder.text()
+        markers = self._db.get_markers(filename, self._profile, folder)
         self._timeline.set_markers(markers)
+        others = self._db.get_other_folder_markers(
+            filename, self._profile, folder)
+        self._timeline.set_other_markers(others)
+
+    def _refresh_other_markers(self) -> None:
+        if not self._file_path:
+            self._timeline.set_other_markers({})
+            return
+        filename = os.path.basename(self._file_path)
+        folder = self._txt_folder.text()
+        others = self._db.get_other_folder_markers(
+            filename, self._profile, folder)
+        self._timeline.set_other_markers(others)
 
     def _refresh_playlist_checks(self) -> None:
         """Re-evaluate marks on every playlist item for the current profile."""

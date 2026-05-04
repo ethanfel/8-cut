@@ -396,6 +396,44 @@ class ProcessedDB:
             return []
         return self._get_markers_for(filename, profile, export_folder)
 
+    def get_other_folder_markers(self, filename: str, profile: str = "default",
+                                export_folder: str = ""
+                                ) -> dict[str, list[tuple[float, int, str, float]]]:
+        """Return {folder_name: [(start_time, num, path, span), ...]} for
+        markers NOT in export_folder, grouped by their base export folder."""
+        if not self._enabled or not export_folder:
+            return {}
+        rows = self._con.execute(
+            "SELECT start_time, output_path, clip_duration, clip_count, spread"
+            " FROM processed"
+            " WHERE filename = ? AND profile = ? AND scan_export = 0"
+            "   AND output_path NOT LIKE ?"
+            " ORDER BY start_time",
+            (filename, profile, export_folder.rstrip("/") + "/%"),
+        ).fetchall()
+        by_folder: dict[str, list] = {}
+        for t, p, dur, cnt, spr in rows:
+            parts = p.split("/")
+            for i, part in enumerate(parts):
+                if part.startswith("vid_"):
+                    folder = "/".join(parts[:i])
+                    break
+            else:
+                folder = os.path.dirname(os.path.dirname(p))
+            by_folder.setdefault(folder, []).append((t, p, dur, cnt, spr))
+        result: dict[str, list[tuple[float, int, str, float]]] = {}
+        for folder, folder_rows in by_folder.items():
+            seen: dict[float, tuple[float, int, str, float]] = {}
+            n = 0
+            for t, p, dur, cnt, spr in folder_rows:
+                if t not in seen:
+                    n += 1
+                    span = (dur or 8.0) + ((cnt or 1) - 1) * (spr or 3.0)
+                    seen[t] = (t, n, p, span)
+            name = os.path.basename(folder)
+            result[name] = list(seen.values())
+        return result
+
     def get_manual_export_groups(self, filename: str, profile: str = "default"
                                 ) -> list[dict]:
         """Return manual (non-scan) export groups for *filename*.
