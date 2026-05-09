@@ -517,6 +517,12 @@ class TrainDialog(QDialog):
         btn_browse.setFixedWidth(30)
         btn_browse.clicked.connect(self._browse_video_dir)
         vid_row.addWidget(btn_browse)
+        self._btn_update_paths = QPushButton("Update paths")
+        self._btn_update_paths.setToolTip(
+            "Re-resolve missing source_path entries using the video dir and playlist")
+        self._btn_update_paths.setFixedWidth(90)
+        self._btn_update_paths.clicked.connect(self._update_source_paths)
+        vid_row.addWidget(self._btn_update_paths)
         self._lbl_video_dir = QLabel("Video dir:")
         self._video_dir_widget = QWidget()
         self._video_dir_widget.setLayout(vid_row)
@@ -557,6 +563,17 @@ class TrainDialog(QDialog):
         d = QFileDialog.getExistingDirectory(self, "Select video source directory")
         if d:
             self._txt_video_dir.setText(d)
+
+    def _update_source_paths(self):
+        video_dir = self._txt_video_dir.text()
+        n = self._db.update_source_paths(
+            video_dir, playlist_paths=self._playlist_paths,
+            profile=self._profile)
+        if n:
+            self._lbl_stats.setText(f"Updated {n} source path(s)")
+            self._debounce.start()
+        else:
+            self._lbl_stats.setText("No paths to update (all resolved or no matches)")
 
     def _manage_negatives(self):
         dlg = HardNegativesDialog(self._db, self._profile, parent=self)

@@ -263,6 +263,49 @@ class ProcessedDB:
             )
             self._con.commit()
 
+    def update_source_paths(self, new_dir: str,
+                            playlist_paths: list[str] | None = None,
+                            profile: str = "") -> int:
+        """Re-resolve source_path for all rows whose current path is missing.
+
+        Checks *new_dir* and *playlist_paths* by filename match.
+        Returns the number of rows updated.
+        """
+        if not self._enabled:
+            return 0
+        lookup: dict[str, str] = {}
+        if playlist_paths:
+            for p in playlist_paths:
+                lookup[os.path.basename(p)] = p
+        if new_dir and os.path.isdir(new_dir):
+            for f in os.listdir(new_dir):
+                fp = os.path.join(new_dir, f)
+                if os.path.isfile(fp):
+                    lookup[f] = fp
+        if not lookup:
+            return 0
+        query = "SELECT DISTINCT filename, source_path FROM processed"
+        params: tuple = ()
+        if profile:
+            query += " WHERE profile = ?"
+            params = (profile,)
+        rows = self._con.execute(query, params).fetchall()
+        updated = 0
+        with self._lock:
+            for fn, sp in rows:
+                if sp and os.path.exists(sp):
+                    continue
+                new_path = lookup.get(fn)
+                if new_path and os.path.isfile(new_path):
+                    self._con.execute(
+                        "UPDATE processed SET source_path = ? WHERE filename = ?",
+                        (new_path, fn),
+                    )
+                    updated += 1
+            if updated:
+                self._con.commit()
+        return updated
+
     def get_labels(self) -> list[str]:
         """Return distinct non-empty labels ordered by most recently used."""
         if not self._enabled:
