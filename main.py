@@ -3153,7 +3153,7 @@ class PlaylistWidget(QListWidget):
         menu = QMenu(self)
         # Check if any selected files are hidden.
         hidden_sel = [p for p in sel if os.path.basename(p) in self._hidden_basenames]
-        act_remove = act_hide = act_unhide = None
+        act_remove = act_hide = act_unhide = act_delete = None
         if len(sel) == 1:
             name = os.path.basename(sel[0])
             act_remove = menu.addAction(f"Remove: {name}")
@@ -3161,6 +3161,8 @@ class PlaylistWidget(QListWidget):
                 act_unhide = menu.addAction(f"Unhide: {name}")
             else:
                 act_hide = menu.addAction(f"Hide in profile: {name}")
+            menu.addSeparator()
+            act_delete = menu.addAction(f"Delete from disk: {name}")
         else:
             act_remove = menu.addAction(f"Remove {len(sel)} files")
             if hidden_sel:
@@ -3168,6 +3170,8 @@ class PlaylistWidget(QListWidget):
             non_hidden = [p for p in sel if p not in hidden_sel]
             if non_hidden:
                 act_hide = menu.addAction(f"Hide {len(non_hidden)} file(s) in profile")
+            menu.addSeparator()
+            act_delete = menu.addAction(f"Delete {len(sel)} file(s) from disk")
         chosen = menu.exec(event.globalPos())
         if chosen is None:
             return
@@ -3179,6 +3183,27 @@ class PlaylistWidget(QListWidget):
                     self._done_set.discard(path)
                     self._done_counts.pop(path, None)
             self._rebuild()
+        elif chosen == act_delete:
+            from PyQt6.QtWidgets import QMessageBox
+            names = "\n".join(os.path.basename(p) for p in sel)
+            reply = QMessageBox.warning(
+                self, "Delete from disk",
+                f"Permanently delete {len(sel)} file(s)?\n\n{names}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                for path in sel:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                    if path in self._path_set:
+                        self._paths.remove(path)
+                        self._path_set.discard(path)
+                        self._done_set.discard(path)
+                        self._done_counts.pop(path, None)
+                self._rebuild()
         elif chosen == act_hide:
             self.hide_requested.emit(sel)
         elif chosen == act_unhide:
