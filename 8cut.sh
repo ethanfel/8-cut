@@ -3,6 +3,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_NAME="8cut"
 CONDA_PREFIX_BASE="/media/p5/miniforge3"
+export LD_PRELOAD=/usr/lib/libstdc++.so.6
 
 # 1. Try .venv in project dir
 if [ -f "$SCRIPT_DIR/.venv/bin/activate" ]; then

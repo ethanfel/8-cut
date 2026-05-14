@@ -231,6 +231,81 @@ class ScanWorker(QThread):
                 self.error.emit(str(e))
 
 
+class SpeechDetectWorker(QThread):
+    """Run faster-whisper to find speech regions."""
+    done = pyqtSignal(list)      # [(start, end), ...]
+    progress = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, video_path: str, model_size: str = "medium"):
+        super().__init__()
+        self._path = video_path
+        self._model_size = model_size
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        try:
+            self.progress.emit("Extracting audio…")
+            import tempfile, numpy as np
+            cmd = [
+                _bin("ffmpeg"), "-i", self._path,
+                "-vn", "-ac", "1", "-ar", "16000",
+                "-f", "wav", "-loglevel", "error", "pipe:1",
+            ]
+            proc = subprocess.run(cmd, capture_output=True, timeout=120)
+            if proc.returncode != 0 or self._cancel:
+                return
+
+            self.progress.emit("Running speech detection…")
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError:
+                self.progress.emit("Installing faster-whisper…")
+                subprocess.run([sys.executable, "-m", "pip", "install",
+                                "faster-whisper"], capture_output=True)
+                from faster_whisper import WhisperModel
+            model = WhisperModel(self._model_size, device="cuda",
+                                 compute_type="float16",
+                                 num_workers=4)
+            audio_dur = len(proc.stdout) / (16000 * 2)  # 16kHz 16-bit mono
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as f:
+                f.write(proc.stdout)
+                f.flush()
+                segments, _info = model.transcribe(
+                    f.name, vad_filter=True, word_timestamps=False,
+                    beam_size=1, best_of=1)
+                regions = []
+                for seg in segments:
+                    if self._cancel:
+                        return
+                    pct = min(99, int(seg.end / audio_dur * 100)) if audio_dur > 0 else 0
+                    self.progress.emit(f"Speech detection… {pct}%")
+                    _log(f"[speech] {seg.start:.1f}-{seg.end:.1f} "
+                         f"nsp={seg.no_speech_prob:.2f} "
+                         f"lp={seg.avg_logprob:.2f} "
+                         f"'{seg.text.strip()}'")
+                    if (seg.no_speech_prob < 0.5
+                            and seg.avg_logprob > -1.0):
+                        regions.append((seg.start, seg.end))
+
+            # Merge nearby regions (gap < 2s)
+            merged = []
+            for s, e in regions:
+                if merged and s - merged[-1][1] < 2.0:
+                    merged[-1] = (merged[-1][0], e)
+                else:
+                    merged.append((s, e))
+
+            if not self._cancel:
+                self.done.emit(merged)
+        except Exception as e:
+            if not self._cancel:
+                self.error.emit(str(e))
+
+
 class DatasetStatsDialog(QDialog):
     """Per-video dataset breakdown with class balance visualization."""
 
@@ -1703,14 +1778,18 @@ class TimelineWidget(QWidget):
         self.setMouseTracking(True)
         self._duration = 0.0
         self._cursor = 0.0
-        self._clip_span = 14.0  # 8 + 2*spread, updated from MainWindow
+        self._clip_span = 14.0
+        self._clip_dur = 8.0
+        self._spread = 3.0
         self._scan_mode = False
         self._play_pos: float | None = None  # current playback position (seconds)
         self._locked = False                 # when True, clicks scrub playback, not cursor
         self._crop_keyframes: list[tuple[float, float, str | None, bool, bool]] = []
         self._markers: list[tuple[float, int, str, float]] = []
         self._other_markers: list[tuple[str, list[tuple[float, int, str, float]]]] = []
+        self._hidden_subcats: set[str] = set()
         # (start, end, score, orig_start, orig_end)
+        self._speech_regions: list[tuple[float, float]] = []
         self._scan_regions: list[tuple[float, float, float, float, float]] = []
         self._scan_neg_times: set[float] = set()
         self._active_scan_region: tuple[float, float] | None = None
@@ -1768,8 +1847,16 @@ class TimelineWidget(QWidget):
         self._waveform = peaks
         self.update()
 
-    def set_clip_span(self, span: float):
+    def set_speech_regions(self, regions: list[tuple[float, float]]) -> None:
+        self._speech_regions = regions
+        self.update()
+
+    def set_clip_span(self, span: float, clip_dur: float = 0, spread: float = 0):
         self._clip_span = span
+        if clip_dur > 0:
+            self._clip_dur = clip_dur
+        if spread > 0:
+            self._spread = spread
         self.update()
 
     def set_cursor(self, seconds: float):
@@ -1988,26 +2075,56 @@ class TimelineWidget(QWidget):
             if self._waveform is not None and len(self._waveform) > 0:
                 n = len(self._waveform)
                 mid_y = rh + th // 2
-                half_h = th * 0.4  # waveform uses 80% of track height
+                half_h = th * 0.4
                 p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QColor(80, 180, 80, 50))
                 from PyQt6.QtGui import QPolygonF
                 from PyQt6.QtCore import QPointF
-                # Only iterate peaks overlapping the view window — keeps zoomed-in detail sharp.
                 peak_dt = self._duration / n
                 i_start = max(0, int(self._view_start / peak_dt) - 1)
                 i_end = min(n, int((self._view_start + view_span) / peak_dt) + 2)
-                pts = []
-                for i in range(i_start, i_end):
-                    x = self._time_to_x(i * peak_dt)
-                    y = mid_y - self._waveform[i] * half_h
-                    pts.append(QPointF(x, y))
-                for i in range(i_end - 1, i_start - 1, -1):
-                    x = self._time_to_x(i * peak_dt)
-                    y = mid_y + self._waveform[i] * half_h
-                    pts.append(QPointF(x, y))
-                if pts:
-                    p.drawPolygon(QPolygonF(pts))
+
+                if not self._speech_regions:
+                    p.setBrush(QColor(80, 180, 80, 50))
+                    pts = []
+                    for i in range(i_start, i_end):
+                        x = self._time_to_x(i * peak_dt)
+                        pts.append(QPointF(x, mid_y - self._waveform[i] * half_h))
+                    for i in range(i_end - 1, i_start - 1, -1):
+                        x = self._time_to_x(i * peak_dt)
+                        pts.append(QPointF(x, mid_y + self._waveform[i] * half_h))
+                    if pts:
+                        p.drawPolygon(QPolygonF(pts))
+                else:
+                    _normal = QColor(80, 180, 80, 50)
+                    _speech = QColor(220, 80, 80, 70)
+                    def _in_speech(t):
+                        for s, e in self._speech_regions:
+                            if s <= t <= e:
+                                return True
+                            if s > t:
+                                break
+                        return False
+                    seg_top = []
+                    seg_bot = []
+                    cur_speech = _in_speech(i_start * peak_dt)
+                    for i in range(i_start, i_end):
+                        t = i * peak_dt
+                        is_sp = _in_speech(t)
+                        if is_sp != cur_speech:
+                            if seg_top:
+                                pts = seg_top + seg_bot[::-1]
+                                p.setBrush(_speech if cur_speech else _normal)
+                                p.drawPolygon(QPolygonF(pts))
+                            seg_top = []
+                            seg_bot = []
+                            cur_speech = is_sp
+                        x = self._time_to_x(t)
+                        seg_top.append(QPointF(x, mid_y - self._waveform[i] * half_h))
+                        seg_bot.append(QPointF(x, mid_y + self._waveform[i] * half_h))
+                    if seg_top:
+                        pts = seg_top + seg_bot[::-1]
+                        p.setBrush(_speech if cur_speech else _normal)
+                        p.drawPolygon(QPolygonF(pts))
 
             # ── selection region (full clip span) ─────────────────────────
             x_start = int(self._time_to_x(self._cursor))
@@ -2068,6 +2185,13 @@ class TimelineWidget(QWidget):
                 mx2 = int(self._time_to_x(min(t + span, self._duration)))
                 if mx2 > mx1 and mx2 > 0 and mx1 < w:
                     p.fillRect(mx1, rh, mx2 - mx1, th, QColor(200, 160, 60, 35))
+                    p.setPen(QPen(QColor(200, 160, 60, 70), 1))
+                    ct = t + self._spread
+                    while ct < t + span - 0.1:
+                        cx = int(self._time_to_x(ct))
+                        if mx1 < cx < mx2:
+                            p.drawLine(cx, rh, cx, rh + th)
+                        ct += self._spread
 
             # ── export markers ────────────────────────────────────────────
             p.setFont(self._marker_font)
@@ -2091,7 +2215,8 @@ class TimelineWidget(QWidget):
                 QColor(200, 120, 220),  # purple
                 QColor(220, 140, 60),   # orange
             ]
-            for gi, (folder_name, group) in enumerate(self._other_markers):
+            for gi, (folder_name, group) in enumerate(
+                    [(n, g) for n, g in self._other_markers if n not in self._hidden_subcats]):
                 color = _OTHER_COLORS[gi % len(_OTHER_COLORS)]
                 dim = QColor(color.red(), color.green(), color.blue(), 35)
                 pen = QPen(color, 1)
@@ -2102,6 +2227,14 @@ class TimelineWidget(QWidget):
                     mx2 = int(self._time_to_x(min(t + span, self._duration)))
                     if mx2 > mx:
                         p.fillRect(mx, rh, mx2 - mx, th, dim)
+                        tick_color = QColor(color.red(), color.green(), color.blue(), 70)
+                        p.setPen(QPen(tick_color, 1))
+                        ct = t + self._spread
+                        while ct < t + span - 0.1:
+                            cx = int(self._time_to_x(ct))
+                            if mx < cx < mx2:
+                                p.drawLine(cx, rh, cx, rh + th)
+                            ct += self._spread
                     p.setPen(pen)
                     p.drawLine(mx, rh, mx, h)
                     p.fillRect(mx, rh + 2, 14, 12, color)
@@ -2373,7 +2506,7 @@ class TimelineWidget(QWidget):
                 hit_path = output_path
                 break
         if hit_path is None:
-            for _folder, group in self._other_markers:
+            for _folder, group in [(n, g) for n, g in self._other_markers if n not in self._hidden_subcats]:
                 for (t, _num, output_path, _span) in group:
                     if abs(x - self._time_to_x(t)) <= 10:
                         hit_path = output_path
@@ -2428,7 +2561,7 @@ class _CropOverlayWidget(QWidget):
 
     def paintEvent(self, event):
         mw = self._mpv
-        if not mw._overlays or not mw._player or not mw._player.pause:
+        if not mw._overlays or not mw._player:
             return
         vw, vh = mw._video_w, mw._video_h
         vr = mw._video_rect()
@@ -2603,6 +2736,8 @@ class MpvWidget(QWidget):
             tp = self._player.time_pos
             if tp is not None:
                 self.time_pos_changed.emit(tp)
+            if self._wid_mode and self._overlay_widget and self._overlays:
+                self._overlay_widget.update()
 
     def _render_frame(self):
         from PyQt6.QtOpenGL import QOpenGLFramebufferObject
@@ -2660,7 +2795,7 @@ class MpvWidget(QWidget):
         if self._frame and not self._frame.isNull():
             p.drawImage(self.rect(), self._frame)
 
-        if self._overlays and self._player.pause:
+        if self._overlays:
             vw, vh = self._video_w, self._video_h
             vr = self._video_rect()
             for ov in self._overlays:
@@ -2987,14 +3122,21 @@ class PlaylistWidget(QListWidget):
         self._hidden_basenames: set[str] = set()
         self._hide_exported = False
         self._show_hidden = False
+        self._filter_text = ""
         self._visible: list[str] = []         # paths currently shown in widget
         self._selected_path: str | None = None
         self.itemClicked.connect(self._on_item_clicked)
+
+    def set_filter(self, text: str) -> None:
+        self._filter_text = text.lower()
+        self._rebuild()
 
     def _is_visible(self, path: str) -> bool:
         if os.path.basename(path) in self._hidden_basenames:
             return self._show_hidden
         if self._hide_exported and path in self._done_set:
+            return False
+        if self._filter_text and self._filter_text not in os.path.basename(path).lower():
             return False
         return True
 
@@ -3328,7 +3470,11 @@ class MainWindow(QMainWindow):
         self._subprofiles: list[str] = _raw or []
 
         # Widgets
+        self._playlist_filter = QLineEdit()
+        self._playlist_filter.setPlaceholderText("Filter…")
+        self._playlist_filter.setClearButtonEnabled(True)
         self._playlist = PlaylistWidget()
+        self._playlist_filter.textChanged.connect(self._playlist.set_filter)
         self._playlist.file_selected.connect(self._load_file)
         self._playlist.hide_requested.connect(self._on_hide_files)
         self._playlist.unhide_requested.connect(self._on_unhide_files)
@@ -3355,7 +3501,8 @@ class MainWindow(QMainWindow):
         _init_clips = int(self._settings.value("clip_count", "3"))
         _init_spread = float(self._settings.value("spread", "3.0"))
         _init_dur = float(self._settings.value("clip_duration", "8.0"))
-        self._timeline.set_clip_span(_init_dur + (_init_clips - 1) * _init_spread)
+        self._timeline.set_clip_span(
+            _init_dur + (_init_clips - 1) * _init_spread, _init_dur, _init_spread)
         self._timeline.cursor_changed.connect(self._on_cursor_changed)
         self._timeline.seek_changed.connect(self._on_seek_changed)
         self._timeline.marker_delete_requested.connect(self._on_delete_marker)
@@ -3478,7 +3625,8 @@ class MainWindow(QMainWindow):
             lambda v: self._settings.setValue("clip_duration", str(v))
         )
         self._spn_clip_dur.valueChanged.connect(
-            lambda: self._timeline.set_clip_span(self._clip_span)
+            lambda: self._timeline.set_clip_span(
+                self._clip_span, self._clip_dur, self._spn_spread.value())
         )
         self._spn_clip_dur.valueChanged.connect(lambda: self._update_next_label())
         self._spn_clip_dur.valueChanged.connect(lambda: self._preview_timer.start())
@@ -3493,7 +3641,8 @@ class MainWindow(QMainWindow):
             lambda v: self._settings.setValue("clip_count", str(v))
         )
         self._spn_clips.valueChanged.connect(
-            lambda: self._timeline.set_clip_span(self._clip_span)
+            lambda: self._timeline.set_clip_span(
+                self._clip_span, self._clip_dur, self._spn_spread.value())
         )
         self._spn_clips.valueChanged.connect(lambda: self._update_next_label())
         self._spn_clips.valueChanged.connect(lambda: self._preview_timer.start())
@@ -3510,7 +3659,8 @@ class MainWindow(QMainWindow):
             lambda v: self._settings.setValue("spread", str(v))
         )
         self._spn_spread.valueChanged.connect(
-            lambda: self._timeline.set_clip_span(self._clip_span)
+            lambda: self._timeline.set_clip_span(
+                self._clip_span, self._clip_dur, self._spn_spread.value())
         )
         self._spn_spread.valueChanged.connect(lambda: self._preview_timer.start())
         self._spn_spread.valueChanged.connect(self._update_play_loop)
@@ -3556,11 +3706,21 @@ class MainWindow(QMainWindow):
             lambda v: self._settings.setValue("track_subject", "true" if v else "false")
         )
 
+        self._btn_speech = QPushButton("Speech")
+        self._btn_speech.setToolTip("Detect speech regions (colored red on waveform)")
+        self._btn_speech.clicked.connect(self._start_speech_detect)
+        self._speech_worker: SpeechDetectWorker | None = None
+
         # ── audio scan controls ──────────────────────────────────────
         self._btn_scan_mode = QPushButton("Review")
         self._btn_scan_mode.setCheckable(True)
         self._btn_scan_mode.setToolTip("Scan review mode: hide spread/markers, free cursor movement")
         self._btn_scan_mode.toggled.connect(self._toggle_scan_mode)
+
+        self._btn_hide_subcats = QPushButton("Sub")
+        self._btn_hide_subcats.setToolTip("Show/hide subcategory markers on timeline")
+        self._btn_hide_subcats.clicked.connect(self._show_subcat_menu)
+        self._hidden_subcats: set[str] = set()
 
         self._btn_scan = QPushButton("Scan")
         self._btn_scan.setToolTip("Scan current video for audio segments matching reference clips")
@@ -3663,6 +3823,7 @@ class MainWindow(QMainWindow):
         self._btn_export.setEnabled(False)
         self._btn_export.setToolTip("Export clips at cursor position (E)")
         self._btn_export.clicked.connect(self._on_export)
+        self._format_btns: list[QPushButton] = []
 
         self._btn_cancel = QPushButton("Cancel")
         self._btn_cancel.setEnabled(False)
@@ -3756,7 +3917,9 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(self._cmb_scan_model)
         settings_row.addWidget(self._btn_model_history)
         settings_row.addWidget(self._btn_scan)
+        settings_row.addWidget(self._btn_speech)
         settings_row.addWidget(self._btn_scan_mode)
+        settings_row.addWidget(self._btn_hide_subcats)
         settings_row.addWidget(self._btn_auto_export)
         settings_row.addWidget(self._spn_auto_fuse)
         settings_row.addWidget(self._sld_threshold)
@@ -3809,6 +3972,7 @@ class MainWindow(QMainWindow):
         left_top.addWidget(self._chk_hide_exported)
         left_top.addWidget(self._btn_show_hidden)
         left_layout.addLayout(left_top)
+        left_layout.addWidget(self._playlist_filter)
         left_layout.addWidget(self._playlist)
 
         # Scan results panel (right side)
@@ -4104,6 +4268,10 @@ class MainWindow(QMainWindow):
 
     def _rebuild_subprofile_buttons(self):
         """Recreate the per-subprofile export buttons in the transport row."""
+        for btn in self._format_btns:
+            self._transport_row.removeWidget(btn)
+            btn.setParent(None)
+        self._format_btns.clear()
         for btn in self._subprofile_btns:
             self._transport_row.removeWidget(btn)
             btn.deleteLater()
@@ -4118,6 +4286,7 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda _, s=name: self._on_export(folder_suffix=s))
             self._transport_row.insertWidget(anchor + i, btn)
             self._subprofile_btns.append(btn)
+        self._rebuild_format_buttons()
 
     def _add_subprofile(self):
         from PyQt6.QtWidgets import QMenu
@@ -4150,6 +4319,8 @@ class MainWindow(QMainWindow):
 
     def _set_subprofile_btns_enabled(self, enabled: bool):
         for btn in self._subprofile_btns:
+            btn.setEnabled(enabled)
+        for btn in self._format_btns:
             btn.setEnabled(enabled)
 
     def _show_status(self, msg: str, timeout: int = 0) -> None:
@@ -4238,6 +4409,8 @@ class MainWindow(QMainWindow):
 
         # Start waveform extraction in background
         self._timeline.set_waveform(None)
+        self._timeline.set_speech_regions([])
+        self._btn_speech.setText("Speech")
         if hasattr(self, '_waveform_worker') and self._waveform_worker is not None:
             self._safe_disconnect(self._waveform_worker.done)
             self._waveform_worker.quit()
@@ -4328,27 +4501,61 @@ class MainWindow(QMainWindow):
         deleted = self._db.delete_group(output_path)
         if not deleted:
             self._db.delete_by_output_path(output_path)
+            deleted = [output_path]
+        folder = self._txt_folder.text()
+        for path in deleted:
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+                wav = path + ".wav"
+                if os.path.exists(wav):
+                    os.remove(wav)
+            elif os.path.exists(path):
+                os.remove(path)
+            remove_clip_annotation(folder, path)
+        if self._last_export_path in deleted:
+            self._last_export_path = ""
+        if self._overwrite_path in deleted:
+            self._overwrite_path = ""
+            self._overwrite_group = []
         self._refresh_markers()
         self._refresh_playlist_checks()
         self._update_next_label()
-        n = len(deleted) if deleted else 1
-        _log(f"Deleted marker: {n} clip(s) from DB")
+        n = len(deleted)
+        _log(f"Deleted marker: {n} clip(s) from DB + disk")
         self._show_status(
-            f"Deleted marker ({n} clip{'s' if n != 1 else ''})", 4000
+            f"Deleted marker ({n} clip{'s' if n != 1 else ''}) from disk", 4000
         )
 
     def _on_clear_markers(self) -> None:
-        """Delete all markers for the current file."""
+        """Delete all markers for the current file — removes DB entries, files, and annotations."""
         if not self._file_path:
             return
         filename = os.path.basename(self._file_path)
         markers = self._db.get_markers(filename, self._profile)
-        for _, _, output_path in markers:
-            self._db.delete_by_output_path(output_path)
+        folder = self._txt_folder.text()
+        total_files = 0
+        for _, _, output_path, _ in markers:
+            group = self._db.delete_group(output_path)
+            if not group:
+                self._db.delete_by_output_path(output_path)
+                group = [output_path]
+            for path in group:
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                    wav = path + ".wav"
+                    if os.path.exists(wav):
+                        os.remove(wav)
+                elif os.path.exists(path):
+                    os.remove(path)
+                remove_clip_annotation(folder, path)
+                total_files += 1
+        self._last_export_path = ""
+        self._overwrite_path = ""
+        self._overwrite_group = []
         self._refresh_markers()
         self._refresh_playlist_checks()
         self._update_next_label()
-        self._show_status(f"Cleared {len(markers)} marker(s)", 4000)
+        self._show_status(f"Cleared {len(markers)} marker(s), {total_files} file(s) deleted", 4000)
 
     def _on_delete_keyframe(self, time: float) -> None:
         self._crop_keyframes = [
@@ -4501,8 +4708,51 @@ class MainWindow(QMainWindow):
             self._update_rand_overlays()
         self._settings.setValue("portrait_ratio", text)
         self._update_preview_crop()
+        self._rebuild_format_buttons()
+
+    def _rebuild_format_buttons(self) -> None:
+        for btn in self._format_btns:
+            self._transport_row.removeWidget(btn)
+            btn.setParent(None)
+        self._format_btns.clear()
+        formats = []
+        ratio_text = self._cmb_portrait.currentText()
+        if ratio_text != "Off":
+            formats.append(("P" if ratio_text == "9:16" else "S", ratio_text))
+        if self._chk_rand_portrait.isChecked() and not any(r == "9:16" for _, r in formats):
+            formats.append(("P", "9:16"))
+        if self._chk_rand_square.isChecked() and not any(r == "1:1" for _, r in formats):
+            formats.append(("S", "1:1"))
+        if not formats:
+            return
+        has_file = bool(self._file_path)
+        anchor = self._transport_row.indexOf(self._btn_export) + 1
+        for i, (label, ratio) in enumerate(formats):
+            btn = QPushButton(label)
+            btn.setFixedWidth(28)
+            btn.setToolTip(f"Export all clips as {ratio}")
+            btn.setEnabled(has_file)
+            btn.clicked.connect(lambda _, r=ratio: self._on_export(force_ratio=r))
+            self._transport_row.insertWidget(anchor + i, btn)
+            self._format_btns.append(btn)
+        for sub_btn in list(self._subprofile_btns):
+            if sub_btn.isHidden():
+                continue
+            suffix = sub_btn.text().removeprefix("▸ ")
+            sub_idx = self._transport_row.indexOf(sub_btn) + 1
+            for j, (label, ratio) in enumerate(formats):
+                btn = QPushButton(label)
+                btn.setFixedWidth(28)
+                btn.setToolTip(f"Export {suffix} as {ratio}")
+                btn.setEnabled(has_file)
+                btn.clicked.connect(
+                    lambda _, s=suffix, r=ratio: self._on_export(
+                        folder_suffix=s, force_ratio=r))
+                self._transport_row.insertWidget(sub_idx + j, btn)
+                self._format_btns.append(btn)
 
     def _on_rand_toggle(self, _checked: bool = False) -> None:
+        self._rebuild_format_buttons()
         if self._btn_lock.isChecked():
             self._set_or_remove_crop_keyframe()
         ratio_text = self._cmb_portrait.currentText()
@@ -4760,7 +5010,7 @@ class MainWindow(QMainWindow):
         markers = sorted(self._timeline._markers, key=lambda m: m[0])
         if not markers:
             return
-        for (t, _num, _path) in markers:
+        for (t, _num, _path, _) in markers:
             if t > self._cursor + 0.1:
                 self._step_cursor(t - self._cursor)
                 return
@@ -4883,10 +5133,105 @@ class MainWindow(QMainWindow):
         if self._timeline._scan_mode:
             self._scan_panel.highlight_time(t)
 
+    def _show_subcat_menu(self) -> None:
+        from PyQt6.QtWidgets import QMenu, QWidgetAction, QCheckBox, QWidget, QVBoxLayout, QPushButton, QHBoxLayout
+        menu = QMenu(self)
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        folders = [name for name, _group in self._timeline._other_markers]
+        base = os.path.basename(self._txt_folder.text())
+        for s in self._subprofiles:
+            expected = f"{base}_{s}"
+            if expected not in folders:
+                folders.append(expected)
+        if not folders:
+            menu.addAction("(no subcategories)").setEnabled(False)
+            menu.exec(self._btn_hide_subcats.mapToGlobal(
+                self._btn_hide_subcats.rect().bottomLeft()))
+            return
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(8, 4, 8, 4)
+
+        btn_row = QHBoxLayout()
+        btn_all = QPushButton("Show all")
+        btn_none = QPushButton("Hide all")
+        btn_all.setFlat(True)
+        btn_none.setFlat(True)
+        btn_row.addWidget(btn_all)
+        btn_row.addWidget(btn_none)
+        layout.addLayout(btn_row)
+
+        checkboxes: list[tuple[str, QCheckBox]] = []
+        for name in folders:
+            cb = QCheckBox(name)
+            cb.setChecked(name not in self._hidden_subcats)
+            cb.toggled.connect(lambda checked, n=name: self._on_subcat_toggled(n, checked))
+            layout.addWidget(cb)
+            checkboxes.append((name, cb))
+
+        def set_all(visible: bool):
+            for _name, cb in checkboxes:
+                cb.setChecked(visible)
+
+        btn_all.clicked.connect(lambda: set_all(True))
+        btn_none.clicked.connect(lambda: set_all(False))
+
+        wa = QWidgetAction(menu)
+        wa.setDefaultWidget(container)
+        menu.addAction(wa)
+        menu.exec(self._btn_hide_subcats.mapToGlobal(
+            self._btn_hide_subcats.rect().bottomLeft()))
+
+    def _on_subcat_toggled(self, name: str, checked: bool) -> None:
+        if checked:
+            self._hidden_subcats.discard(name)
+        else:
+            self._hidden_subcats.add(name)
+        self._apply_subcat_visibility()
+
+    def _apply_subcat_visibility(self) -> None:
+        self._timeline._hidden_subcats = self._hidden_subcats
+        self._timeline.update()
+        for btn in self._subprofile_btns:
+            suffix = btn.text().removeprefix("▸ ")
+            visible = not any(f.endswith("_" + suffix) or f == suffix
+                              for f in self._hidden_subcats)
+            btn.setVisible(visible)
+        self._rebuild_format_buttons()
+
     def _toggle_scan_mode(self, on: bool) -> None:
         """Toggle scan review mode — clean timeline, free cursor."""
         self._timeline._scan_mode = on
         self._timeline.update()
+
+    def _start_speech_detect(self) -> None:
+        if not self._file_path:
+            self._show_status("No video loaded")
+            return
+        if self._speech_worker and self._speech_worker.isRunning():
+            self._speech_worker.cancel()
+            self._speech_worker.wait(2000)
+        if self._timeline._speech_regions:
+            self._timeline.set_speech_regions([])
+            self._btn_speech.setText("Speech")
+            self._show_status("Speech regions cleared", 3000)
+            return
+        self._btn_speech.setEnabled(False)
+        self._show_status("Detecting speech…")
+        self._speech_worker = SpeechDetectWorker(self._file_path)
+        self._speech_worker.done.connect(self._on_speech_done)
+        self._speech_worker.error.connect(
+            lambda e: (self._show_status(f"Speech error: {e}", 5000),
+                       self._btn_speech.setEnabled(True)))
+        self._speech_worker.progress.connect(self._show_status)
+        self._speech_worker.start()
+
+    def _on_speech_done(self, regions: list) -> None:
+        self._timeline.set_speech_regions(regions)
+        self._btn_speech.setEnabled(True)
+        self._btn_speech.setText("Speech ✓")
+        self._show_status(f"Found {len(regions)} speech region(s)", 4000)
 
     def _start_scan(self) -> None:
         if not self._file_path:
@@ -5661,7 +6006,7 @@ class MainWindow(QMainWindow):
         else:
             self._lbl_next.setText(f"→ {vid_name}/{base}_0..{n - 1}")
 
-    def _on_export(self, _=None, folder_suffix: str = ""):
+    def _on_export(self, _=None, folder_suffix: str = "", force_ratio: str = ""):
         if not self._file_path:
             return
         if self._export_worker and self._export_worker.isRunning():
@@ -5687,8 +6032,11 @@ class MainWindow(QMainWindow):
         os.makedirs(folder, exist_ok=True)
         spread = self._spn_spread.value()
 
-        ratio_text = self._cmb_portrait.currentText()
-        base_ratio = None if ratio_text == "Off" else ratio_text
+        if force_ratio:
+            base_ratio = force_ratio
+        else:
+            ratio_text = self._cmb_portrait.currentText()
+            base_ratio = None if ratio_text == "Off" else ratio_text
         base_center = self._crop_center
         counter = self._export_counter
 
@@ -5755,25 +6103,28 @@ class MainWindow(QMainWindow):
                 base_rand_p=rand_portrait, base_rand_s=rand_square,
             )
 
-            # Random crop: eligible clips (per their keyframe flags) have
-            # ~1 in 3 chance of getting a random ratio applied.
-            portrait_eligible = [i for i, w in enumerate(widened) if w[4]]
-            square_eligible = [i for i, w in enumerate(widened) if w[5]]
-            rand_indices: dict[int, list[str]] = {}
-            if portrait_eligible and n_clips > 1:
-                n = max(1, len(portrait_eligible) // 3)
-                for i in random.sample(portrait_eligible, min(n, len(portrait_eligible))):
-                    rand_indices.setdefault(i, []).append("9:16")
-            if square_eligible and n_clips > 1:
-                n = max(1, len(square_eligible) // 3)
-                for i in random.sample(square_eligible, min(n, len(square_eligible))):
-                    rand_indices.setdefault(i, []).append("1:1")
+            if force_ratio:
+                jobs = [(s, o, force_ratio, c) for s, o, _r, c, _rp, _rs in widened]
+            else:
+                # Random crop: eligible clips (per their keyframe flags) have
+                # ~1 in 3 chance of getting a random ratio applied.
+                portrait_eligible = [i for i, w in enumerate(widened) if w[4]]
+                square_eligible = [i for i, w in enumerate(widened) if w[5]]
+                rand_indices: dict[int, list[str]] = {}
+                if portrait_eligible and n_clips > 1:
+                    n = max(1, len(portrait_eligible) // 3)
+                    for i in random.sample(portrait_eligible, min(n, len(portrait_eligible))):
+                        rand_indices.setdefault(i, []).append("9:16")
+                if square_eligible and n_clips > 1:
+                    n = max(1, len(square_eligible) // 3)
+                    for i in random.sample(square_eligible, min(n, len(square_eligible))):
+                        rand_indices.setdefault(i, []).append("1:1")
 
-            jobs = []
-            for i, (s, o, ratio, center, _rp, _rs) in enumerate(widened):
-                if i in rand_indices:
-                    ratio = random.choice(rand_indices[i])
-                jobs.append((s, o, ratio, center))
+                jobs = []
+                for i, (s, o, ratio, center, _rp, _rs) in enumerate(widened):
+                    if i in rand_indices:
+                        ratio = random.choice(rand_indices[i])
+                    jobs.append((s, o, ratio, center))
 
         # Subject tracking: re-detect crop center per sub-clip.
         if self._chk_track.isChecked() and any(j[2] for j in jobs):
@@ -5794,7 +6145,7 @@ class MainWindow(QMainWindow):
         # Cursor is frozen here — user may move it during async export.
         self._export_cursor = self._cursor
         self._export_short_side = short_side
-        self._export_portrait = self._cmb_portrait.currentText()
+        self._export_portrait = force_ratio or self._cmb_portrait.currentText()
         self._export_crop_center = self._crop_center
         self._export_format = fmt
         self._export_clip_count = self._spn_clips.value()
