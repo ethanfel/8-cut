@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QAbstractItemView, QSplitter, QToolTip,
     QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox,
     QMessageBox, QInputDialog, QDialog, QDialogButtonBox, QFormLayout,
-    QTableWidget, QTableWidgetItem, QTabWidget, QHeaderView,
+    QTableWidget, QTableWidgetItem, QTabWidget, QTabBar, QHeaderView,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QRect, QSize, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
@@ -3128,6 +3128,39 @@ class SnapPreviewWindow(QWidget):
         self._in_dock = False
 
 
+class _PlaylistTabBar(QTabBar):
+    """Tab bar whose labels can be renamed by double-clicking."""
+    tab_renamed = pyqtSignal(int, str)
+
+    def mouseDoubleClickEvent(self, event):
+        idx = self.tabAt(event.pos())
+        if idx >= 0:
+            self._start_edit(idx)
+        else:
+            super().mouseDoubleClickEvent(event)
+
+    def _start_edit(self, idx: int) -> None:
+        editor = QLineEdit(self)
+        editor.setText(self.tabText(idx))
+        editor.selectAll()
+        editor.setGeometry(self.tabRect(idx))
+        editor.show()
+        editor.setFocus()
+        done = {"v": False}
+
+        def finish():
+            if done["v"]:
+                return
+            done["v"] = True
+            text = editor.text().strip()
+            editor.deleteLater()
+            if text:
+                self.setTabText(idx, text)
+                self.tab_renamed.emit(idx, text)
+
+        editor.editingFinished.connect(finish)
+
+
 class PlaylistWidget(QListWidget):
     file_selected = pyqtSignal(str)  # emits full path of selected file
     _SEP_END = "\x00END"  # anchor for a separator after the last visible file
@@ -3600,14 +3633,27 @@ class MainWindow(QMainWindow):
         self._playlist_filter = QLineEdit()
         self._playlist_filter.setPlaceholderText("Filter…")
         self._playlist_filter.setClearButtonEnabled(True)
-        self._playlist = PlaylistWidget()
-        self._playlist_filter.textChanged.connect(self._playlist.set_filter)
-        self._playlist.file_selected.connect(self._load_file)
-        self._playlist.hide_requested.connect(self._on_hide_files)
-        self._playlist.unhide_requested.connect(self._on_unhide_files)
-        self._playlist.disable_requested.connect(self._on_disable_video)
-        self._playlist.enable_requested.connect(self._on_enable_video)
-        self._playlist.separators_changed.connect(self._save_separators)
+        self._playlist_filter.textChanged.connect(self._on_filter_changed)
+
+        # Suppress tab persistence until _load_playlist_tabs runs at the end of
+        # __init__ (the profile combo it needs doesn't exist yet).
+        self._loading_tabs = True
+        self._playlist_tabs = QTabWidget()
+        self._playlist_tabs.setTabBar(_PlaylistTabBar())
+        self._playlist_tabs.setTabsClosable(True)
+        self._playlist_tabs.setMovable(True)
+        self._playlist_tabs.setDocumentMode(True)
+        self._playlist_tabs.tabBar().tab_renamed.connect(self._on_tab_renamed)
+        self._playlist_tabs.tabCloseRequested.connect(self._on_close_tab)
+        self._playlist_tabs.currentChanged.connect(self._on_tab_changed)
+        self._btn_add_tab = QPushButton("+")
+        self._btn_add_tab.setFixedWidth(28)
+        self._btn_add_tab.setToolTip("Add a new file-list tab")
+        self._btn_add_tab.clicked.connect(lambda: self._add_playlist_tab())
+        self._playlist_tabs.setCornerWidget(
+            self._btn_add_tab, Qt.Corner.TopRightCorner)
+        # Start with one empty tab; real contents loaded later via _load_playlist_tabs.
+        self._add_playlist_tab("List 1", select=True)
 
         self._mpv = MpvWidget()
         self._mpv.file_loaded.connect(self._after_load)
@@ -4104,7 +4150,7 @@ class MainWindow(QMainWindow):
         left_top.addWidget(self._btn_show_hidden)
         left_layout.addLayout(left_top)
         left_layout.addWidget(self._playlist_filter)
-        left_layout.addWidget(self._playlist)
+        left_layout.addWidget(self._playlist_tabs)
 
         # Scan results panel (right side)
         self._scan_panel = ScanResultsPanel(self._db)
@@ -4175,22 +4221,14 @@ class MainWindow(QMainWindow):
         for key in ("?", "F1"):
             QShortcut(QKeySequence(key), self, context=ctx).activated.connect(self._show_shortcuts)
 
-        # Resume last session: reload previous playlist files (per-profile).
-        session_files = self._settings.value(f"session_files/{self._profile}", [])
-        if not session_files:
-            session_files = self._settings.value("session_files", [])
-        if session_files:
-            valid = [p for p in session_files if os.path.isfile(p)]
-            if valid:
-                self._playlist.add_files(valid)
-                self._apply_playlist_filters()
-                if self._playlist.count() > 0:
-                    self._playlist._select(0)
-                _log(f"Resumed session: {len(valid)} file(s)")
+        # Resume last session: rebuild file-list tabs (per-profile).
+        self._load_playlist_tabs()
+        self._apply_playlist_filters()
+        if self._playlist is not None and self._playlist.count() > 0:
+            self._playlist._select(0)
 
         # Apply persisted subcategory visibility to timeline + buttons.
         self._apply_subcat_visibility()
-        self._load_separators()
 
         self._show_changelog()
 
@@ -4315,6 +4353,119 @@ class MainWindow(QMainWindow):
             return "default"
         return text.strip() or "default"
 
+    @property
+    def _playlist(self) -> "PlaylistWidget":
+        """The PlaylistWidget of the currently active file-list tab."""
+        return self._playlist_tabs.currentWidget()
+
+    # ── File-list tabs ───────────────────────────────────────────
+    def _add_playlist_tab(self, label: str | None = None,
+                          files: list[str] | None = None,
+                          separators: list[str] | None = None,
+                          select: bool = True) -> "PlaylistWidget":
+        pw = PlaylistWidget()
+        pw.file_selected.connect(self._load_file)
+        pw.hide_requested.connect(self._on_hide_files)
+        pw.unhide_requested.connect(self._on_unhide_files)
+        pw.disable_requested.connect(self._on_disable_video)
+        pw.enable_requested.connect(self._on_enable_video)
+        pw.separators_changed.connect(self._save_playlist_tabs)
+        if label is None:
+            label = f"List {self._playlist_tabs.count() + 1}"
+        idx = self._playlist_tabs.addTab(pw, label)
+        if separators:
+            pw._separators_before = set(separators)
+        if files:
+            pw.add_files([p for p in files if os.path.isfile(p)])
+        if select:
+            self._playlist_tabs.setCurrentIndex(idx)
+        if not self._loading_tabs:
+            self._save_playlist_tabs()
+        return pw
+
+    def _on_filter_changed(self, text: str) -> None:
+        pw = self._playlist
+        if pw is not None:
+            pw.set_filter(text)
+
+    def _on_tab_changed(self, _idx: int) -> None:
+        if self._loading_tabs or self._playlist is None:
+            return
+        self._playlist.set_filter(self._playlist_filter.text())
+        self._apply_playlist_filters()
+        self._save_playlist_tabs()
+
+    def _on_close_tab(self, idx: int) -> None:
+        if self._playlist_tabs.count() <= 1:
+            self._show_status("Can't close the last tab", 3000)
+            return
+        w = self._playlist_tabs.widget(idx)
+        self._playlist_tabs.removeTab(idx)
+        w.deleteLater()
+        self._save_playlist_tabs()
+
+    def _on_tab_renamed(self, _idx: int, _text: str) -> None:
+        self._save_playlist_tabs()
+
+    def _playlist_tabs_key(self, profile: str | None = None) -> str:
+        return f"playlist_tabs/{profile or self._profile}"
+
+    def _save_playlist_tabs(self, profile: str | None = None) -> None:
+        if self._loading_tabs:
+            return
+        import json
+        tabs = []
+        for i in range(self._playlist_tabs.count()):
+            pw = self._playlist_tabs.widget(i)
+            tabs.append({
+                "label": self._playlist_tabs.tabText(i),
+                "files": list(pw._paths),
+                "separators": sorted(pw._separators_before),
+            })
+        data = {"tabs": tabs, "current": self._playlist_tabs.currentIndex()}
+        self._settings.setValue(self._playlist_tabs_key(profile), json.dumps(data))
+
+    def _load_playlist_tabs(self, profile: str | None = None) -> None:
+        """Rebuild all file-list tabs for *profile* from settings."""
+        import json
+        self._loading_tabs = True
+        try:
+            while self._playlist_tabs.count():
+                w = self._playlist_tabs.widget(0)
+                self._playlist_tabs.removeTab(0)
+                w.deleteLater()
+            raw = self._settings.value(self._playlist_tabs_key(profile), "")
+            data = None
+            if raw:
+                try:
+                    data = json.loads(raw)
+                except (ValueError, TypeError):
+                    data = None
+            if not data or not data.get("tabs"):
+                # Legacy fallback: one tab from old session_files/separators.
+                p = profile or self._profile
+                files = self._settings.value(f"session_files/{p}", []) or []
+                seps = self._settings.value(f"separators/{p}", []) or []
+                if isinstance(seps, str):
+                    seps = [seps] if seps else []
+                self._add_playlist_tab(
+                    "List 1",
+                    files=[f for f in files if os.path.isfile(f)],
+                    separators=seps, select=True)
+            else:
+                for t in data["tabs"]:
+                    self._add_playlist_tab(
+                        t.get("label", "List"),
+                        files=[f for f in t.get("files", []) if os.path.isfile(f)],
+                        separators=t.get("separators", []), select=False)
+                cur = min(max(0, data.get("current", 0)),
+                          self._playlist_tabs.count() - 1)
+                self._playlist_tabs.setCurrentIndex(cur)
+        finally:
+            self._loading_tabs = False
+        if self._playlist is not None:
+            self._playlist.set_filter(self._playlist_filter.text())
+
     def _on_profile_activated(self, index: int) -> None:
         text = self._cmb_profile.itemText(index)
         prev = self._settings.value("profile", "default")
@@ -4330,8 +4481,10 @@ class MainWindow(QMainWindow):
             if ok and name and name not in self._PROFILE_SENTINELS:
                 if is_dup:
                     n = self._db.duplicate_profile(prev, name)
-                    self._settings.setValue(f"session_files/{prev}", self._playlist._paths)
-                    self._settings.setValue(f"session_files/{name}", list(self._playlist._paths))
+                    self._save_playlist_tabs(prev)
+                    self._settings.setValue(
+                        self._playlist_tabs_key(name),
+                        self._settings.value(self._playlist_tabs_key(prev), ""))
                     _log(f"Duplicated profile '{prev}' → '{name}' ({n} rows)")
                 sentinel_idx = self._cmb_profile.count() - 3
                 self._cmb_profile.insertItem(sentinel_idx, name)
@@ -4342,16 +4495,11 @@ class MainWindow(QMainWindow):
                     self._cmb_profile.setCurrentIndex(idx)
                 return
             text = name
-        # Save current profile's playlist before switching.
-        self._settings.setValue(f"session_files/{prev}", self._playlist._paths)
+        # Save current profile's tabs before switching.
+        self._save_playlist_tabs(prev)
         self._settings.setValue("profile", text)
-        # Load new profile's playlist.
-        new_files = self._settings.value(f"session_files/{text}", [])
-        self._playlist.clear_all()
-        if new_files:
-            valid = [p for p in new_files if os.path.isfile(p)]
-            if valid:
-                self._playlist.add_files(valid)
+        # Load new profile's tabs.
+        self._load_playlist_tabs(text)
         # Clear overwrite state — the selected marker belongs to the old profile
         if self._overwrite_path:
             self._overwrite_path = ""
@@ -4365,7 +4513,6 @@ class MainWindow(QMainWindow):
         self._load_hidden_subcats()
         self._apply_subcat_visibility()
         self._apply_playlist_filters()
-        self._load_separators()
         self._refresh_scan_models()
         if self._playlist.count() > 0:
             self._playlist._select(0)
@@ -4393,6 +4540,7 @@ class MainWindow(QMainWindow):
             return
         self._db.delete_profile(prev)
         self._settings.remove(f"session_files/{prev}")
+        self._settings.remove(self._playlist_tabs_key(prev))
         _log(f"Deleted profile '{prev}' ({n} rows)")
         self._settings.setValue("profile", "default")
         self._populate_profile_combo()
@@ -4532,8 +4680,11 @@ class MainWindow(QMainWindow):
         if paths:
             self._playlist.add_files(paths)
             self._apply_playlist_filters()
+            self._save_playlist_tabs()
 
     def _load_file(self, path: str):
+        if getattr(self, "_loading_tabs", False):
+            return  # ignore auto-selection while rebuilding tabs
         if not os.path.isfile(path):
             self._show_status(f"File not found: {os.path.basename(path)}", 5000)
             return
@@ -5381,21 +5532,6 @@ class MainWindow(QMainWindow):
     def _save_hidden_subcats(self) -> None:
         self._settings.setValue(
             self._hidden_subcats_key(), sorted(self._hidden_subcats))
-
-    def _separators_key(self) -> str:
-        return f"separators/{self._profile}"
-
-    def _load_separators(self) -> None:
-        """Load and apply this profile's playlist separators from settings."""
-        raw = self._settings.value(self._separators_key(), [])
-        if isinstance(raw, str):
-            raw = [raw] if raw else []
-        self._playlist._separators_before = set(raw or [])
-        self._playlist._rebuild()
-
-    def _save_separators(self) -> None:
-        self._settings.setValue(
-            self._separators_key(), sorted(self._playlist._separators_before))
 
     def _apply_subcat_visibility(self) -> None:
         self._timeline._hidden_subcats = self._hidden_subcats
@@ -6683,8 +6819,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         _log("Shutting down…")
-        # Save session playlist for resume (per-profile).
-        self._settings.setValue(f"session_files/{self._profile}", self._playlist._paths)
+        # Save file-list tabs for resume (per-profile).
+        self._save_playlist_tabs()
         # Cancel background workers to prevent callbacks into dead objects.
         self._cleanup_scan_worker()
         self._cleanup_train_worker()
@@ -6742,6 +6878,7 @@ class MainWindow(QMainWindow):
         if paths:
             self._playlist.add_files(paths)
             self._apply_playlist_filters()
+            self._save_playlist_tabs()
 
 if __name__ == "__main__":
     main()
