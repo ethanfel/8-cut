@@ -5477,6 +5477,7 @@ class MainWindow(QMainWindow):
                 self._btn_hide_subcats.rect().bottomLeft()))
             return
 
+        counts = self._db.get_all_folder_counts(self._profile)
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(8, 4, 8, 4)
@@ -5492,10 +5493,33 @@ class MainWindow(QMainWindow):
 
         checkboxes: list[tuple[str, QCheckBox]] = []
         for name in folders:
+            row = QHBoxLayout()
             cb = QCheckBox(name)
             cb.setChecked(name not in self._hidden_subcats)
             cb.toggled.connect(lambda checked, n=name: self._on_subcat_toggled(n, checked))
-            layout.addWidget(cb)
+            row.addWidget(cb, 1)
+            btn_dis = QPushButton("Disable all")
+            btn_en = QPushButton("Enable all")
+            btn_dis.setFlat(True)
+            btn_en.setFlat(True)
+
+            def refresh_states(n=name, bd=btn_dis, be=btn_en):
+                c = self._db.get_all_folder_counts(self._profile)
+                active = c.get(n, 0)
+                disabled = c.get(n + "_disabled", 0)
+                bd.setEnabled(active > 0)
+                be.setEnabled(disabled > 0)
+                bd.setText(f"Disable all ({active})" if active else "Disable all")
+                be.setText(f"Enable all ({disabled})" if disabled else "Enable all")
+
+            btn_dis.clicked.connect(
+                lambda _=False, n=name, rs=refresh_states: self._disable_all_in_folder(n, rs))
+            btn_en.clicked.connect(
+                lambda _=False, n=name, rs=refresh_states: self._enable_all_in_folder(n, rs))
+            refresh_states()
+            row.addWidget(btn_dis)
+            row.addWidget(btn_en)
+            layout.addLayout(row)
             checkboxes.append((name, cb))
 
         def set_all(visible: bool):
@@ -5510,6 +5534,41 @@ class MainWindow(QMainWindow):
         menu.addAction(wa)
         menu.exec(self._btn_hide_subcats.mapToGlobal(
             self._btn_hide_subcats.rect().bottomLeft()))
+
+    def _disable_all_in_folder(self, folder: str, refresh_states=None) -> None:
+        """Disable every video's clips in *folder* (move to {folder}_disabled)."""
+        active = self._db.get_all_folder_counts(self._profile).get(folder, 0)
+        if not active:
+            return
+        reply = QMessageBox.question(
+            self, "Disable all",
+            f"Disable all {active} clip(s) in '{folder}'?\n\n"
+            f"Files move to '{folder}_disabled' and are excluded from training.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        n = self._db.relocate_video_clips(
+            None, self._profile, folder, folder + "_disabled")
+        if self._file_path:
+            self._refresh_markers()
+        self._refresh_playlist_checks()
+        if refresh_states:
+            refresh_states()
+        self._show_status(f"Disabled {n} clip(s) in {folder}", 4000)
+
+    def _enable_all_in_folder(self, folder: str, refresh_states=None) -> None:
+        """Re-enable every video's clips for *folder* (move back from _disabled)."""
+        src = folder + "_disabled"
+        if not self._db.get_all_folder_counts(self._profile).get(src, 0):
+            return
+        n = self._db.relocate_video_clips(None, self._profile, src, folder)
+        if self._file_path:
+            self._refresh_markers()
+        self._refresh_playlist_checks()
+        if refresh_states:
+            refresh_states()
+        self._show_status(f"Re-enabled {n} clip(s) in {folder}", 4000)
 
     def _on_subcat_toggled(self, name: str, checked: bool) -> None:
         if checked:

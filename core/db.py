@@ -552,12 +552,30 @@ class ProcessedDB:
             counts[folder] = counts.get(folder, 0) + 1
         return counts
 
-    def relocate_video_clips(self, filename: str, profile: str,
+    def get_all_folder_counts(self, profile: str = "default") -> dict[str, int]:
+        """Return clip counts per export folder across all videos in *profile*.
+
+        Includes ``_disabled`` folders so callers can offer enable/disable.
+        """
+        if not self._enabled:
+            return {}
+        rows = self._con.execute(
+            "SELECT output_path FROM processed WHERE profile = ?",
+            (profile,),
+        ).fetchall()
+        counts: dict[str, int] = {}
+        for (op,) in rows:
+            folder = os.path.basename(os.path.dirname(os.path.dirname(op)))
+            counts[folder] = counts.get(folder, 0) + 1
+        return counts
+
+    def relocate_video_clips(self, filename: "str | None", profile: str,
                              src_folder_name: str,
                              dst_folder_name: str) -> int:
-        """Move *filename*'s clips from one export folder to a sibling folder.
+        """Move clips from one export folder to a sibling folder.
 
-        Matches rows whose grandparent dir basename == *src_folder_name*,
+        Matches rows whose grandparent dir basename == *src_folder_name*
+        (restricted to *filename* when given, else every video in *profile*),
         then moves each clip (and any ``.wav`` sidecar) on disk into a sibling
         folder named *dst_folder_name*, migrates its dataset.json annotation,
         and rewrites output_path in the DB.  Returns the number of clips moved.
@@ -567,11 +585,17 @@ class ProcessedDB:
         import shutil
         from .annotations import remove_clip_annotation, upsert_clip_annotation
 
-        rows = self._con.execute(
-            "SELECT id, output_path, label FROM processed"
-            " WHERE filename = ? AND profile = ?",
-            (filename, profile),
-        ).fetchall()
+        if filename is None:
+            rows = self._con.execute(
+                "SELECT id, output_path, label FROM processed WHERE profile = ?",
+                (profile,),
+            ).fetchall()
+        else:
+            rows = self._con.execute(
+                "SELECT id, output_path, label FROM processed"
+                " WHERE filename = ? AND profile = ?",
+                (filename, profile),
+            ).fetchall()
 
         moves: list[tuple[str, str]] = []        # (old_path, new_path)
         updates: list[tuple[str, int]] = []       # (new_path, id)
@@ -628,7 +652,7 @@ class ProcessedDB:
             except OSError:
                 pass
 
-        _log(f"Relocated {len(updates)} clip(s) of {filename}: "
+        _log(f"Relocated {len(updates)} clip(s) of {filename or 'all videos'}: "
              f"{src_folder_name} -> {dst_folder_name}")
         return len(updates)
 
