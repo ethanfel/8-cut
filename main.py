@@ -3130,6 +3130,7 @@ class SnapPreviewWindow(QWidget):
 
 class PlaylistWidget(QListWidget):
     file_selected = pyqtSignal(str)  # emits full path of selected file
+    _SEP_END = "\x00END"  # anchor for a separator after the last visible file
 
     def __init__(self):
         super().__init__()
@@ -3164,6 +3165,25 @@ class PlaylistWidget(QListWidget):
         self._filter_text = text.lower()
         self._rebuild()
 
+    def _next_visible_path(self, path: str) -> str:
+        """Return the next visible file after *path*, or _SEP_END if it's last."""
+        seen = False
+        for p in self._paths:
+            if seen and self._is_visible(p):
+                return p
+            if p == path:
+                seen = True
+        return self._SEP_END
+
+    def _toggle_separator(self, anchor: str) -> None:
+        """Add or remove a separator anchored before *anchor* (or at the end)."""
+        if anchor in self._separators_before:
+            self._separators_before.discard(anchor)
+        else:
+            self._separators_before.add(anchor)
+        self._rebuild()
+        self.separators_changed.emit()
+
     def _is_visible(self, path: str) -> bool:
         if os.path.basename(path) in self._hidden_basenames:
             return self._show_hidden
@@ -3177,8 +3197,8 @@ class PlaylistWidget(QListWidget):
         """Rebuild the QListWidget from scratch with only visible items."""
         self.blockSignals(True)
         self.clear()
-        # Drop separator anchors for paths no longer present.
-        self._separators_before &= set(self._paths)
+        # Drop separator anchors for paths no longer present (keep end sentinel).
+        self._separators_before &= set(self._paths) | {self._SEP_END}
         visible_paths = [p for p in self._paths if self._is_visible(p)]
         self._visible = []
         for path in visible_paths:
@@ -3189,6 +3209,9 @@ class PlaylistWidget(QListWidget):
             self._style_item(item, path)
             self.addItem(item)
             self._visible.append(path)
+        if self._SEP_END in self._separators_before and visible_paths:
+            self.addItem(self._make_separator_item())
+            self._visible.append(None)
         # Restore selection.
         if self._selected_path and self._selected_path in self._visible:
             row = self._visible.index(self._selected_path)
@@ -3368,7 +3391,8 @@ class PlaylistWidget(QListWidget):
         menu = QMenu(self)
         # Check if any selected files are hidden.
         hidden_sel = [p for p in sel if os.path.basename(p) in self._hidden_basenames]
-        act_remove = act_hide = act_unhide = act_delete = act_sep = None
+        act_remove = act_hide = act_unhide = act_delete = None
+        act_sep_above = act_sep_below = None
         disable_acts: dict = {}
         enable_acts: dict = {}
         if len(sel) == 1:
@@ -3392,10 +3416,13 @@ class PlaylistWidget(QListWidget):
                     base = f[:-len("_disabled")]
                     enable_acts[sub.addAction(f"{base}  ({folders[f]})")] = f
             menu.addSeparator()
-            if sel[0] in self._separators_before:
-                act_sep = menu.addAction("Remove separator above")
-            else:
-                act_sep = menu.addAction("Add separator above")
+            above_present = sel[0] in self._separators_before
+            act_sep_above = menu.addAction(
+                "Remove separator above" if above_present else "Add separator above")
+            below_anchor = self._next_visible_path(sel[0])
+            below_present = below_anchor in self._separators_before
+            act_sep_below = menu.addAction(
+                "Remove separator below" if below_present else "Add separator below")
             act_delete = menu.addAction(f"Delete from disk: {name}")
         else:
             act_remove = menu.addAction(f"Remove {len(sel)} files")
@@ -3442,13 +3469,10 @@ class PlaylistWidget(QListWidget):
             self.hide_requested.emit(sel)
         elif chosen == act_unhide:
             self.unhide_requested.emit(hidden_sel)
-        elif chosen == act_sep:
-            if sel[0] in self._separators_before:
-                self._separators_before.discard(sel[0])
-            else:
-                self._separators_before.add(sel[0])
-            self._rebuild()
-            self.separators_changed.emit()
+        elif chosen == act_sep_above:
+            self._toggle_separator(sel[0])
+        elif chosen == act_sep_below:
+            self._toggle_separator(self._next_visible_path(sel[0]))
         elif chosen in disable_acts:
             self.disable_requested.emit(sel[0], disable_acts[chosen])
         elif chosen in enable_acts:
