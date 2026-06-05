@@ -674,9 +674,11 @@ def restore_model_version(version_path: str, profile_name: str = "default",
 
 
 def list_trained_models(profile_name: str = "default") -> list[str]:
-    """Return embedding model names that have a trained .joblib for *profile_name*.
+    """Return embedding model keys that have a trained .joblib for *profile_name*.
 
-    Looks for files matching ``{profile}_{MODEL}.joblib`` in the models dir.
+    Looks for files matching ``{profile}_{KEY}.joblib`` in the models dir.
+    KEY is either a bare embed model name (e.g. ``EAT_LARGE``) or
+    ``{MODEL}_{name}`` for user-named variants.
     """
     prefix = f"{profile_name}_"
     suffix = ".joblib"
@@ -685,13 +687,17 @@ def list_trained_models(profile_name: str = "default") -> list[str]:
         return result
     for fname in os.listdir(_MODEL_DIR):
         if fname.startswith(prefix) and fname.endswith(suffix):
-            model_name = fname[len(prefix):-len(suffix)]
-            if model_name in _EMBED_MODELS:
-                result.append(model_name)
+            key = fname[len(prefix):-len(suffix)]
+            if key in _EMBED_MODELS:
+                result.append(key)
+            else:
+                for m in _EMBED_MODELS:
+                    if key.startswith(m + "_"):
+                        result.append(key)
+                        break
     # Also check legacy {profile}.joblib
     legacy = os.path.join(_MODEL_DIR, f"{profile_name}.joblib")
     if os.path.exists(legacy) and not result:
-        # Legacy model — we don't know the embed model, but it's usable
         result.append("")
     return sorted(result)
 

@@ -527,14 +527,16 @@ class TrainDialog(QDialog):
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
-        # Positive class selector — lists export folders
-        self._cmb_positive = QComboBox()
+        # Positive class selector — checkable list of export folders
+        self._pos_list = QListWidget()
+        self._pos_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self._pos_list.setMaximumHeight(120)
         self._cmb_negative = QComboBox()
         self._cmb_negative.addItem("(auto only)", userData="")
         self._populate_folder_combos()
-        if self._cmb_positive.count() == 0:
+        if self._pos_list.count() == 0:
             form.addRow("", QLabel("No exported clips found for this profile."))
-        form.addRow("Positive class:", self._cmb_positive)
+        form.addRow("Positive class:", self._pos_list)
 
         # Negative class selector (optional)
         self._cmb_negative.currentIndexChanged.connect(lambda: self._debounce.start())
@@ -546,6 +548,14 @@ class TrainDialog(QDialog):
             self._cmb_model.addItem(name)
         self._cmb_model.setCurrentText("EAT_LARGE")
         form.addRow("Model:", self._cmb_model)
+
+        # Model name (optional suffix for the .joblib file)
+        self._txt_model_name = QLineEdit()
+        self._txt_model_name.setPlaceholderText("(default)")
+        self._txt_model_name.setToolTip(
+            "Optional name to distinguish this model. "
+            "Saved as {profile}_{model}_{name}.joblib")
+        form.addRow("Name:", self._txt_model_name)
 
         # Auto-negative margin (0 = disabled)
         self._spn_neg_margin = QDoubleSpinBox()
@@ -619,7 +629,7 @@ class TrainDialog(QDialog):
         stats_row.addWidget(self._btn_details, 0, Qt.AlignmentFlag.AlignTop)
         self._video_infos: list = []
         self._update_stats()
-        self._cmb_positive.currentIndexChanged.connect(self._update_stats)
+        self._pos_list.itemChanged.connect(lambda: self._debounce.start())
         layout.addLayout(stats_row)
 
         # Buttons
@@ -628,7 +638,7 @@ class TrainDialog(QDialog):
         )
         btns.button(QDialogButtonBox.StandardButton.Ok).setText("Train")
         btns.button(QDialogButtonBox.StandardButton.Ok).setEnabled(
-            self._cmb_positive.count() > 0
+            self._pos_list.count() > 0
         )
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
@@ -656,58 +666,57 @@ class TrainDialog(QDialog):
         self._debounce.start()  # refresh stats after potential deletions
 
     def _populate_folder_combos(self):
-        """Rebuild positive/negative combo box items from DB stats."""
+        """Rebuild positive list and negative combo from DB stats."""
         inc_scan = getattr(self, '_chk_scan_exports', None)
         inc = inc_scan.isChecked() if inc_scan else False
-        prev_pos = self._cmb_positive.currentData()
+        prev_checked = {self._pos_list.item(i).data(Qt.ItemDataRole.UserRole)
+                        for i in range(self._pos_list.count())
+                        if self._pos_list.item(i).checkState() == Qt.CheckState.Checked}
         prev_neg = self._cmb_negative.currentData()
-        self._cmb_positive.blockSignals(True)
+        self._pos_list.blockSignals(True)
         self._cmb_negative.blockSignals(True)
-        self._cmb_positive.clear()
-        # Keep "(auto only)" as first item in negative, remove the rest
+        self._pos_list.clear()
         while self._cmb_negative.count() > 1:
             self._cmb_negative.removeItem(1)
         stats = self._db.get_training_stats(self._profile, include_scan_exports=inc)
         for folder_name, info in stats.items():
             label = f"{folder_name}  ({info['videos']} videos, {info['clips']} clips)"
-            self._cmb_positive.addItem(label, userData=folder_name)
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, folder_name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            checked = folder_name in prev_checked if prev_checked else (self._pos_list.count() == 0)
+            item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            self._pos_list.addItem(item)
             self._cmb_negative.addItem(label, userData=folder_name)
-        # Restore previous selection if still present
-        if prev_pos:
-            idx = self._cmb_positive.findData(prev_pos)
-            if idx >= 0:
-                self._cmb_positive.setCurrentIndex(idx)
         if prev_neg:
             idx = self._cmb_negative.findData(prev_neg)
             if idx >= 0:
                 self._cmb_negative.setCurrentIndex(idx)
-        self._cmb_positive.blockSignals(False)
+        self._pos_list.blockSignals(False)
         self._cmb_negative.blockSignals(False)
 
     def _update_stats(self):
         self._populate_folder_combos()
-        folder = self._cmb_positive.currentData()
-        if not folder:
-            self._lbl_stats.setText("No export folder data available.")
+        folders = self.positive_folders
+        if not folders:
+            self._lbl_stats.setText("No positive folders selected.")
             return
         neg_folder = self._cmb_negative.currentData() or ""
         inc_scan = self._chk_scan_exports.isChecked()
         use_neg = self._chk_hard_negatives.isChecked()
-        # First check without fallback to see if source_paths are sufficient
         video_infos_no_fb = self._db.get_training_data(
-            self._profile, folder, negative_folder=neg_folder,
+            self._profile, folders, negative_folder=neg_folder,
             playlist_paths=self._playlist_paths,
             include_scan_exports=inc_scan,
             use_hard_negatives=use_neg,
         )
         video_infos = self._db.get_training_data(
-            self._profile, folder, negative_folder=neg_folder,
+            self._profile, folders, negative_folder=neg_folder,
             fallback_video_dir=self._txt_video_dir.text(),
             playlist_paths=self._playlist_paths,
             include_scan_exports=inc_scan,
             use_hard_negatives=use_neg,
         )
-        # Show video dir field only when the fallback helps find extra videos
         needs_fallback = len(video_infos) > len(video_infos_no_fb) or len(video_infos_no_fb) == 0
         self._lbl_video_dir.setVisible(needs_fallback)
         self._video_dir_widget.setVisible(needs_fallback)
@@ -736,8 +745,18 @@ class TrainDialog(QDialog):
             dlg.exec()
 
     @property
+    def positive_folders(self) -> list[str]:
+        result = []
+        for i in range(self._pos_list.count()):
+            item = self._pos_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                result.append(item.data(Qt.ItemDataRole.UserRole))
+        return result
+
+    @property
     def positive_folder(self) -> str:
-        return self._cmb_positive.currentData() or ""
+        folders = self.positive_folders
+        return folders[0] if folders else ""
 
     @property
     def negative_folder(self) -> str:
@@ -750,6 +769,10 @@ class TrainDialog(QDialog):
     @property
     def embed_model(self) -> str:
         return self._cmb_model.currentText()
+
+    @property
+    def model_name(self) -> str:
+        return self._txt_model_name.text().strip().replace(" ", "_")
 
     @property
     def video_dir(self) -> str:
@@ -3123,9 +3146,19 @@ class PlaylistWidget(QListWidget):
         self._hide_exported = False
         self._show_hidden = False
         self._filter_text = ""
-        self._visible: list[str] = []         # paths currently shown in widget
+        self._disabled_paths: set[str] = set()   # videos with disabled clips → red
+        self._folder_counts: dict[str, dict[str, int]] = {}  # path → {folder: count}
+        self._separators_before: set[str] = set()  # paths that show a separator row above
+        self._visible: list[str | None] = []  # rows shown; None = separator row
         self._selected_path: str | None = None
         self.itemClicked.connect(self._on_item_clicked)
+
+    def set_disabled_paths(self, paths: set[str]) -> None:
+        self._disabled_paths = paths
+        self._rebuild()
+
+    def set_folder_counts(self, counts: dict[str, dict[str, int]]) -> None:
+        self._folder_counts = counts
 
     def set_filter(self, text: str) -> None:
         self._filter_text = text.lower()
@@ -3144,24 +3177,18 @@ class PlaylistWidget(QListWidget):
         """Rebuild the QListWidget from scratch with only visible items."""
         self.blockSignals(True)
         self.clear()
-        self._visible = [p for p in self._paths if self._is_visible(p)]
-        for path in self._visible:
-            name = os.path.basename(path)
-            is_hidden = os.path.basename(path) in self._hidden_basenames
-            if is_hidden:
-                item = QListWidgetItem(f"[hidden] {name}")
-                item.setForeground(QColor(120, 120, 120))
-                font = item.font()
-                font.setItalic(True)
-                item.setFont(font)
-            elif path in self._done_set:
-                n = self._done_counts.get(path, 0)
-                tag = f"[{n}]" if n else "✓"
-                item = QListWidgetItem(f"{tag} {name}")
-                item.setForeground(QColor(100, 180, 100))
-            else:
-                item = QListWidgetItem(name)
+        # Drop separator anchors for paths no longer present.
+        self._separators_before &= set(self._paths)
+        visible_paths = [p for p in self._paths if self._is_visible(p)]
+        self._visible = []
+        for path in visible_paths:
+            if path in self._separators_before:
+                self.addItem(self._make_separator_item())
+                self._visible.append(None)
+            item = QListWidgetItem()
+            self._style_item(item, path)
             self.addItem(item)
+            self._visible.append(path)
         # Restore selection.
         if self._selected_path and self._selected_path in self._visible:
             row = self._visible.index(self._selected_path)
@@ -3169,11 +3196,42 @@ class PlaylistWidget(QListWidget):
             self._decorate_current(row)
         self.blockSignals(False)
 
+    def _make_separator_item(self) -> "QListWidgetItem":
+        item = QListWidgetItem("─" * 24)
+        item.setFlags(Qt.ItemFlag.NoItemFlags)  # non-selectable, non-interactive
+        item.setForeground(QColor(120, 120, 120))
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        return item
+
+    def _style_item(self, item: "QListWidgetItem", path: str) -> None:
+        """Set an item's text and color based on hidden/done/disabled state."""
+        name = os.path.basename(path)
+        if name in self._hidden_basenames:
+            item.setText(f"[hidden] {name}")
+            item.setForeground(QColor(120, 120, 120))
+            font = item.font()
+            font.setItalic(True)
+            item.setFont(font)
+            return
+        n = self._done_counts.get(path, 0)
+        if path in self._done_set:
+            tag = f"[{n}]" if n else "✓"
+            item.setText(f"{tag} {name}")
+        else:
+            item.setText(name)
+        if path in self._disabled_paths:
+            item.setForeground(QColor(220, 80, 80))   # red — disabled
+        elif path in self._done_set:
+            item.setForeground(QColor(100, 180, 100))  # green — exported
+        else:
+            item.setForeground(QColor(200, 200, 200))
+
     def clear_all(self) -> None:
         self._paths.clear()
         self._path_set.clear()
         self._done_set.clear()
         self._done_counts.clear()
+        self._separators_before.clear()
         self._selected_path = None
         self._rebuild()
 
@@ -3194,13 +3252,9 @@ class PlaylistWidget(QListWidget):
         self._done_counts[path] = n_clips
         # Update in-place if visible, otherwise rebuild handles it.
         if path in self._visible:
-            row = self._visible.index(path)
-            item = self.item(row)
+            item = self.item(self._visible.index(path))
             if item:
-                name = os.path.basename(path)
-                tag = f"[{n_clips}]" if n_clips else "✓"
-                item.setText(f"{tag} {name}")
-                item.setForeground(QColor(100, 180, 100))
+                self._style_item(item, path)
 
     def unmark_done(self, path: str) -> None:
         if path not in self._path_set:
@@ -3208,11 +3262,9 @@ class PlaylistWidget(QListWidget):
         self._done_set.discard(path)
         self._done_counts.pop(path, None)
         if path in self._visible:
-            row = self._visible.index(path)
-            item = self.item(row)
+            item = self.item(self._visible.index(path))
             if item:
-                item.setText(os.path.basename(path))
-                item.setForeground(QColor(200, 200, 200))
+                self._style_item(item, path)
 
     def set_hidden_basenames(self, basenames: set[str]) -> None:
         self._hidden_basenames = basenames
@@ -3227,30 +3279,45 @@ class PlaylistWidget(QListWidget):
         self._rebuild()
 
     def advance(self) -> None:
-        row = self.currentRow()
-        if row >= 0 and row < self.count() - 1:
-            self._select(row + 1)
+        row = self._next_selectable(self.currentRow() + 1, +1)
+        if row is not None:
+            self._select(row)
+
+    def _next_selectable(self, row: int, step: int) -> "int | None":
+        """Return the nearest row >= /<= *row* (by *step*) that is a file, or None."""
+        while 0 <= row < len(self._visible):
+            if self._visible[row] is not None:
+                return row
+            row += step
+        return None
 
     def current_path(self) -> str | None:
         row = self.currentRow()
         return self._visible[row] if 0 <= row < len(self._visible) else None
 
     def _select(self, row: int) -> None:
-        """Select a row in the visible list."""
+        """Select a row in the visible list (skips separator rows)."""
+        if 0 <= row < len(self._visible) and self._visible[row] is None:
+            nxt = self._next_selectable(row, +1) or self._next_selectable(row, -1)
+            if nxt is None:
+                return
+            row = nxt
         prev = self.currentRow()
         self.setCurrentRow(row)
         if prev >= 0 and prev != row:
             self._decorate_prev(prev)
-        if 0 <= row < len(self._visible):
+        if 0 <= row < len(self._visible) and self._visible[row] is not None:
             self._selected_path = self._visible[row]
             self._decorate_current(row)
             self.file_selected.emit(self._visible[row])
 
     def _decorate_current(self, row: int) -> None:
         item = self.item(row)
-        if not item:
+        if not item or not (0 <= row < len(self._visible)):
             return
         path = self._visible[row]
+        if path is None:
+            return
         name = os.path.basename(path)
         if path in self._done_set:
             n = self._done_counts.get(path, 0)
@@ -3264,6 +3331,8 @@ class PlaylistWidget(QListWidget):
         if not item or row >= len(self._visible):
             return
         path = self._visible[row]
+        if path is None:
+            return
         name = os.path.basename(path)
         if path in self._done_set:
             n = self._done_counts.get(path, 0)
@@ -3281,11 +3350,15 @@ class PlaylistWidget(QListWidget):
 
     hide_requested = pyqtSignal(list)  # emits list of full paths to hide
     unhide_requested = pyqtSignal(list)  # emits list of full paths to unhide
+    disable_requested = pyqtSignal(str, str)  # (video path, subcategory folder)
+    enable_requested = pyqtSignal(str, str)   # (video path, disabled folder)
+    separators_changed = pyqtSignal()  # separator set was modified
 
     def _selected_paths(self) -> list[str]:
         return [self._visible[self.row(it)]
                 for it in self.selectedItems()
-                if self.row(it) < len(self._visible)]
+                if self.row(it) < len(self._visible)
+                and self._visible[self.row(it)] is not None]
 
     def contextMenuEvent(self, event) -> None:
         sel = self._selected_paths()
@@ -3295,7 +3368,9 @@ class PlaylistWidget(QListWidget):
         menu = QMenu(self)
         # Check if any selected files are hidden.
         hidden_sel = [p for p in sel if os.path.basename(p) in self._hidden_basenames]
-        act_remove = act_hide = act_unhide = act_delete = None
+        act_remove = act_hide = act_unhide = act_delete = act_sep = None
+        disable_acts: dict = {}
+        enable_acts: dict = {}
         if len(sel) == 1:
             name = os.path.basename(sel[0])
             act_remove = menu.addAction(f"Remove: {name}")
@@ -3303,7 +3378,24 @@ class PlaylistWidget(QListWidget):
                 act_unhide = menu.addAction(f"Unhide: {name}")
             else:
                 act_hide = menu.addAction(f"Hide in profile: {name}")
+            # Disable / re-enable per subcategory folder
+            folders = self._folder_counts.get(sel[0], {})
+            active = sorted(f for f in folders if not f.endswith("_disabled"))
+            disabled = sorted(f for f in folders if f.endswith("_disabled"))
+            if active:
+                sub = menu.addMenu("Disable in")
+                for f in active:
+                    disable_acts[sub.addAction(f"{f}  ({folders[f]})")] = f
+            if disabled:
+                sub = menu.addMenu("Re-enable")
+                for f in disabled:
+                    base = f[:-len("_disabled")]
+                    enable_acts[sub.addAction(f"{base}  ({folders[f]})")] = f
             menu.addSeparator()
+            if sel[0] in self._separators_before:
+                act_sep = menu.addAction("Remove separator above")
+            else:
+                act_sep = menu.addAction("Add separator above")
             act_delete = menu.addAction(f"Delete from disk: {name}")
         else:
             act_remove = menu.addAction(f"Remove {len(sel)} files")
@@ -3350,6 +3442,17 @@ class PlaylistWidget(QListWidget):
             self.hide_requested.emit(sel)
         elif chosen == act_unhide:
             self.unhide_requested.emit(hidden_sel)
+        elif chosen == act_sep:
+            if sel[0] in self._separators_before:
+                self._separators_before.discard(sel[0])
+            else:
+                self._separators_before.add(sel[0])
+            self._rebuild()
+            self.separators_changed.emit()
+        elif chosen in disable_acts:
+            self.disable_requested.emit(sel[0], disable_acts[chosen])
+        elif chosen in enable_acts:
+            self.enable_requested.emit(sel[0], enable_acts[chosen])
 
 
 class _KeyFilter(QObject):
@@ -3478,6 +3581,9 @@ class MainWindow(QMainWindow):
         self._playlist.file_selected.connect(self._load_file)
         self._playlist.hide_requested.connect(self._on_hide_files)
         self._playlist.unhide_requested.connect(self._on_unhide_files)
+        self._playlist.disable_requested.connect(self._on_disable_video)
+        self._playlist.enable_requested.connect(self._on_enable_video)
+        self._playlist.separators_changed.connect(self._save_separators)
 
         self._mpv = MpvWidget()
         self._mpv.file_loaded.connect(self._after_load)
@@ -3844,6 +3950,7 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self._cmb_profile.setCurrentIndex(idx)
         self._cmb_profile.activated.connect(self._on_profile_activated)
+        self._load_hidden_subcats()
         self._refresh_scan_models()
 
         self._btn_shortcuts = QPushButton("?")
@@ -4057,6 +4164,10 @@ class MainWindow(QMainWindow):
                     self._playlist._select(0)
                 _log(f"Resumed session: {len(valid)} file(s)")
 
+        # Apply persisted subcategory visibility to timeline + buttons.
+        self._apply_subcat_visibility()
+        self._load_separators()
+
         self._show_changelog()
 
     # ── Changelog ────────────────────────────────────────────
@@ -4227,7 +4338,10 @@ class MainWindow(QMainWindow):
             if not self._last_export_path:
                 self._btn_delete.setEnabled(False)
         self._update_next_label()
+        self._load_hidden_subcats()
+        self._apply_subcat_visibility()
         self._apply_playlist_filters()
+        self._load_separators()
         self._refresh_scan_models()
         if self._playlist.count() > 0:
             self._playlist._select(0)
@@ -4355,6 +4469,30 @@ class MainWindow(QMainWindow):
             self._playlist._hidden_basenames.add(basename)
         self._playlist._rebuild()
         _log(f"Hidden {len(paths)} file(s) in profile {self._profile}")
+
+    def _on_disable_video(self, path: str, folder: str) -> None:
+        """Move a video's clips from subcategory *folder* to a sibling
+        ``{folder}_disabled`` folder, excluding them from training."""
+        filename = os.path.basename(path)
+        n = self._db.relocate_video_clips(
+            filename, self._profile, folder, folder + "_disabled")
+        if self._file_path and os.path.basename(self._file_path) == filename:
+            self._refresh_markers()
+        self._refresh_playlist_checks()
+        self._show_status(
+            f"Disabled {n} clip(s) of {filename} in {folder}", 4000)
+
+    def _on_enable_video(self, path: str, disabled_folder: str) -> None:
+        """Move a video's clips back from a ``{base}_disabled`` folder to *base*."""
+        filename = os.path.basename(path)
+        base = disabled_folder[:-len("_disabled")]
+        n = self._db.relocate_video_clips(
+            filename, self._profile, disabled_folder, base)
+        if self._file_path and os.path.basename(self._file_path) == filename:
+            self._refresh_markers()
+        self._refresh_playlist_checks()
+        self._show_status(
+            f"Re-enabled {n} clip(s) of {filename} in {base}", 4000)
 
     def _apply_playlist_filters(self) -> None:
         """Apply profile-hidden files, export marks, and hide-exported filter."""
@@ -4488,14 +4626,29 @@ class MainWindow(QMainWindow):
         self._timeline.set_other_markers(others)
 
     def _refresh_playlist_checks(self) -> None:
-        """Re-evaluate marks on every playlist item for the current profile."""
+        """Re-evaluate marks on every playlist item for the current profile.
+
+        The per-video count reflects only clips in visible, non-disabled
+        folders.  Videos with clips in a ``_disabled`` folder are flagged red.
+        """
         profile = self._profile
+        hidden = self._hidden_subcats
+        folder_counts: dict[str, dict[str, int]] = {}
+        disabled_paths: set[str] = set()
         for path in self._playlist._paths:
-            n = self._db.get_clip_count(os.path.basename(path), profile)
+            filename = os.path.basename(path)
+            counts = self._db.get_clip_counts_by_folder(filename, profile)
+            folder_counts[path] = counts
+            n = sum(c for f, c in counts.items()
+                    if f not in hidden and not f.endswith("_disabled"))
+            if any(f.endswith("_disabled") for f in counts):
+                disabled_paths.add(path)
             if n:
                 self._playlist.mark_done(path, n)
             else:
                 self._playlist.unmark_done(path)
+        self._playlist.set_folder_counts(folder_counts)
+        self._playlist.set_disabled_paths(disabled_paths)
 
     def _on_delete_marker(self, output_path: str) -> None:
         deleted = self._db.delete_group(output_path)
@@ -5188,7 +5341,37 @@ class MainWindow(QMainWindow):
             self._hidden_subcats.discard(name)
         else:
             self._hidden_subcats.add(name)
+        self._save_hidden_subcats()
         self._apply_subcat_visibility()
+
+    def _hidden_subcats_key(self) -> str:
+        return f"hidden_subcats/{self._profile}"
+
+    def _load_hidden_subcats(self) -> None:
+        """Load this profile's hidden-subcategory set from settings."""
+        raw = self._settings.value(self._hidden_subcats_key(), [])
+        if isinstance(raw, str):
+            raw = [raw] if raw else []
+        self._hidden_subcats = set(raw or [])
+
+    def _save_hidden_subcats(self) -> None:
+        self._settings.setValue(
+            self._hidden_subcats_key(), sorted(self._hidden_subcats))
+
+    def _separators_key(self) -> str:
+        return f"separators/{self._profile}"
+
+    def _load_separators(self) -> None:
+        """Load and apply this profile's playlist separators from settings."""
+        raw = self._settings.value(self._separators_key(), [])
+        if isinstance(raw, str):
+            raw = [raw] if raw else []
+        self._playlist._separators_before = set(raw or [])
+        self._playlist._rebuild()
+
+    def _save_separators(self) -> None:
+        self._settings.setValue(
+            self._separators_key(), sorted(self._playlist._separators_before))
 
     def _apply_subcat_visibility(self) -> None:
         self._timeline._hidden_subcats = self._hidden_subcats
@@ -5199,6 +5382,7 @@ class MainWindow(QMainWindow):
                               for f in self._hidden_subcats)
             btn.setVisible(visible)
         self._rebuild_format_buttons()
+        self._refresh_playlist_checks()
 
     def _toggle_scan_mode(self, on: bool) -> None:
         """Toggle scan review mode — clean timeline, free cursor."""
@@ -5598,14 +5782,15 @@ class MainWindow(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        pos_folder = dlg.positive_folder
+        pos_folders = dlg.positive_folders
         neg_folder = dlg.negative_folder
         neg_margin = dlg.neg_margin
         embed_model = dlg.embed_model
+        model_name = dlg.model_name
         video_dir = dlg.video_dir
         inc_scan = dlg.include_scan_exports
         use_neg = dlg.use_hard_negatives
-        if not pos_folder:
+        if not pos_folders:
             self._show_status("No positive class selected")
             return
 
@@ -5614,7 +5799,7 @@ class MainWindow(QMainWindow):
             self._settings.setValue("train_video_dir", video_dir)
 
         video_infos = self._db.get_training_data(
-            self._profile, pos_folder, negative_folder=neg_folder,
+            self._profile, pos_folders, negative_folder=neg_folder,
             fallback_video_dir=video_dir,
             playlist_paths=self._playlist._paths,
             include_scan_exports=inc_scan,
@@ -5625,7 +5810,8 @@ class MainWindow(QMainWindow):
             return
 
         from core.audio_scan import default_model_path
-        model_path = default_model_path(self._profile, embed_model)
+        embed_key = f"{embed_model}_{model_name}" if model_name else embed_model
+        model_path = default_model_path(self._profile, embed_key)
 
         self._cleanup_train_worker()
         self._btn_train.setText("Cancel")

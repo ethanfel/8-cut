@@ -483,6 +483,8 @@ class ProcessedDB:
                     span = (dur or 8.0) + ((cnt or 1) - 1) * (spr or 3.0)
                     seen[t] = (t, num, p, span)
             name = os.path.basename(folder)
+            if name.endswith("_disabled"):
+                continue  # disabled clips are excluded from the timeline
             result[name] = list(seen.values())
         return result
 
@@ -530,6 +532,105 @@ class ProcessedDB:
             (filename, profile),
         ).fetchone()
         return row[0] if row else 0
+
+    def get_clip_counts_by_folder(self, filename: str,
+                                  profile: str = "default") -> dict[str, int]:
+        """Return per-export-folder clip counts for a single video.
+
+        Folder name is the grandparent dir of each clip's output_path
+        (e.g. ``mp4_doggy_clap``).
+        """
+        if not self._enabled:
+            return {}
+        rows = self._con.execute(
+            "SELECT output_path FROM processed WHERE filename = ? AND profile = ?",
+            (filename, profile),
+        ).fetchall()
+        counts: dict[str, int] = {}
+        for (op,) in rows:
+            folder = os.path.basename(os.path.dirname(os.path.dirname(op)))
+            counts[folder] = counts.get(folder, 0) + 1
+        return counts
+
+    def relocate_video_clips(self, filename: str, profile: str,
+                             src_folder_name: str,
+                             dst_folder_name: str) -> int:
+        """Move *filename*'s clips from one export folder to a sibling folder.
+
+        Matches rows whose grandparent dir basename == *src_folder_name*,
+        then moves each clip (and any ``.wav`` sidecar) on disk into a sibling
+        folder named *dst_folder_name*, migrates its dataset.json annotation,
+        and rewrites output_path in the DB.  Returns the number of clips moved.
+        """
+        if not self._enabled:
+            return 0
+        import shutil
+        from .annotations import remove_clip_annotation, upsert_clip_annotation
+
+        rows = self._con.execute(
+            "SELECT id, output_path, label FROM processed"
+            " WHERE filename = ? AND profile = ?",
+            (filename, profile),
+        ).fetchall()
+
+        moves: list[tuple[str, str]] = []        # (old_path, new_path)
+        updates: list[tuple[str, int]] = []       # (new_path, id)
+        ann: list[tuple[str, str, str, str, str]] = []  # old_fold,new_fold,old,new,label
+        new_dirs: set[str] = set()
+        old_vid_dirs: set[str] = set()
+
+        for rid, op, label in rows:
+            vid_dir = os.path.dirname(op)
+            export_folder = os.path.dirname(vid_dir)
+            if os.path.basename(export_folder) != src_folder_name:
+                continue
+            new_export_folder = os.path.join(
+                os.path.dirname(export_folder), dst_folder_name)
+            new_vid_dir = os.path.join(new_export_folder, os.path.basename(vid_dir))
+            new_op = os.path.join(new_vid_dir, os.path.basename(op))
+            updates.append((new_op, rid))
+            new_dirs.add(new_vid_dir)
+            old_vid_dirs.add(vid_dir)
+            if os.path.exists(op):
+                moves.append((op, new_op))
+            ann.append((export_folder, new_export_folder, op, new_op, label or ""))
+
+        if not updates:
+            return 0
+
+        with self._lock:
+            for d in sorted(new_dirs):
+                os.makedirs(d, exist_ok=True)
+            for old, new in moves:
+                if os.path.exists(old) and not os.path.exists(new):
+                    shutil.move(old, new)
+                wav_old, wav_new = old + ".wav", new + ".wav"
+                if os.path.exists(wav_old) and not os.path.exists(wav_new):
+                    shutil.move(wav_old, wav_new)
+            self._con.executemany(
+                "UPDATE processed SET output_path = ? WHERE id = ?", updates)
+            self._con.commit()
+
+        # Migrate dataset.json entries (best-effort, outside the DB lock).
+        for old_fold, new_fold, old_op, new_op, label in ann:
+            remove_clip_annotation(old_fold, old_op)
+            if label:
+                upsert_clip_annotation(new_fold, new_op, label)
+
+        # Remove now-empty old vid dirs and their export folder if empty.
+        for d in sorted(old_vid_dirs):
+            try:
+                if os.path.isdir(d) and not os.listdir(d):
+                    os.rmdir(d)
+                parent = os.path.dirname(d)
+                if os.path.isdir(parent) and not os.listdir(parent):
+                    os.rmdir(parent)
+            except OSError:
+                pass
+
+        _log(f"Relocated {len(updates)} clip(s) of {filename}: "
+             f"{src_folder_name} -> {dst_folder_name}")
+        return len(updates)
 
     def get_profiles(self) -> list[str]:
         """Return distinct profile names across all tables, ordered alphabetically."""
@@ -788,11 +889,12 @@ class ProcessedDB:
         folder_names: set[str] = set()
         for (op,) in rows:
             grandparent = os.path.basename(os.path.dirname(os.path.dirname(op)))
-            if grandparent:
+            if grandparent and not grandparent.endswith("_disabled"):
                 folder_names.add(grandparent)
         return sorted(folder_names)
 
-    def get_training_data(self, profile: str, positive_folder: str,
+    def get_training_data(self, profile: str,
+                          positive_folder: "str | list[str]",
                           negative_folder: str = "",
                           fallback_video_dir: str = "",
                           playlist_paths: list[str] | None = None,
@@ -803,7 +905,7 @@ class ProcessedDB:
 
         Args:
             profile: profile name
-            positive_folder: export folder name for positive class (e.g. "mp4_Intense")
+            positive_folder: export folder name(s) for positive class
             negative_folder: export folder name for explicit negatives (optional)
             fallback_video_dir: if source_path is empty, try filename in this dir
             playlist_paths: loaded playlist paths to resolve filenames
@@ -812,10 +914,11 @@ class ProcessedDB:
 
         Returns:
             list of (source_video_path, positive_times, soft_times, negative_times)
-            per video.  Soft times = clips from any other non-negative folder.
+            per video.  Soft times = clips from any other non-positive/non-negative folder.
         """
         if not self._enabled:
             return []
+        pos_folders = {positive_folder} if isinstance(positive_folder, str) else set(positive_folder)
         if include_scan_exports:
             rows = self._con.execute(
                 "SELECT filename, start_time, output_path, source_path"
@@ -839,7 +942,9 @@ class ProcessedDB:
             if sp:
                 source_by_filename[fn] = sp
             grandparent = os.path.basename(os.path.dirname(os.path.dirname(op)))
-            if grandparent == positive_folder:
+            if grandparent.endswith("_disabled"):
+                continue  # disabled clips are excluded from training entirely
+            if grandparent in pos_folders:
                 pos_by_video.setdefault(fn, set()).add(st)
             elif negative_folder and grandparent == negative_folder:
                 neg_by_video.setdefault(fn, set()).add(st)
