@@ -3182,6 +3182,7 @@ class PlaylistWidget(QListWidget):
         self._filter_text = ""
         self._disabled_paths: set[str] = set()   # videos with disabled clips → red
         self._folder_counts: dict[str, dict[str, int]] = {}  # path → {folder: count}
+        self._all_subcat_counts: dict[str, int] = {}  # profile-wide folder → count
         self._separators_before: set[str] = set()  # paths that show a separator row above
         self._visible: list[str | None] = []  # rows shown; None = separator row
         self._selected_path: str | None = None
@@ -3193,6 +3194,10 @@ class PlaylistWidget(QListWidget):
 
     def set_folder_counts(self, counts: dict[str, dict[str, int]]) -> None:
         self._folder_counts = counts
+
+    def set_all_subcat_counts(self, counts: dict[str, int]) -> None:
+        """Profile-wide subcategory folder → clip count (incl. _disabled)."""
+        self._all_subcat_counts = counts
 
     def set_filter(self, text: str) -> None:
         self._filter_text = text.lower()
@@ -3408,6 +3413,8 @@ class PlaylistWidget(QListWidget):
     unhide_requested = pyqtSignal(list)  # emits list of full paths to unhide
     disable_requested = pyqtSignal(str, str)  # (video path, subcategory folder)
     enable_requested = pyqtSignal(str, str)   # (video path, disabled folder)
+    disable_all_requested = pyqtSignal(str)   # subcategory folder (all videos)
+    enable_all_requested = pyqtSignal(str)    # subcategory folder (all videos)
     separators_changed = pyqtSignal()  # separator set was modified
 
     def _selected_paths(self) -> list[str]:
@@ -3428,6 +3435,8 @@ class PlaylistWidget(QListWidget):
         act_sep_above = act_sep_below = None
         disable_acts: dict = {}
         enable_acts: dict = {}
+        disable_all_acts: dict = {}
+        enable_all_acts: dict = {}
         if len(sel) == 1:
             name = os.path.basename(sel[0])
             act_remove = menu.addAction(f"Remove: {name}")
@@ -3448,6 +3457,22 @@ class PlaylistWidget(QListWidget):
                 for f in disabled:
                     base = f[:-len("_disabled")]
                     enable_acts[sub.addAction(f"{base}  ({folders[f]})")] = f
+            # Disable / re-enable an entire subcategory across ALL videos.
+            all_active = sorted(f for f, c in self._all_subcat_counts.items()
+                                if c and not f.endswith("_disabled"))
+            all_disabled = sorted(f for f, c in self._all_subcat_counts.items()
+                                  if c and f.endswith("_disabled"))
+            if all_active:
+                sub = menu.addMenu("Disable all in")
+                for f in all_active:
+                    disable_all_acts[sub.addAction(
+                        f"{f}  ({self._all_subcat_counts[f]})")] = f
+            if all_disabled:
+                sub = menu.addMenu("Enable all in")
+                for f in all_disabled:
+                    base = f[:-len("_disabled")]
+                    enable_all_acts[sub.addAction(
+                        f"{base}  ({self._all_subcat_counts[f]})")] = base
             menu.addSeparator()
             above_present = sel[0] in self._separators_before
             act_sep_above = menu.addAction(
@@ -3510,6 +3535,10 @@ class PlaylistWidget(QListWidget):
             self.disable_requested.emit(sel[0], disable_acts[chosen])
         elif chosen in enable_acts:
             self.enable_requested.emit(sel[0], enable_acts[chosen])
+        elif chosen in disable_all_acts:
+            self.disable_all_requested.emit(disable_all_acts[chosen])
+        elif chosen in enable_all_acts:
+            self.enable_all_requested.emit(enable_all_acts[chosen])
 
 
 class _KeyFilter(QObject):
@@ -4369,6 +4398,8 @@ class MainWindow(QMainWindow):
         pw.unhide_requested.connect(self._on_unhide_files)
         pw.disable_requested.connect(self._on_disable_video)
         pw.enable_requested.connect(self._on_enable_video)
+        pw.disable_all_requested.connect(self._disable_all_in_folder)
+        pw.enable_all_requested.connect(self._enable_all_in_folder)
         pw.separators_changed.connect(self._save_playlist_tabs)
         if label is None:
             label = f"List {self._playlist_tabs.count() + 1}"
@@ -4824,6 +4855,11 @@ class MainWindow(QMainWindow):
                 self._playlist.unmark_done(path)
         self._playlist.set_folder_counts(folder_counts)
         self._playlist.set_disabled_paths(disabled_paths)
+        # Profile-wide subcategory counts (exclude the main export folder).
+        base = os.path.basename(self._txt_folder.text())
+        all_counts = {f: c for f, c in self._db.get_all_folder_counts(profile).items()
+                      if f != base}
+        self._playlist.set_all_subcat_counts(all_counts)
 
     def _on_delete_marker(self, output_path: str) -> None:
         deleted = self._db.delete_group(output_path)
