@@ -3413,8 +3413,8 @@ class PlaylistWidget(QListWidget):
     unhide_requested = pyqtSignal(list)  # emits list of full paths to unhide
     disable_requested = pyqtSignal(str, str)  # (video path, subcategory folder)
     enable_requested = pyqtSignal(str, str)   # (video path, disabled folder)
-    disable_all_requested = pyqtSignal(str)   # subcategory folder (all videos)
-    enable_all_requested = pyqtSignal(str)    # subcategory folder (all videos)
+    disable_all_requested = pyqtSignal()   # disable every enabled subcategory
+    enable_all_requested = pyqtSignal()    # re-enable every disabled subcategory
     separators_changed = pyqtSignal()  # separator set was modified
 
     def _selected_paths(self) -> list[str]:
@@ -3433,10 +3433,9 @@ class PlaylistWidget(QListWidget):
         hidden_sel = [p for p in sel if os.path.basename(p) in self._hidden_basenames]
         act_remove = act_hide = act_unhide = act_delete = None
         act_sep_above = act_sep_below = None
+        act_disable_all = act_enable_all = None
         disable_acts: dict = {}
         enable_acts: dict = {}
-        disable_all_acts: dict = {}
-        enable_all_acts: dict = {}
         if len(sel) == 1:
             name = os.path.basename(sel[0])
             act_remove = menu.addAction(f"Remove: {name}")
@@ -3457,22 +3456,17 @@ class PlaylistWidget(QListWidget):
                 for f in disabled:
                     base = f[:-len("_disabled")]
                     enable_acts[sub.addAction(f"{base}  ({folders[f]})")] = f
-            # Disable / re-enable an entire subcategory across ALL videos.
-            all_active = sorted(f for f, c in self._all_subcat_counts.items()
-                                if c and not f.endswith("_disabled"))
-            all_disabled = sorted(f for f, c in self._all_subcat_counts.items()
-                                  if c and f.endswith("_disabled"))
-            if all_active:
-                sub = menu.addMenu("Disable all in")
-                for f in all_active:
-                    disable_all_acts[sub.addAction(
-                        f"{f}  ({self._all_subcat_counts[f]})")] = f
-            if all_disabled:
-                sub = menu.addMenu("Enable all in")
-                for f in all_disabled:
-                    base = f[:-len("_disabled")]
-                    enable_all_acts[sub.addAction(
-                        f"{base}  ({self._all_subcat_counts[f]})")] = base
+            # Disable / re-enable EVERY subcategory at once (across all videos).
+            n_active = sum(c for f, c in self._all_subcat_counts.items()
+                           if c and not f.endswith("_disabled"))
+            n_disabled = sum(c for f, c in self._all_subcat_counts.items()
+                             if c and f.endswith("_disabled"))
+            if n_active:
+                act_disable_all = menu.addAction(
+                    f"Disable all subcategories ({n_active})")
+            if n_disabled:
+                act_enable_all = menu.addAction(
+                    f"Enable all subcategories ({n_disabled})")
             menu.addSeparator()
             above_present = sel[0] in self._separators_before
             act_sep_above = menu.addAction(
@@ -3535,10 +3529,10 @@ class PlaylistWidget(QListWidget):
             self.disable_requested.emit(sel[0], disable_acts[chosen])
         elif chosen in enable_acts:
             self.enable_requested.emit(sel[0], enable_acts[chosen])
-        elif chosen in disable_all_acts:
-            self.disable_all_requested.emit(disable_all_acts[chosen])
-        elif chosen in enable_all_acts:
-            self.enable_all_requested.emit(enable_all_acts[chosen])
+        elif chosen is not None and chosen == act_disable_all:
+            self.disable_all_requested.emit()
+        elif chosen is not None and chosen == act_enable_all:
+            self.enable_all_requested.emit()
 
 
 class _KeyFilter(QObject):
@@ -4398,8 +4392,8 @@ class MainWindow(QMainWindow):
         pw.unhide_requested.connect(self._on_unhide_files)
         pw.disable_requested.connect(self._on_disable_video)
         pw.enable_requested.connect(self._on_enable_video)
-        pw.disable_all_requested.connect(self._disable_all_in_folder)
-        pw.enable_all_requested.connect(self._enable_all_in_folder)
+        pw.disable_all_requested.connect(self._disable_all_subcats)
+        pw.enable_all_requested.connect(self._enable_all_subcats)
         pw.separators_changed.connect(self._save_playlist_tabs)
         if label is None:
             label = f"List {self._playlist_tabs.count() + 1}"
@@ -5527,6 +5521,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(8, 4, 8, 4)
 
+        # Visibility row: show/hide all subcategory markers.
         btn_row = QHBoxLayout()
         btn_all = QPushButton("Show all")
         btn_none = QPushButton("Hide all")
@@ -5536,35 +5531,30 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(btn_none)
         layout.addLayout(btn_row)
 
+        # File-move row: disable / re-enable EVERY subcategory at once.
+        n_active = sum(c for f, c in counts.items()
+                       if c and f != base and not f.endswith("_disabled"))
+        n_disabled = sum(c for f, c in counts.items()
+                         if c and f.endswith("_disabled"))
+        dis_row = QHBoxLayout()
+        btn_dis_all = QPushButton(
+            f"Disable all ({n_active})" if n_active else "Disable all")
+        btn_en_all = QPushButton(
+            f"Enable all ({n_disabled})" if n_disabled else "Enable all")
+        btn_dis_all.setEnabled(n_active > 0)
+        btn_en_all.setEnabled(n_disabled > 0)
+        btn_dis_all.clicked.connect(lambda: (menu.close(), self._disable_all_subcats()))
+        btn_en_all.clicked.connect(lambda: (menu.close(), self._enable_all_subcats()))
+        dis_row.addWidget(btn_dis_all)
+        dis_row.addWidget(btn_en_all)
+        layout.addLayout(dis_row)
+
         checkboxes: list[tuple[str, QCheckBox]] = []
         for name in folders:
-            row = QHBoxLayout()
             cb = QCheckBox(name)
             cb.setChecked(name not in self._hidden_subcats)
             cb.toggled.connect(lambda checked, n=name: self._on_subcat_toggled(n, checked))
-            row.addWidget(cb, 1)
-            btn_dis = QPushButton("Disable all")
-            btn_en = QPushButton("Enable all")
-            btn_dis.setFlat(True)
-            btn_en.setFlat(True)
-
-            def refresh_states(n=name, bd=btn_dis, be=btn_en):
-                c = self._db.get_all_folder_counts(self._profile)
-                active = c.get(n, 0)
-                disabled = c.get(n + "_disabled", 0)
-                bd.setEnabled(active > 0)
-                be.setEnabled(disabled > 0)
-                bd.setText(f"Disable all ({active})" if active else "Disable all")
-                be.setText(f"Enable all ({disabled})" if disabled else "Enable all")
-
-            btn_dis.clicked.connect(
-                lambda _=False, n=name, rs=refresh_states: self._disable_all_in_folder(n, rs))
-            btn_en.clicked.connect(
-                lambda _=False, n=name, rs=refresh_states: self._enable_all_in_folder(n, rs))
-            refresh_states()
-            row.addWidget(btn_dis)
-            row.addWidget(btn_en)
-            layout.addLayout(row)
+            layout.addWidget(cb)
             checkboxes.append((name, cb))
 
         def set_all(visible: bool):
@@ -5580,40 +5570,55 @@ class MainWindow(QMainWindow):
         menu.exec(self._btn_hide_subcats.mapToGlobal(
             self._btn_hide_subcats.rect().bottomLeft()))
 
-    def _disable_all_in_folder(self, folder: str, refresh_states=None) -> None:
-        """Disable every video's clips in *folder* (move to {folder}_disabled)."""
-        active = self._db.get_all_folder_counts(self._profile).get(folder, 0)
-        if not active:
+    def _disable_all_subcats(self) -> None:
+        """Disable every enabled subcategory at once (across all videos)."""
+        base = os.path.basename(self._txt_folder.text())
+        counts = self._db.get_all_folder_counts(self._profile)
+        folders = sorted(f for f, c in counts.items()
+                         if c and f != base and not f.endswith("_disabled"))
+        if not folders:
+            self._show_status("No enabled subcategories to disable", 3000)
             return
+        total = sum(counts[f] for f in folders)
         reply = QMessageBox.question(
-            self, "Disable all",
-            f"Disable all {active} clip(s) in '{folder}'?\n\n"
-            f"Files move to '{folder}_disabled' and are excluded from training.",
+            self, "Disable all subcategories",
+            f"Disable all {len(folders)} subcategor"
+            f"{'y' if len(folders) == 1 else 'ies'} ({total} clip(s))?\n\n"
+            + ", ".join(folders) + "\n\n"
+            "Files move to sibling '_disabled' folders and are excluded from training.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        n = self._db.relocate_video_clips(
-            None, self._profile, folder, folder + "_disabled")
+        moved = 0
+        for f in folders:
+            moved += self._db.relocate_video_clips(
+                None, self._profile, f, f + "_disabled")
         if self._file_path:
             self._refresh_markers()
         self._refresh_playlist_checks()
-        if refresh_states:
-            refresh_states()
-        self._show_status(f"Disabled {n} clip(s) in {folder}", 4000)
+        self._show_status(
+            f"Disabled {len(folders)} subcategor"
+            f"{'y' if len(folders) == 1 else 'ies'} ({moved} clip(s))", 4000)
 
-    def _enable_all_in_folder(self, folder: str, refresh_states=None) -> None:
-        """Re-enable every video's clips for *folder* (move back from _disabled)."""
-        src = folder + "_disabled"
-        if not self._db.get_all_folder_counts(self._profile).get(src, 0):
+    def _enable_all_subcats(self) -> None:
+        """Re-enable every disabled subcategory at once (across all videos)."""
+        counts = self._db.get_all_folder_counts(self._profile)
+        disabled = sorted(f for f, c in counts.items()
+                          if c and f.endswith("_disabled"))
+        if not disabled:
+            self._show_status("No disabled subcategories to enable", 3000)
             return
-        n = self._db.relocate_video_clips(None, self._profile, src, folder)
+        moved = 0
+        for f in disabled:
+            base = f[:-len("_disabled")]
+            moved += self._db.relocate_video_clips(None, self._profile, f, base)
         if self._file_path:
             self._refresh_markers()
         self._refresh_playlist_checks()
-        if refresh_states:
-            refresh_states()
-        self._show_status(f"Re-enabled {n} clip(s) in {folder}", 4000)
+        self._show_status(
+            f"Re-enabled {len(disabled)} subcategor"
+            f"{'y' if len(disabled) == 1 else 'ies'} ({moved} clip(s))", 4000)
 
     def _on_subcat_toggled(self, name: str, checked: bool) -> None:
         if checked:
