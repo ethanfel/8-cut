@@ -5465,19 +5465,28 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QMenu, QWidgetAction, QCheckBox, QWidget, QVBoxLayout, QPushButton, QHBoxLayout
         menu = QMenu(self)
         menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        folders = [name for name, _group in self._timeline._other_markers]
         base = os.path.basename(self._txt_folder.text())
+        counts = self._db.get_all_folder_counts(self._profile)
+        folder_set: set[str] = set()
+        # Subcategories from the current video's markers …
+        for name, _group in self._timeline._other_markers:
+            folder_set.add(name)
+        # … configured subprofiles …
         for s in self._subprofiles:
-            expected = f"{base}_{s}"
-            if expected not in folders:
-                folders.append(expected)
+            folder_set.add(f"{base}_{s}")
+        # … and every subcategory that has clips anywhere in this profile
+        # (active or disabled), so Disable/Enable all is always reachable.
+        for f in counts:
+            if f == base:
+                continue
+            folder_set.add(f[:-len("_disabled")] if f.endswith("_disabled") else f)
+        folders = sorted(folder_set)
         if not folders:
             menu.addAction("(no subcategories)").setEnabled(False)
             menu.exec(self._btn_hide_subcats.mapToGlobal(
                 self._btn_hide_subcats.rect().bottomLeft()))
             return
 
-        counts = self._db.get_all_folder_counts(self._profile)
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(8, 4, 8, 4)
