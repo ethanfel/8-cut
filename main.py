@@ -3184,6 +3184,7 @@ class PlaylistWidget(QListWidget):
         self._folder_counts: dict[str, dict[str, int]] = {}  # path → {folder: count}
         self._all_subcat_counts: dict[str, int] = {}  # profile-wide folder → count
         self._separators_before: set[str] = set()  # paths that show a separator row above
+        self._missing: set[str] = set()       # paths not present on disk
         self._visible: list[str | None] = []  # rows shown; None = separator row
         self._selected_path: str | None = None
         self.itemClicked.connect(self._on_item_clicked)
@@ -3238,6 +3239,7 @@ class PlaylistWidget(QListWidget):
         # Drop separator anchors for paths no longer present (keep end sentinel).
         self._separators_before &= set(self._paths) | {self._SEP_END}
         visible_paths = [p for p in self._paths if self._is_visible(p)]
+        self._missing = {p for p in visible_paths if not os.path.isfile(p)}
         self._visible = []
         for path in visible_paths:
             if path in self._separators_before:
@@ -3265,15 +3267,26 @@ class PlaylistWidget(QListWidget):
         return item
 
     def _style_item(self, item: "QListWidgetItem", path: str) -> None:
-        """Set an item's text and color based on hidden/done/disabled state."""
+        """Set an item's text and color based on hidden/done/disabled/missing state."""
         name = os.path.basename(path)
+        font = item.font()
+        font.setItalic(False)
+        font.setStrikeOut(False)
         if name in self._hidden_basenames:
             item.setText(f"[hidden] {name}")
             item.setForeground(QColor(120, 120, 120))
-            font = item.font()
             font.setItalic(True)
             item.setFont(font)
             return
+        if path in self._missing:
+            item.setText(f"⚠ {name}")
+            item.setForeground(QColor(230, 120, 60))   # orange — missing on disk
+            font.setStrikeOut(True)
+            item.setFont(font)
+            item.setToolTip("File missing from disk")
+            return
+        item.setFont(font)
+        item.setToolTip("")
         n = self._done_counts.get(path, 0)
         if path in self._done_set:
             tag = f"[{n}]" if n else "✓"
@@ -3296,12 +3309,15 @@ class PlaylistWidget(QListWidget):
         self._selected_path = None
         self._rebuild()
 
-    def add_files(self, paths: list[str]) -> None:
+    def add_files(self, paths: list[str], allow_missing: bool = False) -> None:
         was_empty = len(self._paths) == 0
         for path in paths:
-            if path not in self._path_set and os.path.isfile(path):
-                self._paths.append(path)
-                self._path_set.add(path)
+            if path in self._path_set:
+                continue
+            if not allow_missing and not os.path.isfile(path):
+                continue
+            self._paths.append(path)
+            self._path_set.add(path)
         self._rebuild()
         if was_empty and self._visible:
             self._select(0)
@@ -3379,13 +3395,8 @@ class PlaylistWidget(QListWidget):
         path = self._visible[row]
         if path is None:
             return
-        name = os.path.basename(path)
-        if path in self._done_set:
-            n = self._done_counts.get(path, 0)
-            tag = f"[{n}] " if n else "✓ "
-        else:
-            tag = ""
-        item.setText(f"▶ {tag}{name}")
+        self._style_item(item, path)
+        item.setText(f"▶ {item.text()}")
 
     def _decorate_prev(self, row: int) -> None:
         item = self.item(row)
@@ -3394,13 +3405,7 @@ class PlaylistWidget(QListWidget):
         path = self._visible[row]
         if path is None:
             return
-        name = os.path.basename(path)
-        if path in self._done_set:
-            n = self._done_counts.get(path, 0)
-            tag = f"[{n}] " if n else "✓ "
-            item.setText(f"{tag}{name}")
-        else:
-            item.setText(name)
+        self._style_item(item, path)
 
     def _on_item_clicked(self, item: QListWidgetItem) -> None:
         # Only load file when it's a plain click (no Ctrl/Shift for multi-select).
@@ -4401,7 +4406,8 @@ class MainWindow(QMainWindow):
         if separators:
             pw._separators_before = set(separators)
         if files:
-            pw.add_files([p for p in files if os.path.isfile(p)])
+            # Keep missing files so they're flagged in the list, not silently dropped.
+            pw.add_files(files, allow_missing=True)
         if select:
             self._playlist_tabs.setCurrentIndex(idx)
         if not self._loading_tabs:
@@ -4474,14 +4480,13 @@ class MainWindow(QMainWindow):
                 if isinstance(seps, str):
                     seps = [seps] if seps else []
                 self._add_playlist_tab(
-                    "List 1",
-                    files=[f for f in files if os.path.isfile(f)],
+                    "List 1", files=list(files),
                     separators=seps, select=True)
             else:
                 for t in data["tabs"]:
                     self._add_playlist_tab(
                         t.get("label", "List"),
-                        files=[f for f in t.get("files", []) if os.path.isfile(f)],
+                        files=list(t.get("files", [])),
                         separators=t.get("separators", []), select=False)
                 cur = min(max(0, data.get("current", 0)),
                           self._playlist_tabs.count() - 1)
