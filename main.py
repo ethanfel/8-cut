@@ -4475,7 +4475,7 @@ class MainWindow(QMainWindow):
             return ""
         return label
 
-    def _export_folder(self) -> str:
+    def _tab_export_folder(self) -> str:
         """The export base folder, with the active tab name appended when enabled."""
         base = self._txt_folder.text()
         if getattr(self, "_chk_tab_folder", None) and self._chk_tab_folder.isChecked():
@@ -4485,7 +4485,7 @@ class MainWindow(QMainWindow):
         return base
 
     def _export_base_name(self) -> str:
-        return os.path.basename(self._export_folder())
+        return os.path.basename(self._tab_export_folder())
 
     def _on_tab_folder_toggled(self, _checked: bool = False) -> None:
         if self._file_path:
@@ -4996,7 +4996,7 @@ class MainWindow(QMainWindow):
         # Run DB fuzzy match off the main thread — can be slow on large databases.
         filename = os.path.basename(self._file_path)
         self._db_worker = _DBWorker(self._db, filename, self._profile,
-                                    self._export_folder())
+                                    self._tab_export_folder())
         self._db_worker.result.connect(self._on_db_result)
         self._db_worker.start()
 
@@ -5013,7 +5013,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_markers(self) -> None:
         filename = os.path.basename(self._file_path)
-        folder = self._export_folder()
+        folder = self._tab_export_folder()
         markers = self._db.get_markers(filename, self._profile, folder)
         self._timeline.set_markers(markers)
         others = self._db.get_other_folder_markers(
@@ -5025,7 +5025,7 @@ class MainWindow(QMainWindow):
             self._timeline.set_other_markers({})
             return
         filename = os.path.basename(self._file_path)
-        folder = self._export_folder()
+        folder = self._tab_export_folder()
         others = self._db.get_other_folder_markers(
             filename, self._profile, folder)
         self._timeline.set_other_markers(others)
@@ -5065,7 +5065,7 @@ class MainWindow(QMainWindow):
         if not deleted:
             self._db.delete_by_output_path(output_path)
             deleted = [output_path]
-        folder = self._export_folder()
+        folder = self._tab_export_folder()
         for path in deleted:
             if os.path.isdir(path):
                 shutil.rmtree(path, ignore_errors=True)
@@ -5095,7 +5095,7 @@ class MainWindow(QMainWindow):
             return
         filename = os.path.basename(self._file_path)
         markers = self._db.get_markers(filename, self._profile)
-        folder = self._export_folder()
+        folder = self._tab_export_folder()
         total_files = 0
         for _, _, output_path, _ in markers:
             group = self._db.delete_group(output_path)
@@ -5235,7 +5235,7 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
         # Delete all group clips from disk
-        folder = self._export_folder()
+        folder = self._tab_export_folder()
         for path in all_paths:
             if os.path.isdir(path):
                 shutil.rmtree(path, ignore_errors=True)
@@ -6007,7 +6007,7 @@ class MainWindow(QMainWindow):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        folder = self._export_folder() or ""
+        folder = self._tab_export_folder() or ""
         vid_dirs: set[str] = set()
         for p in all_paths:
             if os.path.isdir(p):
@@ -6430,7 +6430,7 @@ class MainWindow(QMainWindow):
             self._btn_auto_export.setEnabled(True)
             return
 
-        folder = self._export_folder()
+        folder = self._tab_export_folder()
         name = self._txt_name.text() or "clip"
         fmt = self._cmb_format.currentText()
         image_sequence = fmt == "WebP sequence"
@@ -6646,7 +6646,7 @@ class MainWindow(QMainWindow):
         )
 
     def _update_next_label(self):
-        folder = self._export_folder()
+        folder = self._tab_export_folder()
         name = self._txt_name.text() or "clip"
         vid_name = self._get_vid_folder(folder)
         vid_folder = os.path.join(folder, vid_name)
@@ -6686,7 +6686,7 @@ class MainWindow(QMainWindow):
 
         fmt = self._cmb_format.currentText()
         image_sequence = fmt == "WebP sequence"
-        folder = self._export_folder()
+        folder = self._tab_export_folder()
         if folder_suffix:
             folder = folder.rstrip(os.sep) + "_" + folder_suffix
         os.makedirs(folder, exist_ok=True)
@@ -6952,7 +6952,7 @@ class MainWindow(QMainWindow):
         if not groups:
             self._show_status("No manual exports to re-export")
             return
-        folder = self._export_folder()
+        folder = self._tab_export_folder()
         spread = self._spn_spread.value()
 
         clip_dur = self._clip_dur
