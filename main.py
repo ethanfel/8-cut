@@ -4579,6 +4579,9 @@ class MainWindow(QMainWindow):
                     pl.addWidget(header)
                     pw.setMinimumWidth(60)
                     pl.addWidget(pw, 1)
+                    # QTabWidget hides non-current pages; reparented pinned lists
+                    # stay hidden and break the layout unless re-shown.
+                    pw.setVisible(True)
                     pw._rebuild()
                     splitter.addWidget(panel)
                 splitter.setSizes([1000] * len(pinned))
