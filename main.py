@@ -4464,6 +4464,18 @@ class MainWindow(QMainWindow):
             return w
         return self._pws[0] if self._pws else None
 
+    def _add_target_playlist(self) -> "PlaylistWidget":
+        """The list that newly-opened files should go into.
+
+        In normal tab view that's the visible tab; in side-by-side it's the
+        last-interacted pane.
+        """
+        if self._list_stack.currentWidget() is self._playlist_tabs:
+            w = self._playlist_tabs.currentWidget()
+            if w is not None:
+                return w
+        return self._playlist
+
     # ── Export folder (optionally tagged with the active tab name) ──
     def _active_tab_name(self) -> str:
         """Sanitized name of the active tab, or "" for default 'List N' tabs."""
@@ -4941,7 +4953,9 @@ class MainWindow(QMainWindow):
             "Video files (*.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv *.ts);;All files (*)",
         )
         if paths:
-            self._playlist.add_files(paths)
+            target = self._add_target_playlist()
+            self._active_pw = target
+            target.add_files(paths)
             self._apply_playlist_filters()
             self._save_playlist_tabs()
 
@@ -7227,7 +7241,9 @@ class MainWindow(QMainWindow):
             if os.path.isfile(u.toLocalFile())
         ]
         if paths:
-            self._playlist.add_files(paths)
+            target = self._add_target_playlist()
+            self._active_pw = target
+            target.add_files(paths)
             self._apply_playlist_filters()
             self._save_playlist_tabs()
 
