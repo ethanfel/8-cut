@@ -1757,7 +1757,12 @@ class WaveformWorker(QThread):
                 "-vn", "-ac", "1", "-ar", "8000",
                 "-f", "f32le", "-loglevel", "error", "pipe:1",
             ]
-            proc = subprocess.run(cmd, capture_output=True, timeout=60)
+            # Run at low priority so it yields disk/CPU to mpv during the
+            # initial load instead of competing for the same file.
+            kwargs = {}
+            if sys.platform != "win32":
+                kwargs["preexec_fn"] = lambda: os.nice(15)
+            proc = subprocess.run(cmd, capture_output=True, timeout=60, **kwargs)
             if proc.returncode != 0:
                 return
             samples = np.frombuffer(proc.stdout, dtype=np.float32)
