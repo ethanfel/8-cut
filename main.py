@@ -3134,8 +3134,12 @@ class SnapPreviewWindow(QWidget):
 
 
 class _PlaylistTabBar(QTabBar):
-    """Tab bar whose labels can be renamed by double-clicking."""
+    """Tab bar whose labels can be renamed by double-clicking.
+
+    Right-click a tab to pin/unpin it for the side-by-side view.
+    """
     tab_renamed = pyqtSignal(int, str)
+    pin_toggle_requested = pyqtSignal(int)
 
     def mouseDoubleClickEvent(self, event):
         idx = self.tabAt(event.pos())
@@ -3143,6 +3147,26 @@ class _PlaylistTabBar(QTabBar):
             self._start_edit(idx)
         else:
             super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event):
+        idx = self.tabAt(event.pos())
+        if idx < 0:
+            return
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        act_pin = menu.addAction("Show side-by-side")
+        act_pin.setCheckable(True)
+        pw = None
+        tw = self.parent()
+        if hasattr(tw, "widget"):
+            pw = tw.widget(idx)
+        act_pin.setChecked(bool(getattr(pw, "_pinned", False)))
+        act_rename = menu.addAction("Rename…")
+        chosen = menu.exec(event.globalPos())
+        if chosen == act_pin:
+            self.pin_toggle_requested.emit(idx)
+        elif chosen == act_rename:
+            self._start_edit(idx)
 
     def _start_edit(self, idx: int) -> None:
         editor = QLineEdit(self)
@@ -3190,6 +3214,8 @@ class PlaylistWidget(QListWidget):
         self._all_subcat_counts: dict[str, int] = {}  # profile-wide folder → count
         self._separators_before: set[str] = set()  # paths that show a separator row above
         self._missing: set[str] = set()       # paths not present on disk
+        self._pinned: bool = False            # shown in the side-by-side view
+        self._label: str = ""                 # tab name (source of truth across views)
         self._visible: list[str | None] = []  # rows shown; None = separator row
         self._selected_path: str | None = None
         self.itemClicked.connect(self._on_item_clicked)
@@ -3691,12 +3717,15 @@ class MainWindow(QMainWindow):
         # Suppress tab persistence until _load_playlist_tabs runs at the end of
         # __init__ (the profile combo it needs doesn't exist yet).
         self._loading_tabs = True
+        self._pws: list[PlaylistWidget] = []   # source of truth for all lists
+        self._active_pw: "PlaylistWidget | None" = None  # last-interacted list
         self._playlist_tabs = QTabWidget()
         self._playlist_tabs.setTabBar(_PlaylistTabBar())
         self._playlist_tabs.setTabsClosable(True)
         self._playlist_tabs.setMovable(True)
         self._playlist_tabs.setDocumentMode(True)
         self._playlist_tabs.tabBar().tab_renamed.connect(self._on_tab_renamed)
+        self._playlist_tabs.tabBar().pin_toggle_requested.connect(self._on_pin_toggle)
         self._playlist_tabs.tabCloseRequested.connect(self._on_close_tab)
         self._playlist_tabs.currentChanged.connect(self._on_tab_changed)
         self._btn_add_tab = QPushButton("+")
@@ -3705,6 +3734,15 @@ class MainWindow(QMainWindow):
         self._btn_add_tab.clicked.connect(lambda: self._add_playlist_tab())
         self._playlist_tabs.setCornerWidget(
             self._btn_add_tab, Qt.Corner.TopRightCorner)
+        # Side-by-side container (shown when 2+ tabs are pinned).
+        self._split_container = QWidget()
+        self._split_layout = QHBoxLayout(self._split_container)
+        self._split_layout.setContentsMargins(0, 0, 0, 0)
+        self._split_layout.setSpacing(2)
+        from PyQt6.QtWidgets import QStackedWidget
+        self._list_stack = QStackedWidget()
+        self._list_stack.addWidget(self._playlist_tabs)     # page 0: tabs
+        self._list_stack.addWidget(self._split_container)   # page 1: side-by-side
         # Start with one empty tab; real contents loaded later via _load_playlist_tabs.
         self._add_playlist_tab("List 1", select=True)
 
@@ -3795,6 +3833,16 @@ class MainWindow(QMainWindow):
         self._btn_folder.setFixedWidth(30)
         self._btn_folder.setToolTip("Browse for output folder")
         self._btn_folder.clicked.connect(self._pick_folder)
+        self._chk_tab_folder = QCheckBox("Tab→folder")
+        self._chk_tab_folder.setToolTip(
+            "When on, append the active tab's name to the export folder\n"
+            "(e.g. mp4 → mp4_BatchA) for files in that tab. Default 'List N'\n"
+            "tabs are ignored.")
+        self._chk_tab_folder.setChecked(
+            self._settings.value("tab_in_folder", "false") == "true")
+        self._chk_tab_folder.toggled.connect(
+            lambda v: self._settings.setValue("tab_in_folder", "true" if v else "false"))
+        self._chk_tab_folder.toggled.connect(self._on_tab_folder_toggled)
         self._spn_resize = QSpinBox()
         self._spn_resize.setRange(0, 4320)
         self._spn_resize.setSingleStep(64)
@@ -4124,6 +4172,7 @@ class MainWindow(QMainWindow):
         path_row.addWidget(QLabel("Folder:"))
         path_row.addWidget(self._txt_folder, stretch=1)
         path_row.addWidget(self._btn_folder)
+        path_row.addWidget(self._chk_tab_folder)
 
         # Row 3 — video + encoding settings
         settings_row = QHBoxLayout()
@@ -4203,7 +4252,7 @@ class MainWindow(QMainWindow):
         left_top.addWidget(self._btn_show_hidden)
         left_layout.addLayout(left_top)
         left_layout.addWidget(self._playlist_filter)
-        left_layout.addWidget(self._playlist_tabs)
+        left_layout.addWidget(self._list_stack)
 
         # Scan results panel (right side)
         self._scan_panel = ScanResultsPanel(self._db)
@@ -4408,15 +4457,44 @@ class MainWindow(QMainWindow):
 
     @property
     def _playlist(self) -> "PlaylistWidget":
-        """The PlaylistWidget of the currently active file-list tab."""
-        return self._playlist_tabs.currentWidget()
+        """The active file list — the last-interacted pane/tab."""
+        if self._active_pw is not None and self._active_pw in self._pws:
+            return self._active_pw
+        w = self._playlist_tabs.currentWidget()
+        if w is not None:
+            return w
+        return self._pws[0] if self._pws else None
+
+    # ── Export folder (optionally tagged with the active tab name) ──
+    def _active_tab_name(self) -> str:
+        """Sanitized name of the active tab, or "" for default 'List N' tabs."""
+        pw = self._playlist
+        label = "" if pw is None else (getattr(pw, "_label", "") or "")
+        label = label.strip().replace(" ", "_")
+        if not label or (label.startswith("List_") and label[5:].isdigit()):
+            return ""
+        return label
+
+    def _export_folder(self) -> str:
+        """The export base folder, with the active tab name appended when enabled."""
+        base = self._txt_folder.text()
+        if getattr(self, "_chk_tab_folder", None) and self._chk_tab_folder.isChecked():
+            name = self._active_tab_name()
+            if name:
+                base = base.rstrip(os.sep) + "_" + name
+        return base
+
+    def _export_base_name(self) -> str:
+        return os.path.basename(self._export_folder())
+
+    def _on_tab_folder_toggled(self, _checked: bool = False) -> None:
+        if self._file_path:
+            self._refresh_markers()
+        self._refresh_playlist_checks()
+        self._update_next_label()
 
     # ── File-list tabs ───────────────────────────────────────────
-    def _add_playlist_tab(self, label: str | None = None,
-                          files: list[str] | None = None,
-                          separators: list[str] | None = None,
-                          select: bool = True) -> "PlaylistWidget":
-        pw = PlaylistWidget()
+    def _wire_pw(self, pw: "PlaylistWidget") -> None:
         pw.file_selected.connect(self._load_file)
         pw.hide_requested.connect(self._on_hide_files)
         pw.unhide_requested.connect(self._on_unhide_files)
@@ -4425,19 +4503,94 @@ class MainWindow(QMainWindow):
         pw.disable_all_requested.connect(self._disable_all_subcats)
         pw.enable_all_requested.connect(self._enable_all_subcats)
         pw.separators_changed.connect(self._save_playlist_tabs)
-        if label is None:
-            label = f"List {self._playlist_tabs.count() + 1}"
-        idx = self._playlist_tabs.addTab(pw, label)
+
+    def _add_playlist_tab(self, label: str | None = None,
+                          files: list[str] | None = None,
+                          separators: list[str] | None = None,
+                          select: bool = True) -> "PlaylistWidget":
+        pw = PlaylistWidget()
+        self._wire_pw(pw)
+        pw._label = label or f"List {len(self._pws) + 1}"
+        self._pws.append(pw)
         if separators:
             pw._separators_before = set(separators)
         if files:
             # Keep missing files so they're flagged in the list, not silently dropped.
             pw.add_files(files, allow_missing=True)
-        if select:
-            self._playlist_tabs.setCurrentIndex(idx)
         if not self._loading_tabs:
+            self._refresh_layout()
+            if select and not pw._pinned:
+                self._playlist_tabs.setCurrentWidget(pw)
+                self._active_pw = pw
             self._save_playlist_tabs()
         return pw
+
+    # ── Layout: tabs vs. side-by-side ────────────────────────────
+    def _detach_all_pws(self) -> None:
+        for pw in self._pws:
+            pw.setParent(None)
+
+    def _clear_split_container(self) -> None:
+        while self._split_layout.count():
+            item = self._split_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _refresh_layout(self) -> None:
+        """Render self._pws either as tabs or, when 2+ are pinned, side-by-side."""
+        pinned = [pw for pw in self._pws if pw._pinned]
+        prev = self._loading_tabs
+        self._loading_tabs = True
+        try:
+            self._detach_all_pws()
+            self._playlist_tabs.clear()
+            self._clear_split_container()
+            if len(pinned) >= 2:
+                for pw in self._pws:
+                    if not pw._pinned:
+                        self._playlist_tabs.addTab(pw, pw._label)
+                splitter = QSplitter(Qt.Orientation.Horizontal)
+                for pw in pinned:
+                    panel = QWidget()
+                    pl = QVBoxLayout(panel)
+                    pl.setContentsMargins(0, 0, 0, 0)
+                    pl.setSpacing(0)
+                    hdr = QHBoxLayout()
+                    lbl = QLabel(pw._label)
+                    lbl.setStyleSheet("font-weight: bold; padding: 2px 4px;")
+                    btn = QPushButton("✕")
+                    btn.setFixedWidth(20)
+                    btn.setToolTip("Remove from side-by-side")
+                    btn.clicked.connect(lambda _=False, w=pw: self._on_unpin(w))
+                    hdr.addWidget(lbl, 1)
+                    hdr.addWidget(btn)
+                    pl.addLayout(hdr)
+                    pl.addWidget(pw)
+                    splitter.addWidget(panel)
+                self._split_layout.addWidget(splitter)
+                self._list_stack.setCurrentWidget(self._split_container)
+            else:
+                for pw in self._pws:
+                    self._playlist_tabs.addTab(pw, pw._label)
+                self._list_stack.setCurrentWidget(self._playlist_tabs)
+        finally:
+            self._loading_tabs = prev
+
+    def _on_pin_toggle(self, idx: int) -> None:
+        pw = self._playlist_tabs.widget(idx)
+        if pw is None:
+            return
+        pw._pinned = not pw._pinned
+        if pw._pinned and sum(1 for w in self._pws if w._pinned) < 2:
+            self._show_status("Pin another tab to show them side-by-side", 3500)
+        self._refresh_layout()
+        self._save_playlist_tabs()
+
+    def _on_unpin(self, pw: "PlaylistWidget") -> None:
+        pw._pinned = False
+        self._refresh_layout()
+        self._save_playlist_tabs()
 
     def _on_filter_changed(self, text: str) -> None:
         pw = self._playlist
@@ -4445,22 +4598,34 @@ class MainWindow(QMainWindow):
             pw.set_filter(text)
 
     def _on_tab_changed(self, _idx: int) -> None:
-        if self._loading_tabs or self._playlist is None:
+        if self._loading_tabs:
             return
-        self._playlist.set_filter(self._playlist_filter.text())
+        w = self._playlist_tabs.currentWidget()
+        if w is not None:
+            self._active_pw = w
+            w.set_filter(self._playlist_filter.text())
         self._apply_playlist_filters()
         self._save_playlist_tabs()
 
     def _on_close_tab(self, idx: int) -> None:
-        if self._playlist_tabs.count() <= 1:
+        if len(self._pws) <= 1:
             self._show_status("Can't close the last tab", 3000)
             return
-        w = self._playlist_tabs.widget(idx)
-        self._playlist_tabs.removeTab(idx)
-        w.deleteLater()
+        pw = self._playlist_tabs.widget(idx)
+        if pw is None or pw not in self._pws:
+            return
+        self._pws.remove(pw)
+        if self._active_pw is pw:
+            self._active_pw = None
+        pw.setParent(None)
+        pw.deleteLater()
+        self._refresh_layout()
         self._save_playlist_tabs()
 
-    def _on_tab_renamed(self, _idx: int, _text: str) -> None:
+    def _on_tab_renamed(self, idx: int, text: str) -> None:
+        pw = self._playlist_tabs.widget(idx)
+        if pw is not None:
+            pw._label = text
         self._save_playlist_tabs()
 
     def _playlist_tabs_key(self, profile: str | None = None) -> str:
@@ -4470,26 +4635,28 @@ class MainWindow(QMainWindow):
         if self._loading_tabs:
             return
         import json
-        tabs = []
-        for i in range(self._playlist_tabs.count()):
-            pw = self._playlist_tabs.widget(i)
-            tabs.append({
-                "label": self._playlist_tabs.tabText(i),
-                "files": list(pw._paths),
-                "separators": sorted(pw._separators_before),
-            })
-        data = {"tabs": tabs, "current": self._playlist_tabs.currentIndex()}
+        tabs = [{
+            "label": pw._label,
+            "files": list(pw._paths),
+            "separators": sorted(pw._separators_before),
+            "pinned": pw._pinned,
+        } for pw in self._pws]
+        cur = self._pws.index(self._active_pw) if self._active_pw in self._pws else 0
+        data = {"tabs": tabs, "current": cur}
         self._settings.setValue(self._playlist_tabs_key(profile), json.dumps(data))
 
     def _load_playlist_tabs(self, profile: str | None = None) -> None:
         """Rebuild all file-list tabs for *profile* from settings."""
         import json
         self._loading_tabs = True
+        self._active_pw = None
         try:
-            while self._playlist_tabs.count():
-                w = self._playlist_tabs.widget(0)
-                self._playlist_tabs.removeTab(0)
-                w.deleteLater()
+            self._detach_all_pws()
+            self._playlist_tabs.clear()
+            self._clear_split_container()
+            for pw in self._pws:
+                pw.deleteLater()
+            self._pws = []
             raw = self._settings.value(self._playlist_tabs_key(profile), "")
             data = None
             if raw:
@@ -4497,6 +4664,7 @@ class MainWindow(QMainWindow):
                     data = json.loads(raw)
                 except (ValueError, TypeError):
                     data = None
+            cur = 0
             if not data or not data.get("tabs"):
                 # Legacy fallback: one tab from old session_files/separators.
                 p = profile or self._profile
@@ -4506,20 +4674,23 @@ class MainWindow(QMainWindow):
                     seps = [seps] if seps else []
                 self._add_playlist_tab(
                     "List 1", files=list(files),
-                    separators=seps, select=True)
+                    separators=seps, select=False)
             else:
                 for t in data["tabs"]:
-                    self._add_playlist_tab(
+                    pw = self._add_playlist_tab(
                         t.get("label", "List"),
                         files=list(t.get("files", [])),
                         separators=t.get("separators", []), select=False)
-                cur = min(max(0, data.get("current", 0)),
-                          self._playlist_tabs.count() - 1)
-                self._playlist_tabs.setCurrentIndex(cur)
+                    pw._pinned = bool(t.get("pinned"))
+                cur = min(max(0, data.get("current", 0)), len(self._pws) - 1)
         finally:
             self._loading_tabs = False
-        if self._playlist is not None:
-            self._playlist.set_filter(self._playlist_filter.text())
+        self._refresh_layout()
+        if self._pws:
+            self._active_pw = self._pws[cur]
+            if not self._active_pw._pinned:
+                self._playlist_tabs.setCurrentWidget(self._active_pw)
+            self._active_pw.set_filter(self._playlist_filter.text())
 
     def _on_profile_activated(self, index: int) -> None:
         text = self._cmb_profile.itemText(index)
@@ -4740,6 +4911,10 @@ class MainWindow(QMainWindow):
     def _load_file(self, path: str):
         if getattr(self, "_loading_tabs", False):
             return  # ignore auto-selection while rebuilding tabs
+        # The list that emitted this becomes the active pane (side-by-side).
+        sender = self.sender()
+        if isinstance(sender, PlaylistWidget) and sender in self._pws:
+            self._active_pw = sender
         if not os.path.isfile(path):
             self._show_status(f"File not found: {os.path.basename(path)}", 5000)
             return
@@ -4821,7 +4996,7 @@ class MainWindow(QMainWindow):
         # Run DB fuzzy match off the main thread — can be slow on large databases.
         filename = os.path.basename(self._file_path)
         self._db_worker = _DBWorker(self._db, filename, self._profile,
-                                    self._txt_folder.text())
+                                    self._export_folder())
         self._db_worker.result.connect(self._on_db_result)
         self._db_worker.start()
 
@@ -4838,7 +5013,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_markers(self) -> None:
         filename = os.path.basename(self._file_path)
-        folder = self._txt_folder.text()
+        folder = self._export_folder()
         markers = self._db.get_markers(filename, self._profile, folder)
         self._timeline.set_markers(markers)
         others = self._db.get_other_folder_markers(
@@ -4850,7 +5025,7 @@ class MainWindow(QMainWindow):
             self._timeline.set_other_markers({})
             return
         filename = os.path.basename(self._file_path)
-        folder = self._txt_folder.text()
+        folder = self._export_folder()
         others = self._db.get_other_folder_markers(
             filename, self._profile, folder)
         self._timeline.set_other_markers(others)
@@ -4890,7 +5065,7 @@ class MainWindow(QMainWindow):
         if not deleted:
             self._db.delete_by_output_path(output_path)
             deleted = [output_path]
-        folder = self._txt_folder.text()
+        folder = self._export_folder()
         for path in deleted:
             if os.path.isdir(path):
                 shutil.rmtree(path, ignore_errors=True)
@@ -4920,7 +5095,7 @@ class MainWindow(QMainWindow):
             return
         filename = os.path.basename(self._file_path)
         markers = self._db.get_markers(filename, self._profile)
-        folder = self._txt_folder.text()
+        folder = self._export_folder()
         total_files = 0
         for _, _, output_path, _ in markers:
             group = self._db.delete_group(output_path)
@@ -5060,7 +5235,7 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
         # Delete all group clips from disk
-        folder = self._txt_folder.text()
+        folder = self._export_folder()
         for path in all_paths:
             if os.path.isdir(path):
                 shutil.rmtree(path, ignore_errors=True)
@@ -5832,7 +6007,7 @@ class MainWindow(QMainWindow):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        folder = self._txt_folder.text() or ""
+        folder = self._export_folder() or ""
         vid_dirs: set[str] = set()
         for p in all_paths:
             if os.path.isdir(p):
@@ -6255,7 +6430,7 @@ class MainWindow(QMainWindow):
             self._btn_auto_export.setEnabled(True)
             return
 
-        folder = self._txt_folder.text()
+        folder = self._export_folder()
         name = self._txt_name.text() or "clip"
         fmt = self._cmb_format.currentText()
         image_sequence = fmt == "WebP sequence"
@@ -6471,7 +6646,7 @@ class MainWindow(QMainWindow):
         )
 
     def _update_next_label(self):
-        folder = self._txt_folder.text()
+        folder = self._export_folder()
         name = self._txt_name.text() or "clip"
         vid_name = self._get_vid_folder(folder)
         vid_folder = os.path.join(folder, vid_name)
@@ -6511,7 +6686,7 @@ class MainWindow(QMainWindow):
 
         fmt = self._cmb_format.currentText()
         image_sequence = fmt == "WebP sequence"
-        folder = self._txt_folder.text()
+        folder = self._export_folder()
         if folder_suffix:
             folder = folder.rstrip(os.sep) + "_" + folder_suffix
         os.makedirs(folder, exist_ok=True)
@@ -6777,7 +6952,7 @@ class MainWindow(QMainWindow):
         if not groups:
             self._show_status("No manual exports to re-export")
             return
-        folder = self._txt_folder.text()
+        folder = self._export_folder()
         spread = self._spn_spread.value()
 
         clip_dur = self._clip_dur
