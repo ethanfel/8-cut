@@ -3228,6 +3228,32 @@ class PlaylistWidget(QListWidget):
         self._rebuild()
         self.separators_changed.emit()
 
+    def _remove_paths(self, paths: list[str]) -> None:
+        """Remove *paths* from the list, re-anchoring separators so they survive."""
+        removing = set(paths)
+        # A separator anchored to a removed file moves to the next surviving
+        # file (or becomes a trailing separator) instead of vanishing.
+        for anchor in [p for p in paths if p in self._separators_before]:
+            target = self._SEP_END
+            seen = False
+            for p in self._paths:
+                if p == anchor:
+                    seen = True
+                    continue
+                if seen and p not in removing:
+                    target = p
+                    break
+            self._separators_before.discard(anchor)
+            self._separators_before.add(target)
+        for path in paths:
+            if path in self._path_set:
+                self._paths.remove(path)
+                self._path_set.discard(path)
+                self._done_set.discard(path)
+                self._done_counts.pop(path, None)
+        self._rebuild()
+        self.separators_changed.emit()
+
     def _is_visible(self, path: str) -> bool:
         if os.path.basename(path) in self._hidden_basenames:
             return self._show_hidden
@@ -3441,13 +3467,14 @@ class PlaylistWidget(QListWidget):
         menu = QMenu(self)
         # Check if any selected files are hidden.
         hidden_sel = [p for p in sel if os.path.basename(p) in self._hidden_basenames]
-        act_remove = act_hide = act_unhide = act_delete = None
+        act_remove = act_hide = act_unhide = act_delete = act_copy = None
         act_sep_above = act_sep_below = None
         act_disable_all = act_enable_all = None
         disable_acts: dict = {}
         enable_acts: dict = {}
         if len(sel) == 1:
             name = os.path.basename(sel[0])
+            act_copy = menu.addAction("Copy name")
             act_remove = menu.addAction(f"Remove: {name}")
             if hidden_sel:
                 act_unhide = menu.addAction(f"Unhide: {name}")
@@ -3487,6 +3514,7 @@ class PlaylistWidget(QListWidget):
                 "Remove separator below" if below_present else "Add separator below")
             act_delete = menu.addAction(f"Delete from disk: {name}")
         else:
+            act_copy = menu.addAction(f"Copy {len(sel)} names")
             act_remove = menu.addAction(f"Remove {len(sel)} files")
             if hidden_sel:
                 act_unhide = menu.addAction(f"Unhide {len(hidden_sel)} file(s)")
@@ -3498,14 +3526,11 @@ class PlaylistWidget(QListWidget):
         chosen = menu.exec(event.globalPos())
         if chosen is None:
             return
-        if chosen == act_remove:
-            for path in sel:
-                if path in self._path_set:
-                    self._paths.remove(path)
-                    self._path_set.discard(path)
-                    self._done_set.discard(path)
-                    self._done_counts.pop(path, None)
-            self._rebuild()
+        if chosen == act_copy:
+            names = "\n".join(os.path.basename(p) for p in sel)
+            QApplication.clipboard().setText(names)
+        elif chosen == act_remove:
+            self._remove_paths(sel)
         elif chosen == act_delete:
             from PyQt6.QtWidgets import QMessageBox
             names = "\n".join(os.path.basename(p) for p in sel)
@@ -3521,12 +3546,7 @@ class PlaylistWidget(QListWidget):
                         os.remove(path)
                     except OSError:
                         pass
-                    if path in self._path_set:
-                        self._paths.remove(path)
-                        self._path_set.discard(path)
-                        self._done_set.discard(path)
-                        self._done_counts.pop(path, None)
-                self._rebuild()
+                self._remove_paths(sel)
         elif chosen == act_hide:
             self.hide_requested.emit(sel)
         elif chosen == act_unhide:
