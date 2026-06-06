@@ -3140,6 +3140,7 @@ class _PlaylistTabBar(QTabBar):
     """
     tab_renamed = pyqtSignal(int, str)
     pin_toggle_requested = pyqtSignal(int)
+    tab_folder_toggle_requested = pyqtSignal(int)
 
     def mouseDoubleClickEvent(self, event):
         idx = self.tabAt(event.pos())
@@ -3161,10 +3162,15 @@ class _PlaylistTabBar(QTabBar):
         if hasattr(tw, "widget"):
             pw = tw.widget(idx)
         act_pin.setChecked(bool(getattr(pw, "_pinned", False)))
+        act_tabfolder = menu.addAction("Export to tab-named folder")
+        act_tabfolder.setCheckable(True)
+        act_tabfolder.setChecked(bool(getattr(pw, "_tab_folder", False)))
         act_rename = menu.addAction("Rename…")
         chosen = menu.exec(event.globalPos())
         if chosen == act_pin:
             self.pin_toggle_requested.emit(idx)
+        elif chosen == act_tabfolder:
+            self.tab_folder_toggle_requested.emit(idx)
         elif chosen == act_rename:
             self._start_edit(idx)
 
@@ -3215,6 +3221,7 @@ class PlaylistWidget(QListWidget):
         self._separators_before: set[str] = set()  # paths that show a separator row above
         self._missing: set[str] = set()       # paths not present on disk
         self._pinned: bool = False            # shown in the side-by-side view
+        self._tab_folder: bool = False        # append this tab's name to export folder
         self._label: str = ""                 # tab name (source of truth across views)
         self._visible: list[str | None] = []  # rows shown; None = separator row
         self._selected_path: str | None = None
@@ -3726,6 +3733,8 @@ class MainWindow(QMainWindow):
         self._playlist_tabs.setDocumentMode(True)
         self._playlist_tabs.tabBar().tab_renamed.connect(self._on_tab_renamed)
         self._playlist_tabs.tabBar().pin_toggle_requested.connect(self._on_pin_toggle)
+        self._playlist_tabs.tabBar().tab_folder_toggle_requested.connect(
+            self._on_tab_folder_toggle)
         self._playlist_tabs.tabCloseRequested.connect(self._on_close_tab)
         self._playlist_tabs.currentChanged.connect(self._on_tab_changed)
         self._btn_add_tab = QPushButton("+")
@@ -3833,16 +3842,6 @@ class MainWindow(QMainWindow):
         self._btn_folder.setFixedWidth(30)
         self._btn_folder.setToolTip("Browse for output folder")
         self._btn_folder.clicked.connect(self._pick_folder)
-        self._chk_tab_folder = QCheckBox("Tab→folder")
-        self._chk_tab_folder.setToolTip(
-            "When on, append the active tab's name to the export folder\n"
-            "(e.g. mp4 → mp4_BatchA) for files in that tab. Default 'List N'\n"
-            "tabs are ignored.")
-        self._chk_tab_folder.setChecked(
-            self._settings.value("tab_in_folder", "false") == "true")
-        self._chk_tab_folder.toggled.connect(
-            lambda v: self._settings.setValue("tab_in_folder", "true" if v else "false"))
-        self._chk_tab_folder.toggled.connect(self._on_tab_folder_toggled)
         self._spn_resize = QSpinBox()
         self._spn_resize.setRange(0, 4320)
         self._spn_resize.setSingleStep(64)
@@ -4172,7 +4171,6 @@ class MainWindow(QMainWindow):
         path_row.addWidget(QLabel("Folder:"))
         path_row.addWidget(self._txt_folder, stretch=1)
         path_row.addWidget(self._btn_folder)
-        path_row.addWidget(self._chk_tab_folder)
 
         # Row 3 — video + encoding settings
         settings_row = QHBoxLayout()
@@ -4277,6 +4275,7 @@ class MainWindow(QMainWindow):
         splitter.setCollapsible(0, False)
         splitter.setCollapsible(1, False)
         splitter.setCollapsible(2, True)
+        self._main_splitter = splitter
 
         self.setCentralWidget(splitter)
         self.setStatusBar(None)
@@ -4476,9 +4475,11 @@ class MainWindow(QMainWindow):
         return label
 
     def _tab_export_folder(self) -> str:
-        """The export base folder, with the active tab name appended when enabled."""
+        """The export base folder, with the active tab name appended when its
+        per-tab 'Export to tab-named folder' option is enabled."""
         base = self._txt_folder.text()
-        if getattr(self, "_chk_tab_folder", None) and self._chk_tab_folder.isChecked():
+        pw = self._playlist
+        if pw is not None and getattr(pw, "_tab_folder", False):
             name = self._active_tab_name()
             if name:
                 base = base.rstrip(os.sep) + "_" + name
@@ -4487,7 +4488,12 @@ class MainWindow(QMainWindow):
     def _export_base_name(self) -> str:
         return os.path.basename(self._tab_export_folder())
 
-    def _on_tab_folder_toggled(self, _checked: bool = False) -> None:
+    def _on_tab_folder_toggle(self, idx: int) -> None:
+        pw = self._playlist_tabs.widget(idx)
+        if pw is None:
+            return
+        pw._tab_folder = not pw._tab_folder
+        self._save_playlist_tabs()
         if self._file_path:
             self._refresh_markers()
         self._refresh_playlist_checks()
@@ -4549,33 +4555,59 @@ class MainWindow(QMainWindow):
             if len(pinned) >= 2:
                 for pw in self._pws:
                     if not pw._pinned:
+                        pw.setMinimumWidth(0)
                         self._playlist_tabs.addTab(pw, pw._label)
                 splitter = QSplitter(Qt.Orientation.Horizontal)
+                splitter.setChildrenCollapsible(False)
                 for pw in pinned:
                     panel = QWidget()
                     pl = QVBoxLayout(panel)
                     pl.setContentsMargins(0, 0, 0, 0)
                     pl.setSpacing(0)
-                    hdr = QHBoxLayout()
+                    header = QWidget()
+                    hdr = QHBoxLayout(header)
+                    hdr.setContentsMargins(2, 1, 2, 1)
                     lbl = QLabel(pw._label)
-                    lbl.setStyleSheet("font-weight: bold; padding: 2px 4px;")
+                    lbl.setStyleSheet("font-weight: bold;")
                     btn = QPushButton("✕")
-                    btn.setFixedWidth(20)
+                    btn.setFixedSize(18, 18)
                     btn.setToolTip("Remove from side-by-side")
                     btn.clicked.connect(lambda _=False, w=pw: self._on_unpin(w))
                     hdr.addWidget(lbl, 1)
                     hdr.addWidget(btn)
-                    pl.addLayout(hdr)
-                    pl.addWidget(pw)
+                    header.setFixedHeight(22)
+                    pl.addWidget(header)
+                    pw.setMinimumWidth(60)
+                    pl.addWidget(pw, 1)
+                    pw._rebuild()
                     splitter.addWidget(panel)
+                splitter.setSizes([1000] * len(pinned))
                 self._split_layout.addWidget(splitter)
                 self._list_stack.setCurrentWidget(self._split_container)
+                self._set_left_pane_width(max(420, len(pinned) * 240))
             else:
                 for pw in self._pws:
+                    pw.setMinimumWidth(200)
                     self._playlist_tabs.addTab(pw, pw._label)
                 self._list_stack.setCurrentWidget(self._playlist_tabs)
+                self._set_left_pane_width(220)
         finally:
             self._loading_tabs = prev
+
+    def _set_left_pane_width(self, want_left: int) -> None:
+        """Resize the main splitter's left section, stealing from the video pane."""
+        sp = getattr(self, "_main_splitter", None)
+        if sp is None:
+            return
+        sizes = sp.sizes()
+        if len(sizes) != 3:
+            return
+        delta = want_left - sizes[0]
+        if abs(delta) < 8:
+            return
+        sizes[0] = want_left
+        sizes[1] = max(200, sizes[1] - delta)
+        sp.setSizes(sizes)
 
     def _on_pin_toggle(self, idx: int) -> None:
         pw = self._playlist_tabs.widget(idx)
@@ -4640,6 +4672,7 @@ class MainWindow(QMainWindow):
             "files": list(pw._paths),
             "separators": sorted(pw._separators_before),
             "pinned": pw._pinned,
+            "tab_folder": pw._tab_folder,
         } for pw in self._pws]
         cur = self._pws.index(self._active_pw) if self._active_pw in self._pws else 0
         data = {"tabs": tabs, "current": cur}
@@ -4682,6 +4715,7 @@ class MainWindow(QMainWindow):
                         files=list(t.get("files", [])),
                         separators=t.get("separators", []), select=False)
                     pw._pinned = bool(t.get("pinned"))
+                    pw._tab_folder = bool(t.get("tab_folder"))
                 cur = min(max(0, data.get("current", 0)), len(self._pws) - 1)
         finally:
             self._loading_tabs = False
