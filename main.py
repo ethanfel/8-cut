@@ -1837,8 +1837,8 @@ class TimelineWidget(QWidget):
     keyframe_delete_requested = pyqtSignal(float)   # emits keyframe time
     marker_clicked = pyqtSignal(float, str)         # emits (start_time, output_path)
     marker_deselected = pyqtSignal()                # double-click on empty space
-    lock_toggle_requested = pyqtSignal()            # right-click on empty timeline
-    clip_count_bump_requested = pyqtSignal()        # middle-click on the timeline
+    lock_toggle_requested = pyqtSignal()            # middle-click on the timeline
+    clip_count_delta = pyqtSignal(int)              # wheel scroll: +1 / -1 clips
     # (index, new_start, new_end, old_start, old_end)
     scan_region_resized = pyqtSignal(int, float, float, float, float)
 
@@ -2556,9 +2556,9 @@ class TimelineWidget(QWidget):
             if self._pan_active:
                 self._pan_active = False
                 self.unsetCursor()
-            # A middle press+release that didn't drag bumps the clip count.
+            # A middle press+release that didn't drag toggles cursor lock.
             if abs(event.position().x() - self._mid_press_x) < 4:
-                self.clip_count_bump_requested.emit()
+                self.lock_toggle_requested.emit()
             return
         if event.button() == Qt.MouseButton.RightButton:
             return  # lock toggle / menu handled in contextMenuEvent — no seek
@@ -2576,10 +2576,13 @@ class TimelineWidget(QWidget):
         self._emit_seek()
 
     def wheelEvent(self, event):
-        """Ctrl+wheel zooms the view around the mouse. Plain wheel is ignored
-        so the parent scroll area (if any) can consume it."""
+        """Ctrl+wheel zooms the view around the mouse; plain wheel adds/removes
+        clips (scroll up = +1, down = -1)."""
         if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
-            super().wheelEvent(event)
+            d = event.angleDelta().y()
+            if d != 0:
+                self.clip_count_delta.emit(1 if d > 0 else -1)
+                event.accept()
             return
         if self._duration <= 0 or self.width() <= 0:
             return
@@ -2628,11 +2631,6 @@ class TimelineWidget(QWidget):
                         break
                 if hit_path is not None:
                     break
-        # Right-click on empty timeline toggles lock; on a marker/keyframe it
-        # still opens the delete menu.
-        if hit_kf_time is None and hit_path is None:
-            self.lock_toggle_requested.emit()
-            return
         from PyQt6.QtWidgets import QMenu
         menu = QMenu(self)
         act_kf = None
@@ -3888,7 +3886,7 @@ class MainWindow(QMainWindow):
         self._timeline.marker_clicked.connect(self._on_marker_clicked)
         self._timeline.marker_deselected.connect(self._on_marker_deselected)
         self._timeline.scan_region_resized.connect(self._on_scan_region_resized)
-        self._timeline.clip_count_bump_requested.connect(self._bump_clip_count)
+        self._timeline.clip_count_delta.connect(self._change_clip_count)
 
         self._lbl_file = QLabel("← Drop files onto the queue")
         self._lbl_file.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -5726,10 +5724,10 @@ class MainWindow(QMainWindow):
         else:
             self._mpv._player.speed = 1.0
 
-    def _bump_clip_count(self) -> None:
-        """Middle-click on the timeline adds one clip (wraps at the max)."""
+    def _change_clip_count(self, delta: int) -> None:
+        """Wheel-scroll over the timeline adds/removes clips (clamped)."""
         spn = self._spn_clips
-        spn.setValue(spn.minimum() if spn.value() >= spn.maximum() else spn.value() + 1)
+        spn.setValue(max(spn.minimum(), min(spn.maximum(), spn.value() + delta)))
 
     def _autoclip(self):
         """Set clip count to fit the current pause position."""
