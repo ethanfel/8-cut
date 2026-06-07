@@ -1839,6 +1839,7 @@ class TimelineWidget(QWidget):
     marker_deselected = pyqtSignal()                # double-click on empty space
     lock_toggle_requested = pyqtSignal()            # middle-click on the timeline
     clip_count_delta = pyqtSignal(int)              # wheel scroll: +1 / -1 clips
+    autoclip_requested = pyqtSignal()               # mouse back/side button
     # (index, new_start, new_end, old_start, old_end)
     scan_region_resized = pyqtSignal(int, float, float, float, float)
 
@@ -2443,9 +2444,13 @@ class TimelineWidget(QWidget):
                 self._pan_start_view = self._view_start
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
-        # Right button is handled in contextMenuEvent (lock toggle / delete menu)
-        # — never move the cursor for it.
+        # Right button is handled in contextMenuEvent (delete menu) — never move
+        # the cursor for it.
         if event.button() == Qt.MouseButton.RightButton:
+            return
+        # Back (lower) side button → autoclip (fit clip count to the play area).
+        if event.button() == Qt.MouseButton.BackButton:
+            self.autoclip_requested.emit()
             return
         # Check for scan region edge drag — require Shift to avoid accidental resizes
         mods = event.modifiers()
@@ -3887,6 +3892,7 @@ class MainWindow(QMainWindow):
         self._timeline.marker_deselected.connect(self._on_marker_deselected)
         self._timeline.scan_region_resized.connect(self._on_scan_region_resized)
         self._timeline.clip_count_delta.connect(self._change_clip_count)
+        self._timeline.autoclip_requested.connect(self._autoclip)
 
         self._lbl_file = QLabel("← Drop files onto the queue")
         self._lbl_file.setAlignment(Qt.AlignmentFlag.AlignCenter)
