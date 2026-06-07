@@ -1837,6 +1837,8 @@ class TimelineWidget(QWidget):
     keyframe_delete_requested = pyqtSignal(float)   # emits keyframe time
     marker_clicked = pyqtSignal(float, str)         # emits (start_time, output_path)
     marker_deselected = pyqtSignal()                # double-click on empty space
+    lock_toggle_requested = pyqtSignal()            # right-click on empty timeline
+    clip_count_bump_requested = pyqtSignal()        # middle-click on the timeline
     # (index, new_start, new_end, old_start, old_end)
     scan_region_resized = pyqtSignal(int, float, float, float, float)
 
@@ -1876,6 +1878,7 @@ class TimelineWidget(QWidget):
         self._pan_active = False
         self._pan_start_x = 0.0
         self._pan_start_view = 0.0
+        self._mid_press_x = 0.0  # to tell a middle-click from a middle-drag pan
         # Scrollbar drag state
         self._sb_drag = False
         self._sb_drag_offset = 0.0
@@ -2431,12 +2434,14 @@ class TimelineWidget(QWidget):
                 self._sb_drag_offset = thumb_w / 2
                 self.update()
             return
-        # Middle-mouse drag pans the view window.
-        if event.button() == Qt.MouseButton.MiddleButton and self._view_span > 0:
-            self._pan_active = True
-            self._pan_start_x = x
-            self._pan_start_view = self._view_start
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        # Middle button: drag pans (when zoomed); a click bumps the clip count.
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._mid_press_x = x
+            if self._view_span > 0:
+                self._pan_active = True
+                self._pan_start_x = x
+                self._pan_start_view = self._view_start
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
         # Check for scan region edge drag — require Shift to avoid accidental resizes
         mods = event.modifiers()
@@ -2542,9 +2547,13 @@ class TimelineWidget(QWidget):
         if self._sb_drag and event.button() == Qt.MouseButton.LeftButton:
             self._sb_drag = False
             return
-        if self._pan_active and event.button() == Qt.MouseButton.MiddleButton:
-            self._pan_active = False
-            self.unsetCursor()
+        if event.button() == Qt.MouseButton.MiddleButton:
+            if self._pan_active:
+                self._pan_active = False
+                self.unsetCursor()
+            # A middle press+release that didn't drag bumps the clip count.
+            if abs(event.position().x() - self._mid_press_x) < 4:
+                self.clip_count_bump_requested.emit()
             return
         if self._drag_idx is not None:
             # Emit resize signal with old and new bounds
@@ -2612,6 +2621,11 @@ class TimelineWidget(QWidget):
                         break
                 if hit_path is not None:
                     break
+        # Right-click on empty timeline toggles lock; on a marker/keyframe it
+        # still opens the delete menu.
+        if hit_kf_time is None and hit_path is None:
+            self.lock_toggle_requested.emit()
+            return
         from PyQt6.QtWidgets import QMenu
         menu = QMenu(self)
         act_kf = None
@@ -3867,6 +3881,7 @@ class MainWindow(QMainWindow):
         self._timeline.marker_clicked.connect(self._on_marker_clicked)
         self._timeline.marker_deselected.connect(self._on_marker_deselected)
         self._timeline.scan_region_resized.connect(self._on_scan_region_resized)
+        self._timeline.clip_count_bump_requested.connect(self._bump_clip_count)
 
         self._lbl_file = QLabel("← Drop files onto the queue")
         self._lbl_file.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -3901,6 +3916,8 @@ class MainWindow(QMainWindow):
         self._btn_lock.setCheckable(True)
         self._btn_lock.setToolTip("Lock cursor — click/drag scrubs playback without moving the export point")
         self._btn_lock.toggled.connect(self._on_lock_toggled)
+        # Right-click the timeline toggles lock (handled here, after the button exists).
+        self._timeline.lock_toggle_requested.connect(self._btn_lock.toggle)
 
         self._lbl_time = QLabel("-- / --")
 
@@ -5701,6 +5718,11 @@ class MainWindow(QMainWindow):
             other.setChecked(False)
         else:
             self._mpv._player.speed = 1.0
+
+    def _bump_clip_count(self) -> None:
+        """Middle-click on the timeline adds one clip (wraps at the max)."""
+        spn = self._spn_clips
+        spn.setValue(spn.minimum() if spn.value() >= spn.maximum() else spn.value() + 1)
 
     def _autoclip(self):
         """Set clip count to fit the current pause position."""
