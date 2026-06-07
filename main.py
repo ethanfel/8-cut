@@ -63,6 +63,24 @@ class _DBWorker(QThread):
         self.result.emit(self._filename, self._filename if markers else None, markers)
 
 
+class _ScanLoadWorker(QThread):
+    """Read a file's scan bundle (negatives, exports, results) off the UI thread."""
+    done = pyqtSignal(str, str, object, object, object)  # filename, profile, neg, exp, results
+
+    def __init__(self, db: "ProcessedDB", filename: str, profile: str):
+        super().__init__()
+        self._db = db
+        self._filename = filename
+        self._profile = profile
+
+    def run(self):
+        try:
+            neg, exp, results = self._db.read_scan_bundle(self._filename, self._profile)
+        except Exception:
+            neg, exp, results = set(), [], {}
+        self.done.emit(self._filename, self._profile, neg, exp, results)
+
+
 class ExportWorker(QThread):
     finished = pyqtSignal(str)   # emitted per completed clip
     error = pyqtSignal(str)      # error message
@@ -842,6 +860,7 @@ class ScanResultsPanel(QWidget):
     tab_changed = pyqtSignal()           # active tab changed
     regions_edited = pyqtSignal()        # a region was resized or toggled
     selection_changed = pyqtSignal()     # user's row selection changed
+    loaded = pyqtSignal(str)             # async load_for_file finished (filename)
 
     # UserRole slots per item:
     #   col 0: UserRole   = row_id (int)
@@ -916,18 +935,44 @@ class ScanResultsPanel(QWidget):
         return None
 
     def load_for_file(self, filename: str, profile: str) -> None:
-        """Load saved scan results from DB for a file."""
+        """Load saved scan results for a file — DB reads run off the UI thread,
+        the table rebuild happens in _on_scan_bundle_loaded when they finish."""
         self._filename = filename
         self._profile = profile
-        self._neg_times = self._db.get_hard_negative_times(filename, profile)
-        self._exported_times = self._db.get_scan_export_times(filename, profile)
+        # Show an empty panel immediately; the worker fills it in shortly.
         self._tabs.blockSignals(True)
         self._tabs.clear()
-        results = self._db.get_scan_results(filename, profile)
+        self._tabs.blockSignals(False)
+        self._neg_times = set()
+        self._exported_times = []
+        # Detach any in-flight loader (ignore its late result, keep it alive).
+        old = getattr(self, "_load_worker", None)
+        if old is not None and old.isRunning():
+            try:
+                old.done.disconnect()
+            except TypeError:
+                pass
+            self._dead_loaders = getattr(self, "_dead_loaders", [])
+            self._dead_loaders.append(old)
+            old.finished.connect(
+                lambda w=old: w in self._dead_loaders and self._dead_loaders.remove(w))
+        self._load_worker = _ScanLoadWorker(self._db, filename, profile)
+        self._load_worker.done.connect(self._on_scan_bundle_loaded)
+        self._load_worker.start()
+
+    def _on_scan_bundle_loaded(self, filename, profile, neg, exported, results) -> None:
+        # Ignore stale results if a newer file/profile was requested meanwhile.
+        if filename != self._filename or profile != self._profile:
+            return
+        self._neg_times = neg
+        self._exported_times = exported
+        self._tabs.blockSignals(True)
+        self._tabs.clear()
         for model, rows in results.items():
             self._add_tab(model, rows)
         self._populate_version_combos()
         self._tabs.blockSignals(False)
+        self.loaded.emit(filename)
 
     def _is_row_exported(self, start: float, end: float) -> bool:
         for t in self._exported_times:
@@ -4297,6 +4342,7 @@ class MainWindow(QMainWindow):
         self._scan_panel.tab_changed.connect(self._on_scan_regions_edited)
         self._scan_panel.regions_edited.connect(self._on_scan_regions_edited)
         self._scan_panel.selection_changed.connect(self._update_scan_export_count)
+        self._scan_panel.loaded.connect(self._on_scan_panel_loaded)
         self._sld_threshold.valueChanged.connect(self._on_threshold_changed)
 
         # Root: horizontal splitter
@@ -5025,15 +5071,11 @@ class MainWindow(QMainWindow):
             self._btn_scan.setEnabled(True)
             self._btn_scan_all.setText("Scan All")
             self._btn_scan_all.setEnabled(True)
-        # Load saved scan results for this file
+        # Load saved scan results for this file (async — the timeline scan
+        # regions are populated in _on_scan_panel_loaded when reads finish).
         if self._file_path:
-            filename = os.path.basename(self._file_path)
-            self._scan_panel.load_for_file(filename, self._profile)
-            self._timeline.set_scan_regions(
-                self._scan_panel.current_regions_with_orig(),
-                neg_times=self._scan_panel._neg_times,
-            )
-            self._update_scan_export_count()
+            self._scan_panel.load_for_file(
+                os.path.basename(self._file_path), self._profile)
 
         # Start waveform extraction in background
         self._timeline.set_waveform(None)
@@ -6046,6 +6088,16 @@ class MainWindow(QMainWindow):
             self._timeline.set_cursor(t)
             dur = self._mpv.get_duration()
             self._lbl_time.setText(f"{format_time(t)} / {format_time(dur)}")
+
+    def _on_scan_panel_loaded(self, filename: str) -> None:
+        """The async scan-panel load finished — sync the timeline scan regions."""
+        if not self._file_path or os.path.basename(self._file_path) != filename:
+            return  # user moved on to another file
+        self._timeline.set_scan_regions(
+            self._scan_panel.current_regions_with_orig(),
+            neg_times=self._scan_panel._neg_times,
+        )
+        self._update_scan_export_count()
 
     def _update_scan_export_count(self) -> None:
         """Recalculate and display estimated clip count on the export button."""
@@ -7251,6 +7303,13 @@ class MainWindow(QMainWindow):
             self._export_worker.wait(3000)
         if hasattr(self, '_db_worker') and self._db_worker and self._db_worker.isRunning():
             self._db_worker.wait(1000)
+        slw = getattr(self._scan_panel, '_load_worker', None)
+        if slw is not None and slw.isRunning():
+            try:
+                slw.done.disconnect()
+            except TypeError:
+                pass
+            slw.wait(1000)
         # Stop timers first to prevent callbacks into dead objects.
         self._preview_timer.stop()
         self._mpv._render_timer.stop()

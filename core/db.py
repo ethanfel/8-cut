@@ -1205,6 +1205,52 @@ class ProcessedDB:
                  oe if oe is not None else e))
         return result
 
+    def read_scan_bundle(self, filename: str, profile: str):
+        """Read (hard_negative_times, scan_export_times, scan_results) for a file.
+
+        Uses a fresh short-lived connection so it is safe to call from a worker
+        thread (WAL allows concurrent readers alongside the main connection).
+        Returns (set[float], list[float], dict[model -> rows]).
+        """
+        if not self._enabled:
+            return set(), [], {}
+        try:
+            con = sqlite3.connect(self._path)
+        except sqlite3.Error:
+            return set(), [], {}
+        try:
+            neg = {r[0] for r in con.execute(
+                "SELECT start_time FROM hard_negatives"
+                " WHERE filename = ? AND profile = ?",
+                (filename, profile))}
+            exported = [r[0] for r in con.execute(
+                "SELECT start_time FROM processed"
+                " WHERE filename = ? AND profile = ? AND scan_export = 1",
+                (filename, profile))]
+            rows = con.execute(
+                "SELECT r.id, r.model, r.start_time, r.end_time, r.score,"
+                "       r.disabled, r.orig_start_time, r.orig_end_time"
+                " FROM scan_results r"
+                " INNER JOIN ("
+                "   SELECT model, MAX(scan_timestamp) AS latest"
+                "   FROM scan_results"
+                "   WHERE filename = ? AND profile = ?"
+                "   GROUP BY model"
+                " ) m ON r.model = m.model AND r.scan_timestamp = m.latest"
+                " WHERE r.filename = ? AND r.profile = ?"
+                " ORDER BY r.model, r.start_time",
+                (filename, profile, filename, profile)).fetchall()
+            results: dict = {}
+            for row_id, model, s, e, sc, dis, os_, oe in rows:
+                results.setdefault(model, []).append(
+                    (row_id, s, e, sc, bool(dis),
+                     os_ if os_ is not None else s, oe if oe is not None else e))
+            return neg, exported, results
+        except sqlite3.Error:
+            return set(), [], {}
+        finally:
+            con.close()
+
     def delete_scan_result(self, row_id: int) -> None:
         """Delete a single scan result row."""
         if not self._enabled:
