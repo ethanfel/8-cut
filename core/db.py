@@ -1087,18 +1087,18 @@ class ProcessedDB:
                 " WHERE profile = ? AND scan_export = 0",
                 (profile,),
             ).fetchall()
-        folders = self.get_export_folders(profile, include_scan_exports=include_scan_exports)
-        stats: dict[str, dict] = {}
-        for folder_name in folders:
-            videos: set[str] = set()
-            clips = 0
-            for fn, op in rows:
-                grandparent = os.path.basename(os.path.dirname(os.path.dirname(op)))
-                if grandparent == folder_name:
-                    videos.add(fn)
-                    clips += 1
-            stats[folder_name] = {"videos": len(videos), "clips": clips}
-        return {k: v for k, v in stats.items() if v["clips"] > 0}
+        # Single pass: group by export folder (grandparent dir), counting
+        # clips and distinct source videos.  (Was O(folders × rows).)
+        videos: dict[str, set[str]] = {}
+        clips: dict[str, int] = {}
+        for fn, op in rows:
+            folder_name = os.path.basename(os.path.dirname(os.path.dirname(op)))
+            if not folder_name or folder_name.endswith("_disabled"):
+                continue
+            videos.setdefault(folder_name, set()).add(fn)
+            clips[folder_name] = clips.get(folder_name, 0) + 1
+        return {f: {"videos": len(videos[f]), "clips": n}
+                for f, n in clips.items() if n > 0}
 
     # ── Scan results ─────────────────────────────────────────────
 
