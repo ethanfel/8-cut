@@ -2745,6 +2745,7 @@ class MpvWidget(QWidget):
         self._needs_render = False
         self._overlays: list[dict] = []
         self._overlay_widget: "_CropOverlayWidget | None" = None
+        self._speed = 1.0  # desired playback speed, reapplied on every play_loop
 
         self._wid_mode = sys.platform == "win32"
 
@@ -2968,12 +2969,21 @@ class MpvWidget(QWidget):
         except SystemError:
             pass
 
+    def set_speed(self, speed: float) -> None:
+        """Set the desired playback speed; applied now and on every play_loop."""
+        self._speed = speed
+        if self._player:
+            self._player.speed = speed
+
     def play_loop(self, a: float, b: float, resume: bool = False):
         self._player["ab-loop-a"] = a
         self._player["ab-loop-b"] = min(b, self._player.duration or b)
         if not resume:
             self._player.seek(a, "absolute", "exact")
         self._player.pause = False
+        # Reapply the desired speed every time playback (re)starts so it can't
+        # drift out of sync with the x2/x4 buttons.
+        self._player.speed = self._speed
 
     def update_loop_end(self, b: float):
         """Adjust the B point of the current loop without seeking."""
@@ -5722,13 +5732,20 @@ class MainWindow(QMainWindow):
         self._mpv.stop_loop()
 
     def _set_playback_speed(self, speed: float) -> None:
-        btn = self._btn_speed2 if speed == 2.0 else self._btn_speed4
-        other = self._btn_speed4 if speed == 2.0 else self._btn_speed2
-        if btn.isChecked():
-            self._mpv._player.speed = speed
-            other.setChecked(False)
+        # Keep the two buttons mutually exclusive, then derive the real speed
+        # from whichever is now checked (clicking a checked button unchecks it
+        # → back to 1×).
+        if speed == 2.0 and self._btn_speed2.isChecked():
+            self._btn_speed4.setChecked(False)
+        elif speed == 4.0 and self._btn_speed4.isChecked():
+            self._btn_speed2.setChecked(False)
+        if self._btn_speed4.isChecked():
+            eff = 4.0
+        elif self._btn_speed2.isChecked():
+            eff = 2.0
         else:
-            self._mpv._player.speed = 1.0
+            eff = 1.0
+        self._mpv.set_speed(eff)
 
     def _change_clip_count(self, delta: int) -> None:
         """Wheel-scroll over the timeline adds/removes clips (clamped)."""
