@@ -4358,6 +4358,7 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(splitter)
         self.setStatusBar(None)
+        self._setup_keyboard_focus()
         if saved_ratio != "Off":
             self._crop_bar.setVisible(True)
             self._mpv.set_crop_overlay(_RATIOS[saved_ratio], self._crop_center)
@@ -4662,6 +4663,7 @@ class MainWindow(QMainWindow):
                     lbl = QLabel(pw._label)
                     lbl.setStyleSheet("font-weight: bold;")
                     btn = QPushButton("✕")
+                    btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                     btn.setFixedSize(18, 18)
                     btn.setToolTip("Remove from side-by-side")
                     btn.clicked.connect(lambda _=False, w=pw: self._on_unpin(w))
@@ -4718,6 +4720,21 @@ class MainWindow(QMainWindow):
         pw._pinned = False
         self._refresh_layout()
         self._save_playlist_tabs()
+
+    def _setup_keyboard_focus(self) -> None:
+        """Keep keyboard focus off transient controls so the timeline hotkeys
+        keep working after you click a button or set a spinbox.
+
+        A focused QPushButton swallows Space/Enter; a focused spin box swallows
+        every key (and the _KeyFilter suppresses shortcuts for its line edit).
+        """
+        for btn in self.findChildren(QPushButton):
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # Releasing focus on commit means hotkeys resume right after you type a
+        # value and press Enter (clicking elsewhere already releases via _KeyFilter).
+        for spn in (self._spn_clips, self._spn_spread,
+                    self._spn_clip_dur, self._spn_resize):
+            spn.editingFinished.connect(spn.clearFocus)
 
     def _on_filter_changed(self, text: str) -> None:
         pw = self._playlist
@@ -4922,6 +4939,7 @@ class MainWindow(QMainWindow):
         has_file = bool(self._file_path)
         for i, name in enumerate(self._subprofiles):
             btn = QPushButton(f"▸ {name}")
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.setToolTip(f"Export to folder_{name}  (right-click to remove)")
             btn.setEnabled(has_file)
             btn.clicked.connect(lambda _, s=name: self._on_export(folder_suffix=s))
@@ -5431,6 +5449,7 @@ class MainWindow(QMainWindow):
         anchor = self._transport_row.indexOf(self._btn_export) + 1
         for i, (label, ratio) in enumerate(formats):
             btn = QPushButton(label)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             btn.setFixedWidth(28)
             btn.setToolTip(f"Export all clips as {ratio}")
             btn.setEnabled(has_file)
@@ -5444,6 +5463,7 @@ class MainWindow(QMainWindow):
             sub_idx = self._transport_row.indexOf(sub_btn) + 1
             for j, (label, ratio) in enumerate(formats):
                 btn = QPushButton(label)
+                btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
                 btn.setFixedWidth(28)
                 btn.setToolTip(f"Export {suffix} as {ratio}")
                 btn.setEnabled(has_file)
