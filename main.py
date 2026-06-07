@@ -2443,6 +2443,10 @@ class TimelineWidget(QWidget):
                 self._pan_start_view = self._view_start
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
+        # Right button is handled in contextMenuEvent (lock toggle / delete menu)
+        # — never move the cursor for it.
+        if event.button() == Qt.MouseButton.RightButton:
+            return
         # Check for scan region edge drag — require Shift to avoid accidental resizes
         mods = event.modifiers()
         if mods & Qt.KeyboardModifier.ShiftModifier:
@@ -2530,11 +2534,12 @@ class TimelineWidget(QWidget):
         for (t, _num, output_path, _span) in self._markers:
             if abs(x - self._time_to_x(t)) <= 8:
                 QToolTip.showText(QCursor.pos(), os.path.basename(output_path), self)
-                if event.buttons():
+                if event.buttons() & Qt.MouseButton.LeftButton:
                     self._seek(x)
                 return
         QToolTip.hideText()
-        if event.buttons():
+        # Only a left-button drag scrubs; middle/right must not move the cursor.
+        if event.buttons() & Qt.MouseButton.LeftButton:
             self._seek(x)
 
     def _emit_seek(self):
@@ -2555,6 +2560,8 @@ class TimelineWidget(QWidget):
             if abs(event.position().x() - self._mid_press_x) < 4:
                 self.clip_count_bump_requested.emit()
             return
+        if event.button() == Qt.MouseButton.RightButton:
+            return  # lock toggle / menu handled in contextMenuEvent — no seek
         if self._drag_idx is not None:
             # Emit resize signal with old and new bounds
             idx = self._drag_idx
