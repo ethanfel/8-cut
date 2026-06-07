@@ -1811,6 +1811,7 @@ class TimelineWidget(QWidget):
         self._spread = 3.0
         self._scan_mode = False
         self._play_pos: float | None = None  # current playback position (seconds)
+        self._last_play_x = -1               # last painted playhead pixel (repaint coalescing)
         self._locked = False                 # when True, clicks scrub playback, not cursor
         self._crop_keyframes: list[tuple[float, float, str | None, bool, bool]] = []
         self._markers: list[tuple[float, int, str, float]] = []
@@ -1854,6 +1855,27 @@ class TimelineWidget(QWidget):
         self._marker_font.setPixelSize(9)
         self._ruler_font = QFont()
         self._ruler_font.setPixelSize(9)
+
+        # Pre-built colors/pens reused every paint (avoid per-frame allocation).
+        self._c_minor_tick = QColor(70, 70, 70)
+        self._c_ruler_label = QColor(160, 160, 160)
+        self._pen_ruler_border = QPen(QColor(55, 55, 55))
+        self._c_wave_normal = QColor(80, 180, 80, 50)
+        self._c_wave_speech = QColor(220, 80, 80, 70)
+        self._c_span = QColor(200, 160, 60, 35)
+        self._pen_span_tick = QPen(QColor(200, 160, 60, 70), 1)
+        self._c_mlabel = QColor(200, 50, 50)
+        self._c_white = QColor(255, 255, 255)
+        self._c_black = QColor(0, 0, 0)
+        self._other_colors = (
+            QColor(220, 190, 50), QColor(60, 190, 100), QColor(80, 160, 220),
+            QColor(200, 120, 220), QColor(220, 140, 60),
+        )
+        self._other_dim = tuple(
+            QColor(c.red(), c.green(), c.blue(), 35) for c in self._other_colors)
+        self._other_tickpen = tuple(
+            QPen(QColor(c.red(), c.green(), c.blue(), 70), 1) for c in self._other_colors)
+        self._other_pen = tuple(QPen(c, 1) for c in self._other_colors)
 
         # Debounce timer: update visual cursor immediately but only emit
         # cursor_changed (which triggers mpv.seek) at most once per interval.
@@ -1958,6 +1980,7 @@ class TimelineWidget(QWidget):
         # — the async seek hasn't caught up yet, so mpv reports stale values.
         if self._locked and self._play_pos is not None and self._seek_timer.isActive():
             return
+        old_view = self._view_start
         self._play_pos = t
         if t is not None and self._view_span > 0:
             view_end = self._view_start + self._view_span
@@ -1968,7 +1991,12 @@ class TimelineWidget(QWidget):
             elif t < self._view_start + margin:
                 self._view_start = t - margin
                 self._clamp_view()
-        self.update()
+        # Coalesce: only repaint when the view scrolled or the playhead moved a
+        # whole pixel — at 60fps the playhead usually advances sub-pixel.
+        new_x = int(self._time_to_x(t)) if t is not None else -1
+        if self._view_start != old_view or new_x != self._last_play_x:
+            self._last_play_x = new_x
+            self.update()
 
     def set_crop_keyframes(self, kfs: list[tuple[float, float, str | None, bool, bool]]) -> None:
         self._crop_keyframes = kfs
@@ -2086,17 +2114,17 @@ class TimelineWidget(QWidget):
                         mins = int(t) // 60
                         secs = int(t) % 60
                         label = f"{mins}:{secs:02d}" if mins else f"{secs}s"
-                    p.setPen(QColor(160, 160, 160))
+                    p.setPen(self._c_ruler_label)
                     p.drawText(rx + 3, 0, 60, rh - 2,
                                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom,
                                label)
                 else:
-                    p.setPen(QPen(QColor(70, 70, 70)))
+                    p.setPen(self._c_minor_tick)
                     p.drawLine(rx, rh - 5, rx, rh)
                 t += minor_step
 
             # ruler bottom border
-            p.setPen(QPen(QColor(55, 55, 55)))
+            p.setPen(self._pen_ruler_border)
             p.drawLine(0, rh, w, rh)
 
             # ── waveform ──────────────────────────────────────────────────
@@ -2112,7 +2140,7 @@ class TimelineWidget(QWidget):
                 i_end = min(n, int((self._view_start + view_span) / peak_dt) + 2)
 
                 if not self._speech_regions:
-                    p.setBrush(QColor(80, 180, 80, 50))
+                    p.setBrush(self._c_wave_normal)
                     pts = []
                     for i in range(i_start, i_end):
                         x = self._time_to_x(i * peak_dt)
@@ -2123,8 +2151,8 @@ class TimelineWidget(QWidget):
                     if pts:
                         p.drawPolygon(QPolygonF(pts))
                 else:
-                    _normal = QColor(80, 180, 80, 50)
-                    _speech = QColor(220, 80, 80, 70)
+                    _normal = self._c_wave_normal
+                    _speech = self._c_wave_speech
                     def _in_speech(t):
                         for s, e in self._speech_regions:
                             if s <= t <= e:
@@ -2212,8 +2240,8 @@ class TimelineWidget(QWidget):
                 mx1 = int(self._time_to_x(t))
                 mx2 = int(self._time_to_x(min(t + span, self._duration)))
                 if mx2 > mx1 and mx2 > 0 and mx1 < w:
-                    p.fillRect(mx1, rh, mx2 - mx1, th, QColor(200, 160, 60, 35))
-                    p.setPen(QPen(QColor(200, 160, 60, 70), 1))
+                    p.fillRect(mx1, rh, mx2 - mx1, th, self._c_span)
+                    p.setPen(self._pen_span_tick)
                     ct = t + self._spread
                     while ct < t + span - 0.1:
                         cx = int(self._time_to_x(ct))
@@ -2230,24 +2258,23 @@ class TimelineWidget(QWidget):
                 p.setPen(self._marker_pen)
                 p.drawLine(mx, rh, mx, h)
                 # small filled rectangle label
-                p.fillRect(mx, rh + 2, 14, 12, QColor(200, 50, 50))
-                p.setPen(QColor(255, 255, 255))
+                p.fillRect(mx, rh + 2, 14, 12, self._c_mlabel)
+                p.setPen(self._c_white)
                 p.drawText(mx + 1, rh + 2, 13, 12,
                            Qt.AlignmentFlag.AlignCenter, str(num))
 
             # ── other-folder markers (subprofile exports) ─────────────────
-            _OTHER_COLORS = [
-                QColor(220, 190, 50),   # yellow
-                QColor(60, 190, 100),   # green
-                QColor(80, 160, 220),   # blue
-                QColor(200, 120, 220),  # purple
-                QColor(220, 140, 60),   # orange
-            ]
-            for gi, (folder_name, group) in enumerate(
-                    [(n, g) for n, g in self._other_markers if n not in self._hidden_subcats]):
-                color = _OTHER_COLORS[gi % len(_OTHER_COLORS)]
-                dim = QColor(color.red(), color.green(), color.blue(), 35)
-                pen = QPen(color, 1)
+            ncol = len(self._other_colors)
+            gi = -1
+            for folder_name, group in self._other_markers:
+                if folder_name in self._hidden_subcats:
+                    continue
+                gi += 1
+                ci = gi % ncol
+                color = self._other_colors[ci]
+                dim = self._other_dim[ci]
+                pen = self._other_pen[ci]
+                tickpen = self._other_tickpen[ci]
                 for (t, num, _path, span) in group:
                     mx = int(self._time_to_x(t))
                     if mx < -20 or mx > w + 20:
@@ -2255,8 +2282,7 @@ class TimelineWidget(QWidget):
                     mx2 = int(self._time_to_x(min(t + span, self._duration)))
                     if mx2 > mx:
                         p.fillRect(mx, rh, mx2 - mx, th, dim)
-                        tick_color = QColor(color.red(), color.green(), color.blue(), 70)
-                        p.setPen(QPen(tick_color, 1))
+                        p.setPen(tickpen)
                         ct = t + self._spread
                         while ct < t + span - 0.1:
                             cx = int(self._time_to_x(ct))
@@ -2266,7 +2292,7 @@ class TimelineWidget(QWidget):
                     p.setPen(pen)
                     p.drawLine(mx, rh, mx, h)
                     p.fillRect(mx, rh + 2, 14, 12, color)
-                    p.setPen(QColor(0, 0, 0))
+                    p.setPen(self._c_black)
                     p.setFont(self._marker_font)
                     p.drawText(mx + 1, rh + 2, 13, 12,
                                Qt.AlignmentFlag.AlignCenter, str(num))
@@ -3284,6 +3310,7 @@ class PlaylistWidget(QListWidget):
                 self._path_set.discard(path)
                 self._done_set.discard(path)
                 self._done_counts.pop(path, None)
+        self._recheck_missing()
         self._rebuild()
         self.separators_changed.emit()
 
@@ -3296,6 +3323,11 @@ class PlaylistWidget(QListWidget):
             return False
         return True
 
+    def _recheck_missing(self) -> None:
+        """Stat all paths to find which are gone from disk. Call when the path
+        set changes — NOT on every filter keystroke."""
+        self._missing = {p for p in self._paths if not os.path.isfile(p)}
+
     def _rebuild(self) -> None:
         """Rebuild the QListWidget from scratch with only visible items."""
         self.blockSignals(True)
@@ -3303,7 +3335,6 @@ class PlaylistWidget(QListWidget):
         # Drop separator anchors for paths no longer present (keep end sentinel).
         self._separators_before &= set(self._paths) | {self._SEP_END}
         visible_paths = [p for p in self._paths if self._is_visible(p)]
-        self._missing = {p for p in visible_paths if not os.path.isfile(p)}
         self._visible = []
         for path in visible_paths:
             if path in self._separators_before:
@@ -3370,6 +3401,7 @@ class PlaylistWidget(QListWidget):
         self._done_set.clear()
         self._done_counts.clear()
         self._separators_before.clear()
+        self._missing.clear()
         self._selected_path = None
         self._rebuild()
 
@@ -3382,6 +3414,7 @@ class PlaylistWidget(QListWidget):
                 continue
             self._paths.append(path)
             self._path_set.add(path)
+        self._recheck_missing()
         self._rebuild()
         if was_empty and self._visible:
             self._select(0)
@@ -4331,7 +4364,8 @@ class MainWindow(QMainWindow):
         # Apply persisted subcategory visibility to timeline + buttons.
         self._apply_subcat_visibility()
 
-        self._show_changelog()
+        # Defer the changelog modal so the window paints/interacts first.
+        QTimer.singleShot(120, self._show_changelog)
 
     # ── Changelog ────────────────────────────────────────────
 
@@ -5005,10 +5039,18 @@ class MainWindow(QMainWindow):
         self._timeline.set_waveform(None)
         self._timeline.set_speech_regions([])
         self._btn_speech.setText("Speech")
-        if hasattr(self, '_waveform_worker') and self._waveform_worker is not None:
-            self._safe_disconnect(self._waveform_worker.done)
-            self._waveform_worker.quit()
-            self._waveform_worker.wait(1000)
+        # Detach the previous waveform worker WITHOUT blocking the UI thread.
+        # Its done signal is disconnected, so a late result is ignored; keep a
+        # reference alive until it finishes so the QThread isn't GC'd mid-run.
+        old = getattr(self, '_waveform_worker', None)
+        if old is not None:
+            self._safe_disconnect(old.done)
+            if old.isRunning():
+                self._retired_workers = getattr(self, '_retired_workers', [])
+                self._retired_workers.append(old)
+                old.finished.connect(
+                    lambda w=old: w in self._retired_workers
+                    and self._retired_workers.remove(w))
         self._waveform_worker = WaveformWorker(self._file_path)
         self._waveform_worker.done.connect(self._timeline.set_waveform)
         self._waveform_worker.start()
@@ -5089,11 +5131,16 @@ class MainWindow(QMainWindow):
         """
         profile = self._profile
         hidden = self._hidden_subcats
+        # One DB scan for the whole profile instead of one query per file.
+        grouped = self._db.get_clip_counts_grouped(profile)
         folder_counts: dict[str, dict[str, int]] = {}
         disabled_paths: set[str] = set()
+        all_counts: dict[str, int] = {}
+        for fn, fc in grouped.items():
+            for f, c in fc.items():
+                all_counts[f] = all_counts.get(f, 0) + c
         for path in self._playlist._paths:
-            filename = os.path.basename(path)
-            counts = self._db.get_clip_counts_by_folder(filename, profile)
+            counts = grouped.get(os.path.basename(path), {})
             folder_counts[path] = counts
             n = sum(c for f, c in counts.items()
                     if f not in hidden and not f.endswith("_disabled"))
@@ -5107,9 +5154,8 @@ class MainWindow(QMainWindow):
         self._playlist.set_disabled_paths(disabled_paths)
         # Profile-wide subcategory counts (exclude the main export folder).
         base = os.path.basename(self._txt_folder.text())
-        all_counts = {f: c for f, c in self._db.get_all_folder_counts(profile).items()
-                      if f != base}
-        self._playlist.set_all_subcat_counts(all_counts)
+        self._playlist.set_all_subcat_counts(
+            {f: c for f, c in all_counts.items() if f != base})
 
     def _on_delete_marker(self, output_path: str) -> None:
         deleted = self._db.delete_group(output_path)
@@ -6699,15 +6745,22 @@ class MainWindow(QMainWindow):
     def _update_next_label(self):
         folder = self._tab_export_folder()
         name = self._txt_name.text() or "clip"
-        vid_name = self._get_vid_folder(folder)
+        # The vid-folder lookup hits the DB and stats the disk and is stable for
+        # a given (file, folder), so cache it — spinner ticks shouldn't repeat
+        # it. The cheap m-counter probe is recomputed each call so it stays
+        # correct after an export advances it.
+        key = (self._file_path, folder)
+        if key != getattr(self, "_vidfolder_key", None):
+            self._vidfolder_key = key
+            self._vidfolder_cache = self._get_vid_folder(folder)
+        vid_name = self._vidfolder_cache
         vid_folder = os.path.join(folder, vid_name)
         vid_num = int(vid_name.split("_")[-1])
-        # Find next manual export number (m1, m2, ...)
         self._export_counter = 1
         while True:
             tag = f"m{self._export_counter}"
-            test_path = build_export_path(vid_folder, name, vid_num, sub=0, tag=tag)
-            if not os.path.exists(test_path):
+            if not os.path.exists(
+                    build_export_path(vid_folder, name, vid_num, sub=0, tag=tag)):
                 break
             self._export_counter += 1
         n = self._spn_clips.value()

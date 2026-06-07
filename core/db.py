@@ -24,6 +24,18 @@ class ProcessedDB:
         self._lock = threading.Lock()
         try:
             self._con = sqlite3.connect(db_path, check_same_thread=False)
+            # Performance pragmas: WAL cuts lock contention and fsync cost,
+            # a bigger page cache keeps hot scans in memory.
+            for pragma in (
+                "PRAGMA journal_mode = WAL",
+                "PRAGMA synchronous = NORMAL",
+                "PRAGMA temp_store = MEMORY",
+                "PRAGMA cache_size = -65536",   # ~64 MB
+            ):
+                try:
+                    self._con.execute(pragma)
+                except sqlite3.Error:
+                    pass
             self._migrate()
             self._enabled = True
             _log(f"DB opened: {db_path}")
@@ -84,6 +96,11 @@ class ProcessedDB:
                     )
         self._con.execute(
             "CREATE INDEX IF NOT EXISTS idx_filename ON processed(filename)"
+        )
+        # Most hot queries filter by profile, often with filename too.
+        self._con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_profile_filename"
+            " ON processed(profile, filename)"
         )
         self._con.execute(
             "CREATE TABLE IF NOT EXISTS hidden_files ("
@@ -551,6 +568,25 @@ class ProcessedDB:
             folder = os.path.basename(os.path.dirname(os.path.dirname(op)))
             counts[folder] = counts.get(folder, 0) + 1
         return counts
+
+    def get_clip_counts_grouped(self, profile: str = "default"
+                                ) -> dict[str, dict[str, int]]:
+        """Return ``{filename: {export_folder: count}}`` for a whole profile
+        in a single scan (replaces N per-file queries on the hot path)."""
+        if not self._enabled:
+            return {}
+        rows = self._con.execute(
+            "SELECT filename, output_path FROM processed WHERE profile = ?",
+            (profile,),
+        ).fetchall()
+        out: dict[str, dict[str, int]] = {}
+        for fn, op in rows:
+            folder = os.path.basename(os.path.dirname(os.path.dirname(op)))
+            d = out.get(fn)
+            if d is None:
+                d = out[fn] = {}
+            d[folder] = d.get(folder, 0) + 1
+        return out
 
     def get_all_folder_counts(self, profile: str = "default") -> dict[str, int]:
         """Return clip counts per export folder across all videos in *profile*.
