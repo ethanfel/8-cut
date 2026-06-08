@@ -1860,6 +1860,8 @@ class TimelineWidget(QWidget):
         self._scan_mode = False
         self._play_pos: float | None = None  # current playback position (seconds)
         self._last_play_x = -1               # last painted playhead pixel (repaint coalescing)
+        self._ghost_cursor: float | None = None  # previous cursor pos (undo-by-eye after a move)
+        self._gesture_cursor: float | None = None  # cursor at the start of a mouse gesture
         self._locked = False                 # when True, clicks scrub playback, not cursor
         self._crop_keyframes: list[tuple[float, float, str | None, bool, bool]] = []
         self._markers: list[tuple[float, int, str, float]] = []
@@ -1916,6 +1918,7 @@ class TimelineWidget(QWidget):
         self._c_mlabel = QColor(200, 50, 50)
         self._c_white = QColor(255, 255, 255)
         self._c_black = QColor(0, 0, 0)
+        self._pen_ghost = QPen(QColor(120, 170, 230, 90), 1, Qt.PenStyle.DashLine)
         self._other_colors = (
             QColor(220, 190, 50), QColor(60, 190, 100), QColor(80, 160, 220),
             QColor(200, 120, 220), QColor(220, 140, 60),
@@ -1937,6 +1940,8 @@ class TimelineWidget(QWidget):
         self._duration = duration
         self._cursor = 0.0
         self._play_pos = None
+        self._ghost_cursor = None
+        self._gesture_cursor = None
         self._view_start = 0.0
         self._view_span = 0.0
         self._other_markers = []
@@ -2252,6 +2257,14 @@ class TimelineWidget(QWidget):
                 p.drawLine(x_start, rh, x_start, h)
                 p.drawLine(x_end,   rh, x_end,   h)
 
+            # ── ghost of the previous cursor position (undo-by-eye) ──────────
+            if (not self._scan_mode and self._ghost_cursor is not None
+                    and abs(self._ghost_cursor - self._cursor) > 0.05):
+                gx = int(self._time_to_x(self._ghost_cursor))
+                if -2 <= gx <= w + 2:
+                    p.setPen(self._pen_ghost)
+                    p.drawLine(gx, rh, gx, h)
+
             # ── scan regions ──────────────────────────────────────────────
             if self._scan_regions and self._duration > 0:
                 for (start, end, score, os_, oe) in self._scan_regions:
@@ -2464,6 +2477,8 @@ class TimelineWidget(QWidget):
                 self._drag_start_val = r[0]
                 self._drag_end_val = r[1]
                 return
+        # Remember where the highlight started, to ghost it on release.
+        self._gesture_cursor = self._cursor
         self._seek(x)
 
     def mouseDoubleClickEvent(self, event):
@@ -2579,6 +2594,21 @@ class TimelineWidget(QWidget):
         # On release, flush any pending debounced seek immediately.
         self._seek_timer.stop()
         self._emit_seek()
+        self._commit_ghost()
+
+    def _at_export_marker(self, t: float) -> bool:
+        """True if *t* sits on an existing export marker (already marked)."""
+        return any(abs(t - mt) < 0.15 for mt, _n, _p, _s in self._markers)
+
+    def _commit_ghost(self) -> None:
+        """After a move, leave a single discreet mark at the prior position —
+        unless that spot was an exported area (it already has a marker)."""
+        g = self._gesture_cursor
+        self._gesture_cursor = None
+        if g is None or abs(self._cursor - g) < 0.05:
+            return
+        self._ghost_cursor = None if self._at_export_marker(g) else g
+        self.update()
 
     def wheelEvent(self, event):
         """Ctrl+wheel zooms the view around the mouse; plain wheel adds/removes
