@@ -2890,6 +2890,13 @@ class MpvWidget(QWidget):
             tp = self._player.time_pos
             if tp is not None:
                 self.time_pos_changed.emit(tp)
+            # Pin mpv's speed to the desired value — it can otherwise drift out
+            # of sync (e.g. across ab-loop seeks) and feel like half-speed.
+            try:
+                if abs((self._player.speed or 1.0) - self._speed) > 1e-6:
+                    self._player.speed = self._speed
+            except Exception:
+                pass
             if self._wid_mode and self._overlay_widget and self._overlays:
                 self._overlay_widget.update()
 
