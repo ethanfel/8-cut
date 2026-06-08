@@ -5784,10 +5784,24 @@ class MainWindow(QMainWindow):
             eff = 1.0
         self._mpv.set_speed(eff)
 
+    def _preview_clip_end(self) -> None:
+        """Jump playback to 3s before the end of the (new) clip span and loop,
+        so a just-shrunk play area can be reviewed at its cut point."""
+        if not self._file_path:
+            return
+        end = self._cursor + self._clip_span
+        target = max(self._cursor, end - 3.0)
+        self._mpv.play_loop(self._cursor, end, resume=True)
+        self._mpv.seek(target)
+        self._timeline.set_play_position(target)
+
     def _change_clip_count(self, delta: int) -> None:
         """Wheel-scroll over the timeline adds/removes clips (clamped)."""
         spn = self._spn_clips
-        spn.setValue(max(spn.minimum(), min(spn.maximum(), spn.value() + delta)))
+        old = spn.value()
+        spn.setValue(max(spn.minimum(), min(spn.maximum(), old + delta)))
+        if spn.value() < old:               # play area got smaller
+            self._preview_clip_end()
 
     def _autoclip(self):
         """Set clip count to fit the current pause position."""
@@ -5800,7 +5814,10 @@ class MainWindow(QMainWindow):
         spread = self._spn_spread.value()
         n = int((elapsed - self._clip_dur) / spread) + 1
         n = max(1, n)
+        old_span = self._clip_span
         self._spn_clips.setValue(n)
+        if self._clip_span < old_span:      # autoclip shrank the play area
+            self._preview_clip_end()
 
     def _step_cursor(self, delta: float) -> None:
         if not self._file_path:
