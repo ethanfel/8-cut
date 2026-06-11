@@ -1919,9 +1919,14 @@ class TimelineWidget(QWidget):
         self._c_white = QColor(255, 255, 255)
         self._c_black = QColor(0, 0, 0)
         self._pen_ghost = QPen(QColor(120, 170, 230, 90), 1, Qt.PenStyle.DashLine)
-        self._other_colors = (
-            QColor(220, 190, 50), QColor(60, 190, 100), QColor(80, 160, 220),
-            QColor(200, 120, 220), QColor(220, 140, 60),
+        # Distinct colors for subcategory marker groups. Generated across the
+        # hue wheel and interleaved (coprime step) so a large number of
+        # subprofiles don't repeat colors quickly and adjacent ones differ a lot.
+        _n_other, _hue_step = 24, 7   # 7 is coprime with 24 → permutes all hues
+        self._other_colors = tuple(
+            QColor.fromHsv(((i * _hue_step) % _n_other) * 360 // _n_other,
+                           185, 235)
+            for i in range(_n_other)
         )
         self._other_dim = tuple(
             QColor(c.red(), c.green(), c.blue(), 35) for c in self._other_colors)
