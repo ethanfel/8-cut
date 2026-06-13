@@ -27,3 +27,30 @@ def win(app):
 
 def test_window_constructs(win):
     assert win.windowTitle().startswith("8-cut")
+
+
+def test_status_bar_exists(win):
+    assert win.statusBar() is not None
+
+
+def test_workers_spinbox_in_export_tab(win):
+    from PyQt6.QtWidgets import QSpinBox
+    assert win._spn_workers in win._tab_export.findChildren(QSpinBox)
+
+
+def test_scan_button_in_scan_tab(win):
+    from PyQt6.QtWidgets import QPushButton
+    assert win._btn_scan in win._tab_scan.findChildren(QPushButton)
+
+
+def test_portrait_combo_in_crop_tab(win):
+    from PyQt6.QtWidgets import QComboBox
+    assert win._cmb_portrait in win._tab_crop.findChildren(QComboBox)
+
+
+def test_menu_only_buttons_not_in_deck(win):
+    from PyQt6.QtWidgets import QPushButton
+    deck_btns = win._control_deck.findChildren(QPushButton)
+    assert win._btn_train not in deck_btns
+    assert win._btn_scan_all not in deck_btns
+    assert win._btn_hide_subcats not in deck_btns

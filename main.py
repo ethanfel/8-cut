@@ -4318,30 +4318,9 @@ class MainWindow(QMainWindow):
         self._transport_row = transport_row
         self._rebuild_subprofile_buttons()
 
-        # Row 2 — annotation + output path widgets now live in the Export tab
-        # of the control deck (_build_export_tab); path_row is no longer mounted.
-
-        # Row 3 — crop & scan controls (encode/clip controls moved to the
-        # Export tab via _build_export_tab; crop/scan move to their own tabs
-        # in a later stage and stay mounted here until then).
-        settings_row = QHBoxLayout()
-        settings_row.addWidget(QLabel("Portrait:"))
-        settings_row.addWidget(self._cmb_portrait)
-        settings_row.addWidget(self._chk_rand_portrait)
-        settings_row.addWidget(self._chk_rand_square)
-        settings_row.addWidget(self._chk_track)
-        settings_row.addWidget(self._cmb_scan_model)
-        settings_row.addWidget(self._btn_model_history)
-        settings_row.addWidget(self._btn_scan)
-        settings_row.addWidget(self._btn_speech)
-        settings_row.addWidget(self._btn_scan_mode)
-        settings_row.addWidget(self._btn_hide_subcats)
-        settings_row.addWidget(self._btn_auto_export)
-        settings_row.addWidget(self._spn_auto_fuse)
-        settings_row.addWidget(self._sld_threshold)
-        settings_row.addWidget(self._btn_train)
-        settings_row.addWidget(self._btn_scan_all)
-        settings_row.addStretch()
+        # Row 2/3 — annotation, output path, crop and scan controls all live in
+        # the control deck's tabs now (_build_export_tab / _build_crop_tab /
+        # _build_scan_tab); path_row and settings_row are no longer mounted.
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -4354,7 +4333,8 @@ class MainWindow(QMainWindow):
         right_layout.addLayout(transport_row)
         right_layout.addWidget(self._build_control_deck())
         self._build_export_tab()
-        right_layout.addLayout(settings_row)
+        self._build_crop_tab()
+        self._build_scan_tab()
 
         # Left: queue header + playlist
         self._btn_open = QPushButton("+ Open Files")
@@ -4404,6 +4384,21 @@ class MainWindow(QMainWindow):
         # after _scan_panel and every referenced widget/button exist.
         self._build_menubar()
         self._build_status_bar()
+
+        # Reverse-sync the Scan tab's Review toggle back to the View ▸ Review
+        # mode action (the forward sync was wired in _build_menubar). Done here
+        # because _act_review only exists after _build_menubar(). setChecked
+        # does not re-emit on an unchanged value, so this cannot loop.
+        self._btn_scan_mode.toggled.connect(self._act_review.setChecked)
+        # Menu-only buttons (Train, Scan All, Sub) are reached via the menu bar
+        # now, but other code still references them (enable/disable, text). Keep
+        # the objects, re-parent to the window, and hide so they are not stray
+        # top-level windows.
+        for _b in (self._btn_train, self._btn_scan_all, self._btn_hide_subcats):
+            _b.setParent(self); _b.hide()
+        # Pin the deck height (after all tabs are populated) so switching tabs
+        # doesn't resize the video.
+        self._control_deck.setFixedHeight(self._control_deck.sizeHint().height())
 
         # Root: horizontal splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -4510,6 +4505,28 @@ class MainWindow(QMainWindow):
         g.addWidget(QLabel("Spread:"),   3, 4); g.addWidget(self._spn_spread, 3, 5)
         g.addWidget(QLabel("Workers:"),  4, 0); g.addWidget(self._spn_workers, 4, 1)
         g.addWidget(self._btn_reexport, 4, 5)
+
+    def _build_crop_tab(self) -> None:
+        from PyQt6.QtWidgets import QGridLayout
+        g = QGridLayout(self._tab_crop)
+        g.setContentsMargins(8, 6, 8, 6); g.setHorizontalSpacing(8); g.setVerticalSpacing(6)
+        g.addWidget(QLabel("Portrait:"), 0, 0); g.addWidget(self._cmb_portrait, 0, 1)
+        g.addWidget(self._chk_rand_portrait, 1, 0, 1, 2)
+        g.addWidget(self._chk_rand_square,   2, 0, 1, 2)
+        g.addWidget(self._chk_track,         3, 0, 1, 2)
+        g.setRowStretch(4, 1); g.setColumnStretch(2, 1)
+
+    def _build_scan_tab(self) -> None:
+        from PyQt6.QtWidgets import QGridLayout, QHBoxLayout
+        g = QGridLayout(self._tab_scan)
+        g.setContentsMargins(8, 6, 8, 6); g.setHorizontalSpacing(8); g.setVerticalSpacing(6)
+        model_row = QHBoxLayout()
+        model_row.addWidget(self._cmb_scan_model, 1); model_row.addWidget(self._btn_model_history)
+        g.addWidget(QLabel("Model:"), 0, 0); g.addLayout(model_row, 0, 1, 1, 3)
+        g.addWidget(self._btn_scan, 1, 0); g.addWidget(self._btn_auto_export, 1, 1)
+        g.addWidget(self._btn_speech, 1, 2); g.addWidget(self._btn_scan_mode, 1, 3)
+        g.addWidget(self._spn_auto_fuse, 2, 0); g.addWidget(self._sld_threshold, 2, 1)
+        g.setColumnStretch(3, 1)
 
     # ── Menu bar ─────────────────────────────────────────────
 
@@ -6070,6 +6087,7 @@ class MainWindow(QMainWindow):
 
     def _show_subcat_menu(self) -> None:
         from PyQt6.QtWidgets import QMenu, QWidgetAction, QCheckBox, QWidget, QVBoxLayout, QPushButton, QHBoxLayout
+        from PyQt6.QtGui import QCursor
         menu = QMenu(self)
         menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         base = os.path.basename(self._txt_folder.text())
@@ -6090,8 +6108,7 @@ class MainWindow(QMainWindow):
         folders = sorted(folder_set)
         if not folders:
             menu.addAction("(no subcategories)").setEnabled(False)
-            menu.exec(self._btn_hide_subcats.mapToGlobal(
-                self._btn_hide_subcats.rect().bottomLeft()))
+            menu.exec(QCursor.pos())
             return
 
         container = QWidget()
@@ -6144,8 +6161,7 @@ class MainWindow(QMainWindow):
         wa = QWidgetAction(menu)
         wa.setDefaultWidget(container)
         menu.addAction(wa)
-        menu.exec(self._btn_hide_subcats.mapToGlobal(
-            self._btn_hide_subcats.rect().bottomLeft()))
+        menu.exec(QCursor.pos())
 
     def _disable_all_subcats(self) -> None:
         """Disable every enabled subcategory at once (across all videos)."""
