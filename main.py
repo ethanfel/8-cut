@@ -4287,11 +4287,11 @@ class MainWindow(QMainWindow):
         self._btn_shortcuts.clicked.connect(self._show_shortcuts)
 
         # Right-side layout (video + controls)
+        # Profile selector and the ? shortcuts button live in the menu-bar
+        # corner widget (built in _build_menubar); top_bar keeps only the
+        # slim filename header above the video.
         top_bar = QHBoxLayout()
         top_bar.addWidget(self._lbl_file, stretch=1)
-        top_bar.addWidget(QLabel("Profile:"))
-        top_bar.addWidget(self._cmb_profile)
-        top_bar.addWidget(self._btn_shortcuts)
 
         # Row 1 — transport + export actions
         transport_row = QHBoxLayout()
@@ -4425,6 +4425,10 @@ class MainWindow(QMainWindow):
         self._scan_panel.loaded.connect(self._on_scan_panel_loaded)
         self._sld_threshold.valueChanged.connect(self._on_threshold_changed)
 
+        # Menu bar — wires to the existing handler methods above. Built here,
+        # after _scan_panel and every referenced widget/button exist.
+        self._build_menubar()
+
         # Root: horizontal splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left)
@@ -4493,6 +4497,81 @@ class MainWindow(QMainWindow):
 
         # Defer the changelog modal so the window paints/interacts first.
         QTimer.singleShot(120, self._show_changelog)
+
+    # ── Menu bar ─────────────────────────────────────────────
+
+    def _build_menubar(self) -> None:
+        from PyQt6.QtGui import QAction
+        mb = self.menuBar()
+
+        # File
+        m_file = mb.addMenu("&File")
+        m_file.addAction("Open Files…", self._on_open_files)
+        m_file.addAction("Set export folder…", self._pick_folder)
+        m_file.addSeparator()
+        m_file.addAction("Quit", self.close)
+
+        # Edit
+        m_edit = mb.addMenu("&Edit")
+        self._act_undo = m_edit.addAction("Undo scan edit", self._scan_panel.undo)
+        self._act_undo.setShortcut("Ctrl+Z")
+        m_edit.addSeparator()
+        m_subs = m_edit.addMenu("Subprofiles")
+        m_subs.addAction("Add…", self._new_subprofile)
+        self._menu_subprofiles_remove = m_subs.addMenu("Remove")
+        self._rebuild_remove_subprofile_menu()  # built in Task 4.x
+
+        # Scan
+        m_scan = mb.addMenu("&Scan")
+        m_scan.addAction("Scan current", self._start_scan)
+        m_scan.addAction("Auto-export", self._auto_export)
+        m_scan.addSeparator()
+        m_scan.addAction("Scan All…", self._start_scan_all)
+        m_scan.addAction("Train classifier…", self._open_train_dialog)
+
+        # View
+        m_view = mb.addMenu("&View")
+        self._act_review = m_view.addAction("Review mode")
+        self._act_review.setCheckable(True)
+        self._act_review.toggled.connect(self._btn_scan_mode.setChecked)
+        m_view.addAction("Subcategory markers…", self._show_subcat_menu)
+        m_view.addSeparator()
+        self._act_hide_exported = m_view.addAction("Hide exported")
+        self._act_hide_exported.setCheckable(True)
+        self._act_hide_exported.toggled.connect(self._chk_hide_exported.setChecked)
+        self._chk_hide_exported.toggled.connect(self._act_hide_exported.setChecked)
+        self._act_show_hidden = m_view.addAction("Show hidden")
+        self._act_show_hidden.setCheckable(True)
+        self._act_show_hidden.toggled.connect(self._btn_show_hidden.setChecked)
+        self._btn_show_hidden.toggled.connect(self._act_show_hidden.setChecked)
+
+        # Help
+        m_help = mb.addMenu("&Help")
+        m_help.addAction("Keyboard shortcuts", self._show_shortcuts).setShortcut("F1")
+        m_help.addAction("What's new", self._show_changelog)
+        m_help.addAction("About", self._show_about)  # tiny method, Task 1.3
+
+        # Profile selector + ? help button live in the top-right corner.
+        from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel
+        corner = QWidget()
+        ch = QHBoxLayout(corner)
+        ch.setContentsMargins(0, 0, 6, 0)
+        ch.addWidget(QLabel("Profile:"))
+        ch.addWidget(self._cmb_profile)
+        ch.addWidget(self._btn_shortcuts)
+        mb.setCornerWidget(corner, Qt.Corner.TopRightCorner)
+
+    def _show_about(self) -> None:
+        QMessageBox.about(self, "About 8-cut",
+                          f"<b>8-cut</b> v{self.APP_VERSION}<br>"
+                          "8-second clips for foley datasets.")
+
+    def _rebuild_remove_subprofile_menu(self) -> None:
+        self._menu_subprofiles_remove.clear()
+        for name in self._subprofiles:
+            self._menu_subprofiles_remove.addAction(
+                name, lambda _=False, n=name: self._remove_subprofile(n))
+        self._menu_subprofiles_remove.setEnabled(bool(self._subprofiles))
 
     # ── Changelog ────────────────────────────────────────────
 
