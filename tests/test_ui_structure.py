@@ -54,3 +54,19 @@ def test_menu_only_buttons_not_in_deck(win):
     assert win._btn_train not in deck_btns
     assert win._btn_scan_all not in deck_btns
     assert win._btn_hide_subcats not in deck_btns
+
+
+def test_deck_stack_exists(win):
+    # The deck is wrapped in a stack so it can swap tabbed <-> side-by-side.
+    # Default (nothing pinned) shows the tabbed control deck.
+    assert win._deck_stack is not None
+    assert win._deck_stack.currentWidget() is win._control_deck
+
+
+def test_pinning_two_panels_switches_to_split(win):
+    # Pin two panels directly (avoid the toggle handler so no QSettings write
+    # leaks into other test windows) and refresh.
+    win._tab_export._pinned = True
+    win._tab_crop._pinned = True
+    win._refresh_deck_layout()
+    assert win._deck_stack.currentWidget() is win._deck_split_container
