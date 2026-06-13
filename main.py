@@ -3344,6 +3344,29 @@ class _PlaylistTabBar(QTabBar):
         editor.editingFinished.connect(finish)
 
 
+class _DeckTabBar(QTabBar):
+    """Control-deck tab bar: right-click a tab to pin it for the side-by-side
+    view. Minimal version of _PlaylistTabBar (no rename / folder)."""
+    pin_toggle_requested = pyqtSignal(int)
+
+    def contextMenuEvent(self, event):
+        idx = self.tabAt(event.pos())
+        if idx < 0:
+            return
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        act_pin = menu.addAction("Show side-by-side")
+        act_pin.setCheckable(True)
+        pw = None
+        tw = self.parent()
+        if hasattr(tw, "widget"):
+            pw = tw.widget(idx)
+        act_pin.setChecked(bool(getattr(pw, "_pinned", False)))
+        chosen = menu.exec(event.globalPos())
+        if chosen == act_pin:
+            self.pin_toggle_requested.emit(idx)
+
+
 class PlaylistWidget(QListWidget):
     file_selected = pyqtSignal(str)  # emits full path of selected file
     _SEP_END = "\x00END"  # anchor for a separator after the last visible file
@@ -4414,10 +4437,15 @@ class MainWindow(QMainWindow):
         for _b in (self._btn_train, self._btn_scan_all, self._btn_hide_subcats):
             _b.setParent(self); _b.hide()
         # Pin the deck height (after all tabs are populated) so switching tabs
-        # doesn't resize the video.
+        # doesn't resize the video. Fit the tallest SPLIT-mode column too — a
+        # split column is a 22px header + panel content, which is taller than
+        # the tabbed deck — so pinning never clips. Pin the stack (the mounted
+        # widget) rather than _control_deck, which becomes a stack page.
         from PyQt6.QtWidgets import QSizePolicy
-        self._control_deck.setMinimumHeight(self._control_deck.sizeHint().height())
-        self._control_deck.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        _tabbed_h = self._control_deck.sizeHint().height()
+        _split_h = 22 + max(p.sizeHint().height() for p in self._deck_panels)
+        self._deck_stack.setMinimumHeight(max(_tabbed_h, _split_h))
+        self._deck_stack.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         # Root: horizontal splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -4484,6 +4512,17 @@ class MainWindow(QMainWindow):
         # Apply persisted subcategory visibility to timeline + buttons.
         self._apply_subcat_visibility()
 
+        # Restore the control deck's side-by-side layout (after the deck and
+        # menubar exist). QSettings may hand back a bare str for a single value.
+        _deck_pinned = self._settings.value("deck_pinned", [])
+        if isinstance(_deck_pinned, str):
+            _deck_pinned = [_deck_pinned] if _deck_pinned else []
+        _deck_pinned = set(_deck_pinned or [])
+        if _deck_pinned:
+            for panel in self._deck_panels:
+                panel._pinned = panel._deck_key in _deck_pinned
+            self._refresh_deck_layout()
+
         # Defer the changelog modal so the window paints/interacts first.
         QTimer.singleShot(120, self._show_changelog)
 
@@ -4495,18 +4534,46 @@ class MainWindow(QMainWindow):
         line.setFixedHeight(1)
         return line
 
-    def _build_control_deck(self) -> "QTabWidget":
+    def _build_control_deck(self) -> "QWidget":
         deck = QTabWidget()
         deck.setObjectName("control_deck")
         deck.setDocumentMode(True)
+        deck.setTabBar(_DeckTabBar())
         self._tab_export = QWidget(); self._tab_export.setObjectName("export_tab")
         self._tab_crop = QWidget();   self._tab_crop.setObjectName("crop_tab")
         self._tab_scan = QWidget();   self._tab_scan.setObjectName("scan_tab")
-        deck.addTab(self._tab_export, "Export")
-        deck.addTab(self._tab_crop, "Crop && Track")
-        deck.addTab(self._tab_scan, "Scan")
+        # Panel identity for the side-by-side view (mirrors PlaylistWidget).
+        # _label drives the tab text and split-column header; _deck_key is a
+        # stable persistence key; _pinned tracks side-by-side membership.
+        self._tab_export._pinned = False
+        self._tab_export._label = "Export"
+        self._tab_export._deck_key = "export"
+        self._tab_crop._pinned = False
+        self._tab_crop._label = "Crop && Track"
+        self._tab_crop._deck_key = "crop"
+        self._tab_scan._pinned = False
+        self._tab_scan._label = "Scan"
+        self._tab_scan._deck_key = "scan"
+        # Ordered list for deterministic column / tab order.
+        self._deck_panels = [self._tab_export, self._tab_crop, self._tab_scan]
+        deck.addTab(self._tab_export, self._tab_export._label)
+        deck.addTab(self._tab_crop, self._tab_crop._label)
+        deck.addTab(self._tab_scan, self._tab_scan._label)
         self._control_deck = deck
-        return deck
+        deck.tabBar().pin_toggle_requested.connect(self._on_deck_pin_toggle)
+
+        # Side-by-side container (shown when 2+ panels are pinned), wrapped in a
+        # stack so the deck can swap between tabbed and split views.
+        self._deck_loading = False
+        self._deck_split_container = QWidget()
+        self._deck_split_layout = QHBoxLayout(self._deck_split_container)
+        self._deck_split_layout.setContentsMargins(0, 0, 0, 0)
+        self._deck_split_layout.setSpacing(2)
+        from PyQt6.QtWidgets import QStackedWidget
+        self._deck_stack = QStackedWidget()
+        self._deck_stack.addWidget(self._control_deck)        # page 0: tabs
+        self._deck_stack.addWidget(self._deck_split_container)  # page 1: split
+        return self._deck_stack
 
     def _build_export_tab(self) -> None:
         g = QGridLayout(self._tab_export)
@@ -4953,6 +5020,102 @@ class MainWindow(QMainWindow):
         pw._pinned = False
         self._refresh_layout()
         self._save_playlist_tabs()
+
+    # ── Control deck: tabs vs. side-by-side ──────────────────────
+    def _detach_deck_panels(self) -> None:
+        for panel in self._deck_panels:
+            panel.setParent(None)
+
+    def _clear_deck_split(self) -> None:
+        while self._deck_split_layout.count():
+            item = self._deck_split_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _refresh_deck_layout(self) -> None:
+        """Render the deck panels either as tabs or, when 2+ are pinned,
+        side-by-side as resizable columns (mirrors _refresh_layout)."""
+        pinned = [p for p in self._deck_panels if p._pinned]
+        prev = self._deck_loading
+        self._deck_loading = True
+        try:
+            self._detach_deck_panels()
+            self._control_deck.clear()
+            self._clear_deck_split()
+            if len(pinned) >= 2:
+                splitter = QSplitter(Qt.Orientation.Horizontal)
+                splitter.setChildrenCollapsible(False)
+                leftovers = []
+                for panel in self._deck_panels:          # preserve deck order
+                    if not panel._pinned:
+                        leftovers.append(panel)
+                        continue
+                    col = QWidget()
+                    v = QVBoxLayout(col)
+                    v.setContentsMargins(0, 0, 0, 0)
+                    v.setSpacing(0)
+                    header = QWidget()
+                    hdr = QHBoxLayout(header)
+                    hdr.setContentsMargins(2, 1, 2, 1)
+                    lbl = QLabel(panel._label)
+                    lbl.setStyleSheet("font-weight: bold;")
+                    btn = QPushButton("✕")
+                    btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                    btn.setFixedSize(18, 18)
+                    btn.setToolTip("Return to tabs")
+                    btn.clicked.connect(
+                        lambda _=False, p=panel: self._on_deck_unpin(p))
+                    hdr.addWidget(lbl, 1)
+                    hdr.addWidget(btn)
+                    header.setFixedHeight(22)
+                    # QTabWidget hides non-current pages; reparented panels stay
+                    # hidden and render blank unless re-shown.
+                    panel.setVisible(True)
+                    v.addWidget(header)
+                    v.addWidget(panel, 1)
+                    splitter.addWidget(col)
+                if leftovers:    # keep unpinned panels reachable as a tab-column
+                    lt = QTabWidget()
+                    lt.setDocumentMode(True)
+                    for panel in leftovers:
+                        panel.setVisible(True)
+                        lt.addTab(panel, panel._label)
+                    splitter.addWidget(lt)
+                splitter.setSizes([1000] * splitter.count())
+                self._deck_split_layout.addWidget(splitter)
+                self._deck_stack.setCurrentWidget(self._deck_split_container)
+            else:
+                for panel in self._deck_panels:          # fixed order
+                    panel.setVisible(True)
+                    self._control_deck.addTab(panel, panel._label)
+                self._deck_stack.setCurrentWidget(self._control_deck)
+        finally:
+            self._deck_loading = prev
+
+    def _on_deck_pin_toggle(self, idx: int) -> None:
+        # Pin is only offered in tabbed mode, so the index maps to a deck tab.
+        panel = self._control_deck.widget(idx)
+        if panel is None:
+            return
+        panel._pinned = not panel._pinned
+        if panel._pinned and sum(1 for p in self._deck_panels if p._pinned) < 2:
+            self._show_status("Pin another panel to show them side-by-side", 3500)
+        self._refresh_deck_layout()
+        self._save_deck_layout()
+
+    def _on_deck_unpin(self, panel: "QWidget") -> None:
+        panel._pinned = False
+        self._refresh_deck_layout()
+        self._save_deck_layout()
+
+    def _save_deck_layout(self) -> None:
+        if self._deck_loading:
+            return
+        self._settings.setValue(
+            "deck_pinned",
+            [p._deck_key for p in self._deck_panels if p._pinned],
+        )
 
     def _setup_keyboard_focus(self) -> None:
         """Keep keyboard focus off transient controls so the timeline hotkeys
