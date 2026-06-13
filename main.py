@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QRect, QSize, pyqtSignal, QSettings
-from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
+from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut, QIcon
 if sys.platform == "win32":
     # Help ctypes find libmpv-2.dll next to main.py or in frozen bundle
     _dll_dir = Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent
@@ -39,6 +39,13 @@ from core.ffmpeg import (
 from core.db import ProcessedDB
 from core.annotations import remove_clip_annotation, upsert_clip_annotation
 from core.tracking import track_centers_for_jobs
+
+_ASSET_DIR = (Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent) / "assets"
+
+
+def _icon(name: str) -> "QIcon":
+    return QIcon(str(_ASSET_DIR / "icons" / name))
+
 
 _SELVA_CATEGORIES = ["", "Human", "Animal", "Vehicle", "Tool", "Music", "Nature", "Sport", "Other"]
 
@@ -3828,6 +3835,7 @@ def main():
     QSurfaceFormat.setDefaultFormat(_fmt)
 
     app = QApplication(sys.argv)
+    app.setWindowIcon(_icon("app.svg"))
     locale.setlocale(locale.LC_NUMERIC, "C")  # QApplication resets locale; re-apply for libmpv
     _kf = _KeyFilter(app)
     app.installEventFilter(_kf)
@@ -3841,13 +3849,13 @@ def main():
         QComboBox { background: #2a2a2a; border: 1px solid #555; padding: 3px 6px; border-radius: 3px; }
         QComboBox::drop-down { subcontrol-position: right center; width: 18px; border-left: 1px solid #444; }
         QComboBox::down-arrow { image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #888; margin-right: 4px; }
-        QComboBox QAbstractItemView { background: #2a2a2a; border: 1px solid #555; selection-background-color: #3a6ea8; }
+        QComboBox QAbstractItemView { background: #2a2a2a; border: 1px solid #555; selection-background-color: #3c82dc; }
         QSpinBox, QDoubleSpinBox { background: #2a2a2a; border: 1px solid #555; padding: 3px; border-radius: 3px; }
         QCheckBox::indicator { width: 14px; height: 14px; }
         QListWidget { background: #252525; alternate-background-color: #2a2a2a; }
         QListWidget::item { padding: 4px; color: #ccc; }
         QListWidget::item:alternate { color: #ddd; }
-        QListWidget::item:selected { background: #3a6ea8; color: #fff; }
+        QListWidget::item:selected { background: #3c82dc; color: #fff; }
         QTabWidget::pane { border: 1px solid #444; border-radius: 3px; top: -1px; }
         QTabBar::tab { background: #2a2a2a; color: #bbb; padding: 5px 12px;
                        border: 1px solid #444; border-bottom: none;
@@ -3856,11 +3864,11 @@ def main():
         QPushButton:checked { background: #4a3000; border-color: #ffd230; color: #fff; }
         QStatusBar { background: #1a1a1a; color: #bbb; }
         QStatusBar::item { border: none; }
-        QPushButton#primary { background: #3a6ea8; border-color: #4f86c6; color: #fff; }
-        QPushButton#primary:hover { background: #4f86c6; }
-        QMenuBar { background: #1e1e1e; } QMenuBar::item:selected { background: #3a6ea8; }
+        QPushButton#primary { background: #3c82dc; border-color: #5a9bf0; color: #fff; }
+        QPushButton#primary:hover { background: #5a9bf0; }
+        QMenuBar { background: #1e1e1e; } QMenuBar::item:selected { background: #3c82dc; }
         QMenu { background: #2a2a2a; border: 1px solid #555; }
-        QMenu::item:selected { background: #3a6ea8; }
+        QMenu::item:selected { background: #3c82dc; }
         QWidget#group_sep { background: #3a3a3a; }
     """)
     win = MainWindow()
@@ -3877,6 +3885,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("8-cut")
+        self.setWindowIcon(_icon("app.svg"))
         self.resize(1100, 680)
         self.setAcceptDrops(True)
 
@@ -3991,12 +4000,14 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QSizePolicy
         self._lbl_file.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
-        self._btn_play = QPushButton("▶ Play")
+        self._btn_play = QPushButton("Play")
+        self._btn_play.setIcon(_icon("play.svg"))
         self._btn_play.setEnabled(False)
         self._btn_play.setToolTip("Play selection loop (Space / P)")
         self._btn_play.clicked.connect(self._on_play)
 
-        self._btn_pause = QPushButton("⏸ Pause")
+        self._btn_pause = QPushButton("Pause")
+        self._btn_pause.setIcon(_icon("pause.svg"))
         self._btn_pause.setEnabled(False)
         self._btn_pause.setToolTip("Pause playback (Space / K)")
         self._btn_pause.clicked.connect(self._on_pause)
@@ -4013,7 +4024,8 @@ class MainWindow(QMainWindow):
         self._btn_speed4.setToolTip("Playback at 4× speed")
         self._btn_speed4.clicked.connect(lambda: self._set_playback_speed(4.0))
 
-        self._btn_lock = QPushButton("🔒 Lock")
+        self._btn_lock = QPushButton("Lock")
+        self._btn_lock.setIcon(_icon("lock_open.svg"))
         self._btn_lock.setCheckable(True)
         self._btn_lock.setToolTip("Lock cursor — click/drag scrubs playback without moving the export point")
         self._btn_lock.toggled.connect(self._on_lock_toggled)
@@ -4195,6 +4207,7 @@ class MainWindow(QMainWindow):
         self._hidden_subcats: set[str] = set()
 
         self._btn_scan = QPushButton("Scan")
+        self._btn_scan.setIcon(_icon("scan.svg"))
         self._btn_scan.setToolTip("Scan current video for audio segments matching reference clips")
         self._btn_scan.clicked.connect(self._start_scan)
 
@@ -4292,6 +4305,7 @@ class MainWindow(QMainWindow):
         self._update_next_label()
 
         self._btn_export = QPushButton("Export")
+        self._btn_export.setIcon(_icon("scissors.svg"))
         self._btn_export.setObjectName("primary")
         self._btn_export.setEnabled(False)
         self._btn_export.setToolTip("Export clips at cursor position (E)")
@@ -4649,11 +4663,13 @@ class MainWindow(QMainWindow):
 
         # Scan
         m_scan = mb.addMenu("&Scan")
-        m_scan.addAction("Scan current", self._start_scan)
+        _act_scan_cur = m_scan.addAction("Scan current", self._start_scan)
+        _act_scan_cur.setIcon(_icon("scan.svg"))
         m_scan.addAction("Auto-export", self._auto_export)
         m_scan.addSeparator()
         m_scan.addAction("Scan All…", self._btn_scan_all.click)
-        m_scan.addAction("Train classifier…", self._btn_train.click)
+        _act_train = m_scan.addAction("Train classifier…", self._btn_train.click)
+        _act_train.setIcon(_icon("train.svg"))
 
         # View
         m_view = mb.addMenu("&View")
@@ -6052,7 +6068,7 @@ class MainWindow(QMainWindow):
 
     def _on_lock_toggled(self, locked: bool):
         self._timeline._locked = locked
-        self._btn_lock.setText("🔒 Lock" if locked else "🔓 Lock")
+        self._btn_lock.setIcon(_icon("lock.svg" if locked else "lock_open.svg"))
         if not locked:
             # Clear keyframes when unlocking.
             if self._crop_keyframes:

@@ -30,6 +30,11 @@ mpv_dir = Path(os.environ.get("MPV_DIR", base))
 
 datas = []
 
+# Bundled assets (icons, logo) — must exist at runtime under sys._MEIPASS/assets
+assets_dir = base / "assets"
+if assets_dir.exists():
+    datas.append((str(assets_dir), "assets"))
+
 # YOLOv8 model (optional — large, skip if missing)
 yolo = base / "yolov8n.pt"
 if yolo.exists():
