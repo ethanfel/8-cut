@@ -4645,7 +4645,7 @@ class MainWindow(QMainWindow):
         m_subs = m_edit.addMenu("Subprofiles")
         m_subs.addAction("Add…", self._new_subprofile)
         self._menu_subprofiles_remove = m_subs.addMenu("Remove")
-        self._rebuild_remove_subprofile_menu()  # built in Task 4.x
+        self._rebuild_remove_subprofile_menu()
 
         # Scan
         m_scan = mb.addMenu("&Scan")
@@ -4692,7 +4692,7 @@ class MainWindow(QMainWindow):
         m_help = mb.addMenu("&Help")
         m_help.addAction("Keyboard shortcuts", self._show_shortcuts)
         m_help.addAction("What's new", self._show_changelog)
-        m_help.addAction("About", self._show_about)  # tiny method, Task 1.3
+        m_help.addAction("About", self._show_about)
 
         # Profile selector + ? help button live in the top-right corner.
         corner = QWidget()
