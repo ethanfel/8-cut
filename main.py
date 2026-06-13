@@ -3825,6 +3825,20 @@ def main():
         QListWidget::item { padding: 4px; color: #ccc; }
         QListWidget::item:alternate { color: #ddd; }
         QListWidget::item:selected { background: #3a6ea8; color: #fff; }
+        QTabWidget::pane { border: 1px solid #444; border-radius: 3px; top: -1px; }
+        QTabBar::tab { background: #2a2a2a; color: #bbb; padding: 5px 12px;
+                       border: 1px solid #444; border-bottom: none;
+                       border-top-left-radius: 3px; border-top-right-radius: 3px; }
+        QTabBar::tab:selected { background: #333; color: #fff; }
+        QPushButton:checked { background: #4a3000; border-color: #ffd230; color: #fff; }
+        QStatusBar { background: #1a1a1a; color: #bbb; }
+        QStatusBar::item { border: none; }
+        QPushButton#primary { background: #3a6ea8; border-color: #4f86c6; color: #fff; }
+        QPushButton#primary:hover { background: #4f86c6; }
+        QMenuBar { background: #1e1e1e; } QMenuBar::item:selected { background: #3a6ea8; }
+        QMenu { background: #2a2a2a; border: 1px solid #555; }
+        QMenu::item:selected { background: #3a6ea8; }
+        QWidget#group_sep { background: #3a3a3a; }
     """)
     win = MainWindow()
     win.show()
@@ -4180,8 +4194,7 @@ class MainWindow(QMainWindow):
         self._cmb_scan_model.setMinimumWidth(120)
         self._cmb_scan_model.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._cmb_scan_model.customContextMenuRequested.connect(self._show_model_versions_menu)
-        self._btn_model_history = QPushButton("\u23f2")
-        self._btn_model_history.setFixedWidth(28)
+        self._btn_model_history = QPushButton("History")
         self._btn_model_history.setToolTip("Rollback to a previous model version")
         self._btn_model_history.clicked.connect(
             lambda: self._show_model_versions_menu(None)
@@ -4192,7 +4205,7 @@ class MainWindow(QMainWindow):
         self._spn_auto_fuse.setRange(0.0, 60.0)
         self._spn_auto_fuse.setSingleStep(1.0)
         self._spn_auto_fuse.setValue(float(self._settings.value("auto_fuse", "4.0")))
-        self._spn_auto_fuse.setPrefix("Fuse: ")
+        self._spn_auto_fuse.setPrefix("Fuse gap: ")
         self._spn_auto_fuse.setSuffix("s")
         self._spn_auto_fuse.setToolTip("Max gap between scan regions to merge into one cluster")
         self._spn_auto_fuse.valueChanged.connect(
@@ -4205,7 +4218,7 @@ class MainWindow(QMainWindow):
         self._sld_threshold.setRange(0.0, 1.0)
         self._sld_threshold.setSingleStep(0.01)
         self._sld_threshold.setValue(0.50)
-        self._sld_threshold.setPrefix("Thr: ")
+        self._sld_threshold.setPrefix("Threshold: ")
         self._sld_threshold.setToolTip("Similarity threshold (0=match everything, 1=exact match)")
 
         self._scan_worker: ScanWorker | None = None
@@ -4256,6 +4269,7 @@ class MainWindow(QMainWindow):
         self._update_next_label()
 
         self._btn_export = QPushButton("Export")
+        self._btn_export.setObjectName("primary")
         self._btn_export.setEnabled(False)
         self._btn_export.setToolTip("Export clips at cursor position (E)")
         self._btn_export.clicked.connect(self._on_export)
@@ -4475,6 +4489,12 @@ class MainWindow(QMainWindow):
 
     # ── Control deck ─────────────────────────────────────────
 
+    def _group_sep(self) -> QWidget:
+        line = QWidget()
+        line.setObjectName("group_sep")
+        line.setFixedHeight(1)
+        return line
+
     def _build_control_deck(self) -> "QTabWidget":
         deck = QTabWidget()
         deck.setObjectName("control_deck")
@@ -4499,16 +4519,20 @@ class MainWindow(QMainWindow):
         folder_row = QHBoxLayout()
         folder_row.addWidget(self._txt_folder, 1); folder_row.addWidget(self._btn_folder)
         g.addWidget(QLabel("Folder:"), 1, 0); g.addLayout(folder_row, 1, 1, 1, 5)
-        # Row 2: encode / clip params
-        g.addWidget(QLabel("Format:"), 2, 0); g.addWidget(self._cmb_format, 2, 1)
-        g.addWidget(self._chk_hw, 2, 2)
-        g.addWidget(QLabel("Resize:"), 2, 3); g.addWidget(self._spn_resize, 2, 4)
-        # Row 3: batch params + actions
-        g.addWidget(QLabel("Duration:"), 3, 0); g.addWidget(self._spn_clip_dur, 3, 1)
-        g.addWidget(QLabel("Clips:"),    3, 2); g.addWidget(self._spn_clips, 3, 3)
-        g.addWidget(QLabel("Spread:"),   3, 4); g.addWidget(self._spn_spread, 3, 5)
-        g.addWidget(QLabel("Workers:"),  4, 0); g.addWidget(self._spn_workers, 4, 1)
-        g.addWidget(self._btn_reexport, 4, 5)
+        # Row 2: separator — annotation+folder │ encode
+        g.addWidget(self._group_sep(), 2, 0, 1, 7)
+        # Row 3: encode / clip params
+        g.addWidget(QLabel("Format:"), 3, 0); g.addWidget(self._cmb_format, 3, 1)
+        g.addWidget(self._chk_hw, 3, 2)
+        g.addWidget(QLabel("Resize:"), 3, 3); g.addWidget(self._spn_resize, 3, 4)
+        # Row 4: separator — encode │ batch
+        g.addWidget(self._group_sep(), 4, 0, 1, 7)
+        # Row 5/6: batch params + actions
+        g.addWidget(QLabel("Duration:"), 5, 0); g.addWidget(self._spn_clip_dur, 5, 1)
+        g.addWidget(QLabel("Clips:"),    5, 2); g.addWidget(self._spn_clips, 5, 3)
+        g.addWidget(QLabel("Spread:"),   5, 4); g.addWidget(self._spn_spread, 5, 5)
+        g.addWidget(QLabel("Workers:"),  6, 0); g.addWidget(self._spn_workers, 6, 1)
+        g.addWidget(self._btn_reexport, 6, 5)
         g.setColumnStretch(6, 1)
 
     def _build_crop_tab(self) -> None:
@@ -4526,9 +4550,13 @@ class MainWindow(QMainWindow):
         model_row = QHBoxLayout()
         model_row.addWidget(self._cmb_scan_model, 1); model_row.addWidget(self._btn_model_history)
         g.addWidget(QLabel("Model:"), 0, 0); g.addLayout(model_row, 0, 1, 1, 3)
-        g.addWidget(self._btn_scan, 1, 0); g.addWidget(self._btn_auto_export, 1, 1)
-        g.addWidget(self._btn_speech, 1, 2); g.addWidget(self._btn_scan_mode, 1, 3)
-        g.addWidget(self._spn_auto_fuse, 2, 0); g.addWidget(self._sld_threshold, 2, 1)
+        # Row 1: separator — model │ actions
+        g.addWidget(self._group_sep(), 1, 0, 1, 4)
+        g.addWidget(self._btn_scan, 2, 0); g.addWidget(self._btn_auto_export, 2, 1)
+        g.addWidget(self._btn_speech, 2, 2); g.addWidget(self._btn_scan_mode, 2, 3)
+        # Row 3: separator — actions │ fuse/threshold
+        g.addWidget(self._group_sep(), 3, 0, 1, 4)
+        g.addWidget(self._spn_auto_fuse, 4, 0); g.addWidget(self._sld_threshold, 4, 1)
         g.setColumnStretch(3, 1)
 
     # ── Menu bar ─────────────────────────────────────────────
@@ -5829,10 +5857,7 @@ class MainWindow(QMainWindow):
     def _on_lock_toggled(self, locked: bool):
         self._timeline._locked = locked
         self._btn_lock.setText("🔒 Lock" if locked else "🔓 Lock")
-        if locked:
-            self._btn_lock.setStyleSheet("background: #4a3000; border-color: #ffd230;")
-        else:
-            self._btn_lock.setStyleSheet("")
+        if not locked:
             # Clear keyframes when unlocking.
             if self._crop_keyframes:
                 n = len(self._crop_keyframes)
