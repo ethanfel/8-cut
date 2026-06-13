@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox,
     QMessageBox, QInputDialog, QDialog, QDialogButtonBox, QFormLayout,
     QTableWidget, QTableWidgetItem, QTabWidget, QTabBar, QHeaderView,
+    QGridLayout,
 )
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QRect, QSize, pyqtSignal, QSettings
 from PyQt6.QtGui import QPainter, QColor, QPen, QPixmap, QDragEnterEvent, QDropEvent, QCursor, QFont, QKeySequence, QShortcut
@@ -4382,6 +4383,8 @@ class MainWindow(QMainWindow):
 
         # Menu bar — wires to the existing handler methods above. Built here,
         # after _scan_panel and every referenced widget/button exist.
+        # Must run after the scan-toggle button and profile combo exist — the menu
+        # forward-syncs _btn_scan_mode and embeds _cmb_profile in the corner widget.
         self._build_menubar()
         self._build_status_bar()
 
@@ -4398,7 +4401,9 @@ class MainWindow(QMainWindow):
             _b.setParent(self); _b.hide()
         # Pin the deck height (after all tabs are populated) so switching tabs
         # doesn't resize the video.
-        self._control_deck.setFixedHeight(self._control_deck.sizeHint().height())
+        from PyQt6.QtWidgets import QSizePolicy
+        self._control_deck.setMinimumHeight(self._control_deck.sizeHint().height())
+        self._control_deck.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         # Root: horizontal splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -4484,7 +4489,6 @@ class MainWindow(QMainWindow):
         return deck
 
     def _build_export_tab(self) -> None:
-        from PyQt6.QtWidgets import QGridLayout
         g = QGridLayout(self._tab_export)
         g.setContentsMargins(8, 6, 8, 6); g.setHorizontalSpacing(8); g.setVerticalSpacing(6)
         # Row 0: annotation
@@ -4505,9 +4509,9 @@ class MainWindow(QMainWindow):
         g.addWidget(QLabel("Spread:"),   3, 4); g.addWidget(self._spn_spread, 3, 5)
         g.addWidget(QLabel("Workers:"),  4, 0); g.addWidget(self._spn_workers, 4, 1)
         g.addWidget(self._btn_reexport, 4, 5)
+        g.setColumnStretch(6, 1)
 
     def _build_crop_tab(self) -> None:
-        from PyQt6.QtWidgets import QGridLayout
         g = QGridLayout(self._tab_crop)
         g.setContentsMargins(8, 6, 8, 6); g.setHorizontalSpacing(8); g.setVerticalSpacing(6)
         g.addWidget(QLabel("Portrait:"), 0, 0); g.addWidget(self._cmb_portrait, 0, 1)
@@ -4517,7 +4521,6 @@ class MainWindow(QMainWindow):
         g.setRowStretch(4, 1); g.setColumnStretch(2, 1)
 
     def _build_scan_tab(self) -> None:
-        from PyQt6.QtWidgets import QGridLayout, QHBoxLayout
         g = QGridLayout(self._tab_scan)
         g.setContentsMargins(8, 6, 8, 6); g.setHorizontalSpacing(8); g.setVerticalSpacing(6)
         model_row = QHBoxLayout()
@@ -4554,8 +4557,8 @@ class MainWindow(QMainWindow):
         m_scan.addAction("Scan current", self._start_scan)
         m_scan.addAction("Auto-export", self._auto_export)
         m_scan.addSeparator()
-        m_scan.addAction("Scan All…", self._start_scan_all)
-        m_scan.addAction("Train classifier…", self._open_train_dialog)
+        m_scan.addAction("Scan All…", self._btn_scan_all.click)
+        m_scan.addAction("Train classifier…", self._btn_train.click)
 
         # View
         m_view = mb.addMenu("&View")
@@ -6087,7 +6090,6 @@ class MainWindow(QMainWindow):
 
     def _show_subcat_menu(self) -> None:
         from PyQt6.QtWidgets import QMenu, QWidgetAction, QCheckBox, QWidget, QVBoxLayout, QPushButton, QHBoxLayout
-        from PyQt6.QtGui import QCursor
         menu = QMenu(self)
         menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         base = os.path.basename(self._txt_folder.text())
