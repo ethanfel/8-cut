@@ -2,7 +2,9 @@
 
 > Addendum to `2026-06-13-ui-restructure-design.md` / `-implementation.md`. Same branch (`ui-restructure`), same constraints (preserve behavior; reorg/feature only; no `core/` changes).
 
-**Goal:** Let the control-deck panels (Export / Crop & Track / Scan) optionally show **side-by-side as resizable columns** instead of one-at-a-time tabs — mirroring the existing playlist pin→side-by-side pattern. Chosen model: **pin tabs**; unpinned panels stay reachable as a tab-column so nothing is hidden.
+**Goal:** Let the control-deck panels (Export / Crop & Track / Scan) optionally show **side-by-side as resizable columns** instead of one-at-a-time tabs — mirroring the existing playlist pin→side-by-side pattern.
+
+> **Revision (post-use, 2026-06-13):** The first implementation showed unpinned panels as a "leftover" tab-column so nothing was hidden — but in use, pinning 2 panels then displayed 3 columns, which read as "all three pinned" and was confusing (and inconsistent with what persisted). **Revised behavior:** the split view shows **exactly the pinned panels** as columns (pin 2 → 2 columns, pin 3 → 3). Unpinned panels are not shown as columns. Because the right-click-tab "Show side-by-side" gesture only works in tabbed mode, an always-available **View ▸ Side-by-side panels ▸ Export / Crop / Scan** submenu of checkable toggles is the way to pin/unpin any panel (including adding a 3rd while already in split view). The `if leftovers:` block below is removed; the View submenu + its sync in `_refresh_deck_layout` replace it.
 
 **Mirror these existing playlist members** (study them — the deck is a simpler, fixed-3-panel version): `_PlaylistTabBar` (main.py:3284), `_refresh_layout` (~4872), `_on_pin_toggle`/`_on_unpin` (~4942), `_detach_all_pws`/`_clear_split_container` (~4861), and the `_list_stack`/`_split_container` setup (~3916–3923).
 

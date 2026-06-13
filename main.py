@@ -4662,6 +4662,19 @@ class MainWindow(QMainWindow):
         self._act_review.toggled.connect(self._btn_scan_mode.setChecked)
         m_view.addAction("Subcategory markers…", self._show_subcat_menu)
         m_view.addSeparator()
+        # Side-by-side panels: always-available pin toggles (the right-click-tab
+        # gesture only works in tabbed mode, so this is the way to pin a panel
+        # while already in the split view). Kept in sync by _refresh_deck_layout.
+        m_sbs = m_view.addMenu("Side-by-side panels")
+        self._deck_pin_actions = []
+        for _panel in self._deck_panels:
+            _act = m_sbs.addAction(_panel._label)
+            _act.setCheckable(True)
+            _act.setChecked(_panel._pinned)
+            _act.triggered.connect(
+                lambda _checked=False, p=_panel: self._toggle_panel_pin(p))
+            self._deck_pin_actions.append((_act, _panel))
+        m_view.addSeparator()
         self._act_hide_exported = m_view.addAction("Hide exported")
         self._act_hide_exported.setCheckable(True)
         self._act_hide_exported.toggled.connect(self._chk_hide_exported.setChecked)
@@ -5049,11 +5062,9 @@ class MainWindow(QMainWindow):
             if len(pinned) >= 2:
                 splitter = QSplitter(Qt.Orientation.Horizontal)
                 splitter.setChildrenCollapsible(False)
-                leftovers = []
                 for panel in self._deck_panels:          # preserve deck order
                     if not panel._pinned:
-                        leftovers.append(panel)
-                        continue
+                        continue                          # unpinned panels are hidden in split mode
                     col = QWidget()
                     v = QVBoxLayout(col)
                     v.setContentsMargins(0, 0, 0, 0)
@@ -5078,16 +5089,6 @@ class MainWindow(QMainWindow):
                     v.addWidget(header)
                     v.addWidget(panel, 1)
                     splitter.addWidget(col)
-                if leftovers:    # keep unpinned panels reachable as a tab-column
-                    lt = QTabWidget()
-                    lt.setDocumentMode(True)
-                    lt.setTabBar(_DeckTabBar())
-                    lt.tabBar().pin_toggle_requested.connect(
-                        lambda i, w=lt: self._toggle_panel_pin(w.widget(i)))
-                    for panel in leftovers:
-                        panel.setVisible(True)
-                        lt.addTab(panel, panel._label)
-                    splitter.addWidget(lt)
                 splitter.setSizes([1000] * splitter.count())
                 self._deck_split_layout.addWidget(splitter)
                 self._deck_stack.setCurrentWidget(self._deck_split_container)
@@ -5096,6 +5097,12 @@ class MainWindow(QMainWindow):
                     panel.setVisible(True)
                     self._control_deck.addTab(panel, panel._label)
                 self._deck_stack.setCurrentWidget(self._control_deck)
+            # Keep the View ▸ Side-by-side menu checkmarks in sync with pin state.
+            # Guarded: _refresh_deck_layout can run before _build_menubar exists.
+            # setChecked emits toggled (not triggered), so no re-toggle loop.
+            if hasattr(self, "_deck_pin_actions"):
+                for act, panel in self._deck_pin_actions:
+                    act.setChecked(panel._pinned)
         finally:
             self._deck_loading = prev
 
