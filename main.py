@@ -5152,6 +5152,10 @@ class MainWindow(QMainWindow):
             self._transport_row.insertWidget(anchor + i, btn)
             self._subprofile_btns.append(btn)
         self._rebuild_format_buttons()
+        # Keep the Edit ▸ Subprofiles ▸ Remove submenu in sync. Guarded because
+        # this method runs in __init__ before _build_menubar creates the menu.
+        if hasattr(self, "_menu_subprofiles_remove"):
+            self._rebuild_remove_subprofile_menu()
 
     def _add_subprofile(self):
         from PyQt6.QtWidgets import QMenu
