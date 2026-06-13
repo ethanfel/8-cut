@@ -4443,7 +4443,7 @@ class MainWindow(QMainWindow):
         # widget) rather than _control_deck, which becomes a stack page.
         from PyQt6.QtWidgets import QSizePolicy
         _tabbed_h = self._control_deck.sizeHint().height()
-        _split_h = 22 + max(p.sizeHint().height() for p in self._deck_panels)
+        _split_h = self._SPLIT_HEADER_H + max(p.sizeHint().height() for p in self._deck_panels)
         self._deck_stack.setMinimumHeight(max(_tabbed_h, _split_h))
         self._deck_stack.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
@@ -4717,6 +4717,7 @@ class MainWindow(QMainWindow):
     # ── Changelog ────────────────────────────────────────────
 
     APP_VERSION = "1.0"
+    _SPLIT_HEADER_H = 22  # deck split-column header height (keep both deck spots in sync)
     CHANGELOG: list[tuple[str, list[str]]] = [
         ("1.0", [
             "<b>New export layout</b> — clips are now stored in per-video "
@@ -5038,6 +5039,8 @@ class MainWindow(QMainWindow):
         side-by-side as resizable columns (mirrors _refresh_layout)."""
         pinned = [p for p in self._deck_panels if p._pinned]
         prev = self._deck_loading
+        # Defensive: suppress _save_deck_layout during a rebuild (mirrors the
+        # playlist's _loading_tabs). No re-entrant save path exists today.
         self._deck_loading = True
         try:
             self._detach_deck_panels()
@@ -5068,7 +5071,7 @@ class MainWindow(QMainWindow):
                         lambda _=False, p=panel: self._on_deck_unpin(p))
                     hdr.addWidget(lbl, 1)
                     hdr.addWidget(btn)
-                    header.setFixedHeight(22)
+                    header.setFixedHeight(self._SPLIT_HEADER_H)
                     # QTabWidget hides non-current pages; reparented panels stay
                     # hidden and render blank unless re-shown.
                     panel.setVisible(True)
@@ -5078,6 +5081,9 @@ class MainWindow(QMainWindow):
                 if leftovers:    # keep unpinned panels reachable as a tab-column
                     lt = QTabWidget()
                     lt.setDocumentMode(True)
+                    lt.setTabBar(_DeckTabBar())
+                    lt.tabBar().pin_toggle_requested.connect(
+                        lambda i, w=lt: self._toggle_panel_pin(w.widget(i)))
                     for panel in leftovers:
                         panel.setVisible(True)
                         lt.addTab(panel, panel._label)
@@ -5093,9 +5099,7 @@ class MainWindow(QMainWindow):
         finally:
             self._deck_loading = prev
 
-    def _on_deck_pin_toggle(self, idx: int) -> None:
-        # Pin is only offered in tabbed mode, so the index maps to a deck tab.
-        panel = self._control_deck.widget(idx)
+    def _toggle_panel_pin(self, panel) -> None:
         if panel is None:
             return
         panel._pinned = not panel._pinned
@@ -5103,6 +5107,9 @@ class MainWindow(QMainWindow):
             self._show_status("Pin another panel to show them side-by-side", 3500)
         self._refresh_deck_layout()
         self._save_deck_layout()
+
+    def _on_deck_pin_toggle(self, idx: int) -> None:
+        self._toggle_panel_pin(self._control_deck.widget(idx))
 
     def _on_deck_unpin(self, panel: "QWidget") -> None:
         panel._pinned = False
