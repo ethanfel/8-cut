@@ -61,6 +61,13 @@ All clips are exactly 8 seconds — the standard length for foley sound datasets
 - **Subprofiles** — lightweight export folder variants for multiple output targets
 - **Review mode** — clean timeline view for navigating scan results without export clutter
 
+### Interface
+
+- **Menu bar** — File / Edit / Scan / View / Help hold the occasional actions (open files, train, scan all, profiles); the profile selector and shortcuts (`?`) sit in the top-right corner
+- **Control deck** — a compact tabbed panel under the video groups the settings into **Export** (label, name, folder, format, resize, duration/clips/spread, workers), **Crop & Track**, and **Scan** (model, threshold, fuse, scan/auto/speech/review)
+- **Side-by-side panels** — pin deck panels to view them as resizable columns: right-click a deck tab → *Show side-by-side*, or toggle them under *View ▸ Side-by-side panels*; drag the dividers to reallocate space, and the layout persists between sessions
+- **Status bar** — export/scan progress and messages, with the current file · profile · worker count always shown
+
 ## Keyboard shortcuts
 
 | Key | Action |

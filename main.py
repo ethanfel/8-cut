@@ -4729,9 +4729,28 @@ class MainWindow(QMainWindow):
 
     # ── Changelog ────────────────────────────────────────────
 
-    APP_VERSION = "1.0"
+    APP_VERSION = "1.1"
     _SPLIT_HEADER_H = 22  # deck split-column header height (keep both deck spots in sync)
     CHANGELOG: list[tuple[str, list[str]]] = [
+        ("1.1", [
+            "<b>Reorganized interface</b> — the dense control rows are now a "
+            "<b>menu bar</b> (File / Edit / Scan / View / Help) for occasional "
+            "actions plus a compact <b>tabbed control deck</b> "
+            "(Export / Crop &amp; Track / Scan) under the video. Every control "
+            "and keyboard shortcut works exactly as before; the profile selector "
+            "and shortcuts (?) moved to the top-right corner.",
+            "<b>Side-by-side panels</b> — pin deck panels to view them as "
+            "resizable columns: right-click a deck tab → <i>Show side-by-side</i>, "
+            "or toggle them under <i>View ▸ Side-by-side panels</i>. Drag the "
+            "dividers to reallocate space; the layout is remembered between "
+            "sessions.",
+            "<b>Status bar</b> — export/scan progress and messages now appear in "
+            "a real status bar, with the current file, profile, and worker count "
+            "always shown on the right.",
+            "<b>Visual polish</b> — a primary Export button, a consistent "
+            "highlight for toggle buttons (×2 / ×4 / Lock / Review), grouped "
+            "controls with separators, and clearer labels.",
+        ]),
         ("1.0", [
             "<b>New export layout</b> — clips are now stored in per-video "
             "<code>vid_NNN/</code> folders instead of per-clip "
