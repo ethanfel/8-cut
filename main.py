@@ -4314,39 +4314,19 @@ class MainWindow(QMainWindow):
         self._btn_add_sub.clicked.connect(self._add_subprofile)
         transport_row.addWidget(self._btn_add_sub)
         transport_row.addWidget(self._btn_cancel)
-        transport_row.addWidget(self._spn_workers)
         transport_row.addWidget(self._btn_delete)
         self._transport_row = transport_row
         self._rebuild_subprofile_buttons()
 
-        # Row 2 — annotation + output path
-        path_row = QHBoxLayout()
-        path_row.addWidget(QLabel("Label:"))
-        path_row.addWidget(self._txt_label)
-        path_row.addWidget(QLabel("Cat:"))
-        path_row.addWidget(self._cmb_category)
-        path_row.addWidget(QLabel("Name:"))
-        path_row.addWidget(self._txt_name)
-        path_row.addWidget(QLabel("Folder:"))
-        path_row.addWidget(self._txt_folder, stretch=1)
-        path_row.addWidget(self._btn_folder)
+        # Row 2 — annotation + output path widgets now live in the Export tab
+        # of the control deck (_build_export_tab); path_row is no longer mounted.
 
-        # Row 3 — video + encoding settings
+        # Row 3 — crop & scan controls (encode/clip controls moved to the
+        # Export tab via _build_export_tab; crop/scan move to their own tabs
+        # in a later stage and stay mounted here until then).
         settings_row = QHBoxLayout()
-        settings_row.addWidget(QLabel("Resize:"))
-        settings_row.addWidget(self._spn_resize)
         settings_row.addWidget(QLabel("Portrait:"))
         settings_row.addWidget(self._cmb_portrait)
-        settings_row.addWidget(QLabel("Format:"))
-        settings_row.addWidget(self._cmb_format)
-        settings_row.addWidget(self._chk_hw)
-        settings_row.addWidget(QLabel("Dur:"))
-        settings_row.addWidget(self._spn_clip_dur)
-        settings_row.addWidget(QLabel("Clips:"))
-        settings_row.addWidget(self._spn_clips)
-        settings_row.addWidget(QLabel("Spread:"))
-        settings_row.addWidget(self._spn_spread)
-        settings_row.addWidget(self._btn_reexport)
         settings_row.addWidget(self._chk_rand_portrait)
         settings_row.addWidget(self._chk_rand_square)
         settings_row.addWidget(self._chk_track)
@@ -4372,7 +4352,8 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self._timeline)
         right_layout.addWidget(self._crop_bar)
         right_layout.addLayout(transport_row)
-        right_layout.addLayout(path_row)
+        right_layout.addWidget(self._build_control_deck())
+        self._build_export_tab()
         right_layout.addLayout(settings_row)
 
         # Left: queue header + playlist
@@ -4491,6 +4472,44 @@ class MainWindow(QMainWindow):
 
         # Defer the changelog modal so the window paints/interacts first.
         QTimer.singleShot(120, self._show_changelog)
+
+    # ── Control deck ─────────────────────────────────────────
+
+    def _build_control_deck(self) -> "QTabWidget":
+        deck = QTabWidget()
+        deck.setObjectName("control_deck")
+        deck.setDocumentMode(True)
+        self._tab_export = QWidget(); self._tab_export.setObjectName("export_tab")
+        self._tab_crop = QWidget();   self._tab_crop.setObjectName("crop_tab")
+        self._tab_scan = QWidget();   self._tab_scan.setObjectName("scan_tab")
+        deck.addTab(self._tab_export, "Export")
+        deck.addTab(self._tab_crop, "Crop && Track")
+        deck.addTab(self._tab_scan, "Scan")
+        self._control_deck = deck
+        return deck
+
+    def _build_export_tab(self) -> None:
+        from PyQt6.QtWidgets import QGridLayout
+        g = QGridLayout(self._tab_export)
+        g.setContentsMargins(8, 6, 8, 6); g.setHorizontalSpacing(8); g.setVerticalSpacing(6)
+        # Row 0: annotation
+        g.addWidget(QLabel("Label:"), 0, 0); g.addWidget(self._txt_label, 0, 1)
+        g.addWidget(QLabel("Cat:"),   0, 2); g.addWidget(self._cmb_category, 0, 3)
+        g.addWidget(QLabel("Name:"),  0, 4); g.addWidget(self._txt_name, 0, 5)
+        # Row 1: output path
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(self._txt_folder, 1); folder_row.addWidget(self._btn_folder)
+        g.addWidget(QLabel("Folder:"), 1, 0); g.addLayout(folder_row, 1, 1, 1, 5)
+        # Row 2: encode / clip params
+        g.addWidget(QLabel("Format:"), 2, 0); g.addWidget(self._cmb_format, 2, 1)
+        g.addWidget(self._chk_hw, 2, 2)
+        g.addWidget(QLabel("Resize:"), 2, 3); g.addWidget(self._spn_resize, 2, 4)
+        # Row 3: batch params + actions
+        g.addWidget(QLabel("Duration:"), 3, 0); g.addWidget(self._spn_clip_dur, 3, 1)
+        g.addWidget(QLabel("Clips:"),    3, 2); g.addWidget(self._spn_clips, 3, 3)
+        g.addWidget(QLabel("Spread:"),   3, 4); g.addWidget(self._spn_spread, 3, 5)
+        g.addWidget(QLabel("Workers:"),  4, 0); g.addWidget(self._spn_workers, 4, 1)
+        g.addWidget(self._btn_reexport, 4, 5)
 
     # ── Menu bar ─────────────────────────────────────────────
 
