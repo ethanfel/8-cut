@@ -4218,6 +4218,7 @@ class MainWindow(QMainWindow):
         self._spn_workers.valueChanged.connect(
             lambda v: self._settings.setValue("workers", str(v))
         )
+        self._spn_workers.valueChanged.connect(lambda: self._update_status_perm())
 
         self._txt_label = QComboBox()
         self._txt_label.setEditable(True)
@@ -4361,13 +4362,6 @@ class MainWindow(QMainWindow):
         settings_row.addWidget(self._btn_train)
         settings_row.addWidget(self._btn_scan_all)
         settings_row.addStretch()
-        self._lbl_status = QLabel()
-        self._lbl_status.setStyleSheet("color: #888; font-size: 11px;")
-        self._lbl_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self._status_timer = QTimer(self)
-        self._status_timer.setSingleShot(True)
-        self._status_timer.timeout.connect(lambda: self._lbl_status.clear())
-        settings_row.addWidget(self._lbl_status)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -4428,6 +4422,7 @@ class MainWindow(QMainWindow):
         # Menu bar — wires to the existing handler methods above. Built here,
         # after _scan_panel and every referenced widget/button exist.
         self._build_menubar()
+        self._build_status_bar()
 
         # Root: horizontal splitter
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -4441,7 +4436,6 @@ class MainWindow(QMainWindow):
         self._main_splitter = splitter
 
         self.setCentralWidget(splitter)
-        self.setStatusBar(None)
         self._setup_keyboard_focus()
         if saved_ratio != "Off":
             self._crop_bar.setVisible(True)
@@ -4573,6 +4567,18 @@ class MainWindow(QMainWindow):
             self._menu_subprofiles_remove.addAction(
                 name, lambda _=False, n=name: self._remove_subprofile(n))
         self._menu_subprofiles_remove.setEnabled(bool(self._subprofiles))
+
+    def _build_status_bar(self) -> None:
+        sb = self.statusBar()
+        self._status_perm = QLabel("")
+        self._status_perm.setStyleSheet("color: #888;")
+        sb.addPermanentWidget(self._status_perm)
+        self._update_status_perm()
+
+    def _update_status_perm(self) -> None:
+        name = os.path.basename(self._file_path) if self._file_path else "—"
+        self._status_perm.setText(
+            f"{name} · profile: {self._profile} · {self._spn_workers.value()} workers")
 
     # ── Changelog ────────────────────────────────────────────
 
@@ -5049,6 +5055,7 @@ class MainWindow(QMainWindow):
         if self._playlist.count() > 0:
             self._playlist._select(0)
         self._refresh_markers()
+        self._update_status_perm()
         _log(f"Profile switched: {text}")
         self._show_status(f"Profile: {text}", 3000)
 
@@ -5143,12 +5150,8 @@ class MainWindow(QMainWindow):
             btn.setEnabled(enabled)
 
     def _show_status(self, msg: str, timeout: int = 0) -> None:
-        """Show a message in the inline status label. Timeout in ms (0 = sticky)."""
-        self._lbl_status.setText(msg)
-        if timeout > 0:
-            self._status_timer.start(timeout)
-        else:
-            self._status_timer.stop()
+        """Show a transient message in the status bar. timeout in ms (0 = sticky)."""
+        self.statusBar().showMessage(msg, timeout)
 
     def _on_hide_exported_toggled(self, hide: bool) -> None:
         self._settings.setValue("hide_exported", "true" if hide else "false")
@@ -5313,6 +5316,8 @@ class MainWindow(QMainWindow):
         self._db_worker.result.connect(self._on_db_result)
         self._db_worker.start()
 
+        self._update_status_perm()
+
     def _on_db_result(self, queried: str, match: object, markers: list) -> None:
         # Discard stale results if the user loaded a different file already.
         if os.path.basename(self._file_path) != queried:
@@ -5320,7 +5325,7 @@ class MainWindow(QMainWindow):
         if match:
             self._show_status(f"⚠ Similar to already processed: {match}")
         else:
-            self._lbl_status.clear()
+            self._show_status("")
         self._timeline.set_markers(markers)
         self._refresh_other_markers()
 
