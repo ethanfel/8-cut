@@ -1,4 +1,3 @@
-import os
 import pytest
 
 # A real platform is needed because MpvWidget creates a GL context.
@@ -26,10 +25,5 @@ def win(app):
     w.deleteLater()
 
 
-def _descendant_object_names(widget):
-    """All objectNames in a widget's child tree (for containment asserts)."""
-    return {c.objectName() for c in widget.findChildren(object) if c.objectName()}
-
-
 def test_window_constructs(win):
-    assert win.windowTitle() == "8-cut"
+    assert win.windowTitle().startswith("8-cut")

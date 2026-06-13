@@ -4501,7 +4501,6 @@ class MainWindow(QMainWindow):
     # ── Menu bar ─────────────────────────────────────────────
 
     def _build_menubar(self) -> None:
-        from PyQt6.QtGui import QAction
         mb = self.menuBar()
 
         # File
@@ -4514,7 +4513,6 @@ class MainWindow(QMainWindow):
         # Edit
         m_edit = mb.addMenu("&Edit")
         self._act_undo = m_edit.addAction("Undo scan edit", self._scan_panel.undo)
-        self._act_undo.setShortcut("Ctrl+Z")
         m_edit.addSeparator()
         m_subs = m_edit.addMenu("Subprofiles")
         m_subs.addAction("Add…", self._new_subprofile)
@@ -4545,14 +4543,17 @@ class MainWindow(QMainWindow):
         self._act_show_hidden.toggled.connect(self._btn_show_hidden.setChecked)
         self._btn_show_hidden.toggled.connect(self._act_show_hidden.setChecked)
 
+        self._act_review.setChecked(self._btn_scan_mode.isChecked())
+        self._act_hide_exported.setChecked(self._chk_hide_exported.isChecked())
+        self._act_show_hidden.setChecked(self._btn_show_hidden.isChecked())
+
         # Help
         m_help = mb.addMenu("&Help")
-        m_help.addAction("Keyboard shortcuts", self._show_shortcuts).setShortcut("F1")
+        m_help.addAction("Keyboard shortcuts", self._show_shortcuts)
         m_help.addAction("What's new", self._show_changelog)
         m_help.addAction("About", self._show_about)  # tiny method, Task 1.3
 
         # Profile selector + ? help button live in the top-right corner.
-        from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel
         corner = QWidget()
         ch = QHBoxLayout(corner)
         ch.setContentsMargins(0, 0, 6, 0)
