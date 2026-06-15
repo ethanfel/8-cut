@@ -5,6 +5,7 @@ locale.setlocale(locale.LC_NUMERIC, "C")  # required by libmpv before any import
 import sys
 import os
 import random
+import re
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -45,6 +46,11 @@ _ASSET_DIR = (Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__fi
 
 def _icon(name: str) -> "QIcon":
     return QIcon(str(_ASSET_DIR / "icons" / name))
+
+
+def _norm_token(s: str) -> str:
+    """Lowercase a string and strip everything but [a-z0-9] for fuzzy matching."""
+    return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
 _SELVA_CATEGORIES = ["", "Human", "Animal", "Vehicle", "Tool", "Music", "Nature", "Sport", "Other"]
@@ -3400,6 +3406,7 @@ class PlaylistWidget(QListWidget):
         self._missing: set[str] = set()       # paths not present on disk
         self._pinned: bool = False            # shown in the side-by-side view
         self._tab_folder: bool = False        # append this tab's name to export folder
+        self._export_folder: str = ""         # per-tab export destination
         self._label: str = ""                 # tab name (source of truth across views)
         self._visible: list[str | None] = []  # rows shown; None = separator row
         self._selected_path: str | None = None
@@ -3922,6 +3929,9 @@ class MainWindow(QMainWindow):
         self._playlist_filter.setClearButtonEnabled(True)
         self._playlist_filter.textChanged.connect(self._on_filter_changed)
 
+        # Guard against the textChanged→tab-save loop when we programmatically
+        # sync _txt_folder to the active tab's stored export folder.
+        self._syncing_folder = False
         # Suppress tab persistence until _load_playlist_tabs runs at the end of
         # __init__ (the profile combo it needs doesn't exist yet).
         self._loading_tabs = True
@@ -4046,6 +4056,7 @@ class MainWindow(QMainWindow):
         self._txt_folder.textChanged.connect(
             lambda v: self._settings.setValue("export_folder", v)
         )
+        self._txt_folder.textChanged.connect(self._on_export_folder_edited)
         self._btn_folder = QPushButton("...")
         self._btn_folder.setFixedWidth(30)
         self._btn_folder.setToolTip("Browse for output folder")
@@ -4930,6 +4941,28 @@ class MainWindow(QMainWindow):
     def _export_base_name(self) -> str:
         return os.path.basename(self._tab_export_folder())
 
+    def _on_export_folder_edited(self, text: str) -> None:
+        """User edited the folder field → store it on the active tab."""
+        if self._syncing_folder:
+            return
+        pw = self._playlist
+        if pw is not None:
+            pw._export_folder = text
+            self._save_playlist_tabs()
+
+    def _sync_folder_field_to_tab(self) -> None:
+        """Reflect the active tab's stored export folder in the folder field."""
+        pw = self._playlist
+        if pw is None:
+            return
+        folder = getattr(pw, "_export_folder", "") or self._settings.value(
+            "export_folder", str(Path.home()))
+        if folder != self._txt_folder.text():
+            self._syncing_folder = True
+            self._txt_folder.setText(folder)
+            self._syncing_folder = False
+        self._update_next_label()
+
     def _on_tab_folder_toggle(self, idx: int) -> None:
         pw = self._playlist_tabs.widget(idx)
         if pw is None:
@@ -4958,6 +4991,10 @@ class MainWindow(QMainWindow):
                           select: bool = True) -> "PlaylistWidget":
         pw = PlaylistWidget()
         self._wire_pw(pw)
+        # Inherit the current folder field (overwritten on load). _txt_folder may
+        # not exist yet during the bootstrap tab built before widgets are wired.
+        _fld = getattr(self, "_txt_folder", None)
+        pw._export_folder = _fld.text() if _fld is not None else ""
         pw._label = label or f"List {len(self._pws) + 1}"
         self._pws.append(pw)
         if separators:
@@ -5193,6 +5230,7 @@ class MainWindow(QMainWindow):
         if w is not None:
             self._active_pw = w
             w.set_filter(self._playlist_filter.text())
+            self._sync_folder_field_to_tab()
         self._apply_playlist_filters()
         self._save_playlist_tabs()
 
@@ -5230,6 +5268,7 @@ class MainWindow(QMainWindow):
             "separators": sorted(pw._separators_before),
             "pinned": pw._pinned,
             "tab_folder": pw._tab_folder,
+            "export_folder": pw._export_folder,
         } for pw in self._pws]
         cur = self._pws.index(self._active_pw) if self._active_pw in self._pws else 0
         data = {"tabs": tabs, "current": cur}
@@ -5273,6 +5312,8 @@ class MainWindow(QMainWindow):
                         separators=t.get("separators", []), select=False)
                     pw._pinned = bool(t.get("pinned"))
                     pw._tab_folder = bool(t.get("tab_folder"))
+                    pw._export_folder = t.get("export_folder") or self._settings.value(
+                        "export_folder", str(Path.home()))
                 cur = min(max(0, data.get("current", 0)), len(self._pws) - 1)
         finally:
             self._loading_tabs = False
@@ -5282,6 +5323,7 @@ class MainWindow(QMainWindow):
             if not self._active_pw._pinned:
                 self._playlist_tabs.setCurrentWidget(self._active_pw)
             self._active_pw.set_filter(self._playlist_filter.text())
+            self._sync_folder_field_to_tab()
 
     def _on_profile_activated(self, index: int) -> None:
         text = self._cmb_profile.itemText(index)
@@ -5335,6 +5377,7 @@ class MainWindow(QMainWindow):
             self._playlist._select(0)
         self._refresh_markers()
         self._update_status_perm()
+        self._sync_folder_field_to_tab()
         _log(f"Profile switched: {text}")
         self._show_status(f"Profile: {text}", 3000)
 
@@ -7337,6 +7380,23 @@ class MainWindow(QMainWindow):
         folder = self._tab_export_folder()
         if folder_suffix:
             folder = folder.rstrip(os.sep) + "_" + folder_suffix
+
+        # Guardrail: warn if the loaded video's parent folder name doesn't
+        # appear anywhere in the destination — likely a mismatched tab/folder.
+        vid_parent = os.path.basename(os.path.dirname(self._file_path))
+        vid_tok = _norm_token(vid_parent)
+        if len(vid_tok) >= 3 and vid_tok not in _norm_token(folder):
+            resp = QMessageBox.question(
+                self, "Export folder mismatch",
+                f"The loaded video is under:\n  {vid_parent}\n\n"
+                f"but you're exporting to:\n  {folder}\n\nExport anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if resp != QMessageBox.StandardButton.Yes:
+                self._show_status("Export cancelled (folder mismatch)", 4000)
+                return
+
         os.makedirs(folder, exist_ok=True)
         spread = self._spn_spread.value()
 
