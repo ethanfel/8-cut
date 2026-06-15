@@ -3406,7 +3406,7 @@ class PlaylistWidget(QListWidget):
         self._missing: set[str] = set()       # paths not present on disk
         self._pinned: bool = False            # shown in the side-by-side view
         self._tab_folder: bool = False        # append this tab's name to export folder
-        self._export_folder: str = ""         # per-tab export destination
+        self._dest_folder: str = ""           # per-tab export destination
         self._label: str = ""                 # tab name (source of truth across views)
         self._visible: list[str | None] = []  # rows shown; None = separator row
         self._selected_path: str | None = None
@@ -4947,7 +4947,7 @@ class MainWindow(QMainWindow):
             return
         pw = self._playlist
         if pw is not None:
-            pw._export_folder = text
+            pw._dest_folder = text
             self._save_playlist_tabs()
 
     def _sync_folder_field_to_tab(self) -> None:
@@ -4955,7 +4955,7 @@ class MainWindow(QMainWindow):
         pw = self._playlist
         if pw is None:
             return
-        folder = getattr(pw, "_export_folder", "") or self._settings.value(
+        folder = getattr(pw, "_dest_folder", "") or self._settings.value(
             "export_folder", str(Path.home()))
         if folder != self._txt_folder.text():
             self._syncing_folder = True
@@ -4994,7 +4994,7 @@ class MainWindow(QMainWindow):
         # Inherit the current folder field (overwritten on load). _txt_folder may
         # not exist yet during the bootstrap tab built before widgets are wired.
         _fld = getattr(self, "_txt_folder", None)
-        pw._export_folder = _fld.text() if _fld is not None else ""
+        pw._dest_folder = _fld.text() if _fld is not None else ""
         pw._label = label or f"List {len(self._pws) + 1}"
         self._pws.append(pw)
         if separators:
@@ -5268,7 +5268,7 @@ class MainWindow(QMainWindow):
             "separators": sorted(pw._separators_before),
             "pinned": pw._pinned,
             "tab_folder": pw._tab_folder,
-            "export_folder": pw._export_folder,
+            "export_folder": pw._dest_folder,
         } for pw in self._pws]
         cur = self._pws.index(self._active_pw) if self._active_pw in self._pws else 0
         data = {"tabs": tabs, "current": cur}
@@ -5312,7 +5312,7 @@ class MainWindow(QMainWindow):
                         separators=t.get("separators", []), select=False)
                     pw._pinned = bool(t.get("pinned"))
                     pw._tab_folder = bool(t.get("tab_folder"))
-                    pw._export_folder = t.get("export_folder") or self._settings.value(
+                    pw._dest_folder = t.get("export_folder") or self._settings.value(
                         "export_folder", str(Path.home()))
                 cur = min(max(0, data.get("current", 0)), len(self._pws) - 1)
         finally:
@@ -5551,7 +5551,10 @@ class MainWindow(QMainWindow):
             return  # ignore auto-selection while rebuilding tabs
         # The list that emitted this becomes the active pane (side-by-side).
         sender = self.sender()
-        if isinstance(sender, PlaylistWidget) and sender in self._pws:
+        if isinstance(sender, PlaylistWidget) and sender in self._pws and sender is not self._active_pw:
+            self._active_pw = sender
+            self._sync_folder_field_to_tab()
+        elif isinstance(sender, PlaylistWidget) and sender in self._pws:
             self._active_pw = sender
         if not os.path.isfile(path):
             self._show_status(f"File not found: {os.path.basename(path)}", 5000)
@@ -7385,7 +7388,8 @@ class MainWindow(QMainWindow):
         # appear anywhere in the destination — likely a mismatched tab/folder.
         vid_parent = os.path.basename(os.path.dirname(self._file_path))
         vid_tok = _norm_token(vid_parent)
-        if len(vid_tok) >= 3 and vid_tok not in _norm_token(folder):
+        folder_tokens = [_norm_token(p) for p in folder.split(os.sep) if p]
+        if len(vid_tok) >= 3 and not any(vid_tok in ft for ft in folder_tokens):
             resp = QMessageBox.question(
                 self, "Export folder mismatch",
                 f"The loaded video is under:\n  {vid_parent}\n\n"
