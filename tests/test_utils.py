@@ -439,3 +439,26 @@ def test_apply_keyframes_before_first_uses_base():
     result = apply_keyframes_to_jobs(jobs, kfs, base_center=0.5, base_ratio="4:5",
                                      base_rand_p=True, base_rand_s=False)
     assert result == [(1.0, "/out/a", "4:5", 0.5, True, False)]
+
+
+# --- LTX-2 legal-frame math (core/ltx2.py) ---
+
+from core.ltx2 import is_legal_frames, nearest_legal_frames, frames_for_duration, duration_for_frames, legal_frames
+
+def test_ltx2_is_legal():
+    assert is_legal_frames(201) and is_legal_frames(9) and is_legal_frames(25)
+    assert not is_legal_frames(200) and not is_legal_frames(8)
+
+def test_ltx2_nearest():
+    assert nearest_legal_frames(200) == 201   # 200 -> nearest 8k+1
+    assert nearest_legal_frames(196) == 193
+    assert nearest_legal_frames(5) == 9        # floor at 9
+
+def test_ltx2_duration_roundtrip():
+    assert duration_for_frames(201, 25) == 201 / 25
+    assert frames_for_duration(8.0, 25) == 201   # 200 -> 201
+
+def test_ltx2_legal_series():
+    s = legal_frames(min_f=9, max_f=33)
+    assert s == [9, 17, 25, 33]
+
