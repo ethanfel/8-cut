@@ -66,6 +66,9 @@ All clips are exactly 8 seconds — the standard length for foley sound datasets
 - **Menu bar** — File / Edit / Scan / View / Help hold the occasional actions (open files, train, scan all, profiles); the profile selector and shortcuts (`?`) sit in the top-right corner
 - **Control deck** — a compact tabbed panel under the video groups the settings into **Export** (label, name, folder, format, resize, duration/clips/spread, workers), **Crop & Track**, and **Scan** (model, threshold, fuse, scan/auto/speech/review)
 - **Side-by-side panels** — pin deck panels to view them as resizable columns: right-click a deck tab → *Show side-by-side*, or toggle them under *View ▸ Side-by-side panels*; drag the dividers to reallocate space, and the layout persists between sessions
+- **Per-tab export folder** — each file-list tab remembers its own output folder; switching tabs follows that tab's folder, and a guardrail warns when the loaded video doesn't match the destination
+- **Duplicate tab** — right-click a file-list tab → *Duplicate tab* to clone its files into a new tab with its own export folder
+- **LTX-2 export mode** — per-tab **Foley | LTX-2** toggle (right-click a tab, shown with an `[LTX2]` badge): LTX-2 clips are frame-exact (`frames % 8 == 1`), forced to 25 fps, and center-cropped so width & height are divisible by 32 — for LTX-2 video-to-audio datasets; applies to manual, re-export, and auto-export
 - **Status bar** — export/scan progress and messages, with the current file · profile · worker count always shown
 
 ## Keyboard shortcuts

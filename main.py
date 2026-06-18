@@ -4799,9 +4799,25 @@ class MainWindow(QMainWindow):
 
     # ── Changelog ────────────────────────────────────────────
 
-    APP_VERSION = "1.1"
+    APP_VERSION = "1.2"
     _SPLIT_HEADER_H = 22  # deck split-column header height (keep both deck spots in sync)
     CHANGELOG: list[tuple[str, list[str]]] = [
+        ("1.2", [
+            "<b>Per-tab export folder</b> — each file-list tab now remembers "
+            "its own output folder; switching tabs follows that tab's folder. "
+            "An <b>export-folder mismatch guardrail</b> warns when the loaded "
+            "video's talent/folder doesn't match the destination, so clips "
+            "don't land in the wrong tree.",
+            "<b>Duplicate tab</b> — right-click a file-list tab → "
+            "<i>Duplicate tab</i> to clone its files into a new tab with its "
+            "own export folder.",
+            "<b>LTX-2 export mode</b> — a per-tab <b>Foley | LTX-2</b> toggle "
+            "(right-click a tab) marked with an <code>[LTX2]</code> badge. "
+            "LTX-2 clips are frame-exact (<code>frames % 8 == 1</code>, set via "
+            "the frames control), forced to <b>25 fps</b>, and center-cropped so "
+            "width &amp; height are divisible by 32 — for LTX-2 video-to-audio "
+            "datasets. Applies to manual, re-export, and auto-export.",
+        ]),
         ("1.1", [
             "<b>Reorganized interface</b> — the dense control rows are now a "
             "<b>menu bar</b> (File / Edit / Scan / View / Help) for occasional "
