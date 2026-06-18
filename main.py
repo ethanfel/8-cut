@@ -7288,6 +7288,16 @@ class MainWindow(QMainWindow):
         max_workers = min(self._spn_workers.value(), 3) if hw_on else self._spn_workers.value()
         is_scan = getattr(self, '_auto_export_no_markers', False)
 
+        clip_duration = self._clip_dur
+        # LTX-2 mode (active tab) overrides length/resize and feeds the
+        # 25fps / ÷32-crop / exact-frames params through to ffmpeg. Foley
+        # tabs return None here and keep byte-identical behavior. Captured at
+        # batch-build time so queued batches keep their own geometry.
+        ltx2 = self._ltx2_export_params()
+        if ltx2 is not None:
+            short_side = ltx2["short_side"]
+            clip_duration = ltx2["duration"]
+
         batch = {
             "jobs": jobs,
             "positions": positions,
@@ -7296,13 +7306,16 @@ class MainWindow(QMainWindow):
             "image_sequence": image_sequence,
             "max_workers": max_workers,
             "encoder": encoder,
-            "clip_duration": self._clip_dur,
+            "clip_duration": clip_duration,
             "spread": spread,
             "folder": folder,
             "format": fmt,
             "profile": self._profile,
             "is_scan": is_scan,
             "replace_scan_exports": replace_scan_exports,
+            "target_fps": ltx2["target_fps"] if ltx2 else None,
+            "snap32": ltx2["snap32"] if ltx2 else False,
+            "frames": ltx2["frames"] if ltx2 else None,
         }
 
         if self._export_worker and self._export_worker.isRunning():
@@ -7348,6 +7361,9 @@ class MainWindow(QMainWindow):
             max_workers=batch["max_workers"],
             encoder=batch["encoder"],
             duration=batch["clip_duration"],
+            target_fps=batch.get("target_fps"),
+            snap32=batch.get("snap32", False),
+            frames=batch.get("frames"),
         )
         self._export_worker.finished.connect(self._on_auto_clip_done)
         self._export_worker.all_done.connect(self._on_auto_batch_done)
@@ -7921,6 +7937,15 @@ class MainWindow(QMainWindow):
         encoder = self._hw_encoders[0] if hw_on else "libx264"
         max_workers = min(self._spn_workers.value(), 3) if hw_on else self._spn_workers.value()
         clip_dur = self._clip_dur
+
+        # LTX-2 mode (active tab) overrides length/resize and feeds the
+        # 25fps / ÷32-crop / exact-frames params through to ffmpeg. Foley
+        # tabs return None here and keep byte-identical behavior.
+        ltx2 = self._ltx2_export_params()
+        if ltx2 is not None:
+            short_side = ltx2["short_side"]
+            clip_dur = ltx2["duration"]
+
         self._export_spread = spread
         self._export_clip_duration = clip_dur
         self._export_folder = folder
@@ -7938,6 +7963,9 @@ class MainWindow(QMainWindow):
             max_workers=max_workers,
             encoder=encoder,
             duration=clip_dur,
+            target_fps=ltx2["target_fps"] if ltx2 else None,
+            snap32=ltx2["snap32"] if ltx2 else False,
+            frames=ltx2["frames"] if ltx2 else None,
         )
         self._export_worker.finished.connect(self._on_reexport_clip_done)
         self._export_worker.all_done.connect(self._on_reexport_batch_done)
