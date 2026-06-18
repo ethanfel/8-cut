@@ -107,3 +107,22 @@ def test_side_by_side_menu_pins_third_panel(win):
         win._deck_loading = False
     assert win._tab_crop._pinned is True
     assert len(_split_columns(win)) == 3
+
+
+def test_duplicate_tab(win):
+    # Right-click → Duplicate tab: clones files into a new tab with an adapted
+    # name + adapted own folder, no file moves. Suppress QSettings writes via
+    # _loading_tabs so the test can't touch the real session.
+    win._loading_tabs = True
+    try:
+        src = win._pws[0]
+        src._label = "AlexisCrystal"
+        src._dest_folder = "/data/alexis"
+        n_before = len(win._pws)
+        win._on_duplicate_tab(win._playlist_tabs.indexOf(src))
+    finally:
+        win._loading_tabs = False
+    assert len(win._pws) == n_before + 1
+    dup = win._pws[-1]
+    assert dup._label == "AlexisCrystal copy"
+    assert dup._dest_folder == "/data/alexis_copy"

@@ -3302,6 +3302,7 @@ class _PlaylistTabBar(QTabBar):
     tab_renamed = pyqtSignal(int, str)
     pin_toggle_requested = pyqtSignal(int)
     tab_folder_toggle_requested = pyqtSignal(int)
+    duplicate_requested = pyqtSignal(int)
 
     def mouseDoubleClickEvent(self, event):
         idx = self.tabAt(event.pos())
@@ -3327,6 +3328,7 @@ class _PlaylistTabBar(QTabBar):
         act_tabfolder.setCheckable(True)
         act_tabfolder.setChecked(bool(getattr(pw, "_tab_folder", False)))
         act_rename = menu.addAction("Rename…")
+        act_dup = menu.addAction("Duplicate tab")
         chosen = menu.exec(event.globalPos())
         if chosen == act_pin:
             self.pin_toggle_requested.emit(idx)
@@ -3334,6 +3336,8 @@ class _PlaylistTabBar(QTabBar):
             self.tab_folder_toggle_requested.emit(idx)
         elif chosen == act_rename:
             self._start_edit(idx)
+        elif chosen == act_dup:
+            self.duplicate_requested.emit(idx)
 
     def _start_edit(self, idx: int) -> None:
         editor = QLineEdit(self)
@@ -3946,6 +3950,7 @@ class MainWindow(QMainWindow):
         self._playlist_tabs.tabBar().pin_toggle_requested.connect(self._on_pin_toggle)
         self._playlist_tabs.tabBar().tab_folder_toggle_requested.connect(
             self._on_tab_folder_toggle)
+        self._playlist_tabs.tabBar().duplicate_requested.connect(self._on_duplicate_tab)
         self._playlist_tabs.tabCloseRequested.connect(self._on_close_tab)
         self._playlist_tabs.currentChanged.connect(self._on_tab_changed)
         self._btn_add_tab = QPushButton("+")
@@ -4973,6 +4978,32 @@ class MainWindow(QMainWindow):
             self._refresh_markers()
         self._refresh_playlist_checks()
         self._update_next_label()
+
+    def _on_duplicate_tab(self, idx: int) -> None:
+        """Clone a tab's file list into a new tab with an adapted name and its
+        own (adapted) export folder. No files are moved or copied — the new tab
+        just targets a separate dataset folder you export into."""
+        src = self._playlist_tabs.widget(idx)
+        if src is None:
+            return
+        base = f"{src._label} copy"
+        label, n = base, 2
+        existing = {pw._label for pw in self._pws}
+        while label in existing:
+            label = f"{base} {n}"
+            n += 1
+        pw = self._add_playlist_tab(
+            label=label,
+            files=list(src._paths),
+            separators=sorted(src._separators_before),
+            select=True,
+        )
+        src_folder = getattr(src, "_dest_folder", "")
+        pw._dest_folder = (src_folder + "_copy") if src_folder else ""
+        pw._tab_folder = getattr(src, "_tab_folder", False)
+        self._sync_folder_field_to_tab()
+        self._save_playlist_tabs()
+        self._show_status(f"Duplicated tab → {label}", 4000)
 
     # ── File-list tabs ───────────────────────────────────────────
     def _wire_pw(self, pw: "PlaylistWidget") -> None:
