@@ -484,3 +484,12 @@ def test_ffmpeg_foley_unchanged():
     assert "-r" not in cmd and "-frames:v" not in cmd
     assert "crop=trunc" not in cmd[cmd.index("-vf")+1]
 
+
+# --- LTX-2 audio extract frame-exact duration ---
+
+def test_audio_extract_ltx2_duration():
+    frames, fps = 201, 25
+    cmd = build_audio_extract_command("/in/v.mp4", 0.0, "/out/clip_001",
+                                      duration=frames / fps)
+    assert "-t" in cmd
+    assert cmd[cmd.index("-t") + 1] == str(frames / fps)
