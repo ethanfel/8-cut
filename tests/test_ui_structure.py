@@ -158,3 +158,35 @@ def test_tab_mode_toggle(win):
         win._loading_tabs = False
     assert win._pws[0]._mode == "ltx2"
     assert win._tab_title(win._pws[0]).endswith("[LTX2]")
+
+
+def test_ltx2_params_none_for_foley(win):
+    # A Foley tab feeds no LTX-2 ffmpeg params into export. Set the mode
+    # explicitly: a prior test's closeEvent can persist an ltx2 tab into the
+    # shared (throwaway) QSettings, so don't rely on the loaded default here.
+    win._playlist._mode = "foley"
+    assert win._ltx2_export_params() is None
+
+
+def test_ltx2_params_for_ltx2_tab(win):
+    # An ltx2-mode active tab: _ltx2_export_params returns the 25fps / ÷32 /
+    # exact-frames kwargs, and _apply_mode_to_controls swaps the length control
+    # (Duration hidden, frames shown). short_side defaults to 512 when unset.
+    win._spn_resize.setValue(0)            # force the 512 LTX-2 default path
+    win._pws[0]._mode = "ltx2"
+    win._active_pw = win._pws[0]
+    win._playlist_tabs.setCurrentWidget(win._pws[0])
+    win._spn_frames.setValue(201)
+    win._apply_mode_to_controls()
+
+    assert win._ltx2_export_params() == {
+        "target_fps": 25.0,
+        "snap32": True,
+        "frames": 201,
+        "duration": 201 / 25,
+        "short_side": 512,
+    }
+    # In offscreen, isVisibleTo(win) may be False for both; assert via the
+    # show/hide flag that the Duration control is hidden in ltx2 mode.
+    assert win._spn_clip_dur.isHidden()
+    assert not win._spn_frames.isHidden()

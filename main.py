@@ -107,7 +107,10 @@ class ExportWorker(QThread):
                  image_sequence: bool = False,
                  max_workers: int | None = None,
                  encoder: str = "libx264",
-                 duration: float = 8.0):
+                 duration: float = 8.0,
+                 target_fps: float | None = None,
+                 snap32: bool = False,
+                 frames: int | None = None):
         super().__init__()
         self._input = input_path
         self._jobs = jobs  # [(start, output, portrait_ratio, crop_center), ...]
@@ -116,6 +119,9 @@ class ExportWorker(QThread):
         self._max_workers = max_workers
         self._encoder = encoder
         self._duration = duration
+        self._target_fps = target_fps   # LTX-2: force output fps (None = source)
+        self._snap32 = snap32           # LTX-2: crop W/H down to ÷32
+        self._frames = frames           # LTX-2: exact video frame count
         self._cancel = False
         self._procs: list[subprocess.Popen] = []
         self._procs_lock = __import__('threading').Lock()
@@ -144,6 +150,9 @@ class ExportWorker(QThread):
             image_sequence=self._image_sequence,
             encoder=self._encoder,
             duration=self._duration,
+            target_fps=self._target_fps,
+            snap32=self._snap32,
+            frames=self._frames,
         )
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         with self._procs_lock:
@@ -4140,6 +4149,19 @@ class MainWindow(QMainWindow):
         self._spn_clip_dur.valueChanged.connect(lambda: self._preview_timer.start())
         self._spn_clip_dur.valueChanged.connect(self._update_play_loop)
 
+        # LTX-2 frame-count length control (soft preset; F % 8 == 1 when stepped
+        # by 8 from 9). Shown only on ltx2-mode tabs via _apply_mode_to_controls.
+        self._spn_frames = QSpinBox()
+        self._spn_frames.setRange(9, 100000)
+        self._spn_frames.setSingleStep(8)
+        self._spn_frames.setValue(201)
+        self._spn_frames.setSuffix(" f")
+        self._spn_frames.setToolTip("LTX-2 frame count (F % 8 == 1)")
+        self._lbl_frames_secs = QLabel()
+        self._lbl_frames_secs.setToolTip("Clip length at 25 fps")
+        self._spn_frames.valueChanged.connect(self._update_frames_secs_label)
+        self._update_frames_secs_label()
+
         self._spn_clips = QSpinBox()
         self._spn_clips.setRange(1, 99)
         self._spn_clips.setToolTip("Number of overlapping clips per export")
@@ -4544,6 +4566,7 @@ class MainWindow(QMainWindow):
         # Resume last session: rebuild file-list tabs (per-profile).
         self._load_playlist_tabs()
         self._apply_playlist_filters()
+        self._apply_mode_to_controls()
         if self._playlist is not None and self._playlist.count() > 0:
             self._playlist._select(0)
 
@@ -4633,10 +4656,17 @@ class MainWindow(QMainWindow):
         # Row 4: separator — encode │ batch
         g.addWidget(self._group_sep(), 4, 0, 1, 7)
         # Row 5/6: batch params + actions
-        g.addWidget(QLabel("Duration:"), 5, 0); g.addWidget(self._spn_clip_dur, 5, 1)
+        self._lbl_duration = QLabel("Duration:")
+        g.addWidget(self._lbl_duration, 5, 0); g.addWidget(self._spn_clip_dur, 5, 1)
+        # LTX-2 frames length control reuses the Duration row's label+spinbox
+        # cells; only one of the two is shown at a time (see
+        # _apply_mode_to_controls). Its read-out sits in the free cell on row 6.
+        self._lbl_frames = QLabel("Frames:")
+        g.addWidget(self._lbl_frames, 5, 0); g.addWidget(self._spn_frames, 5, 1)
         g.addWidget(QLabel("Clips:"),    5, 2); g.addWidget(self._spn_clips, 5, 3)
         g.addWidget(QLabel("Spread:"),   5, 4); g.addWidget(self._spn_spread, 5, 5)
         g.addWidget(QLabel("Workers:"),  6, 0); g.addWidget(self._spn_workers, 6, 1)
+        g.addWidget(self._lbl_frames_secs, 6, 2, 1, 2)
         g.addWidget(self._btn_reexport, 6, 5)
         g.setColumnStretch(6, 1)
 
@@ -5015,6 +5045,46 @@ class MainWindow(QMainWindow):
         self._save_playlist_tabs()
         self._show_status(f"Duplicated tab → {label}", 4000)
 
+    def _update_frames_secs_label(self) -> None:
+        """Refresh the LTX-2 read-out (= F/25 s @25fps) from _spn_frames."""
+        f = self._spn_frames.value()
+        self._lbl_frames_secs.setText(f"= {f / 25:.2f}s @25fps")
+
+    def _apply_mode_to_controls(self) -> None:
+        """Show the length control matching the active tab's mode.
+
+        ltx2 → frames spinbox + read-out (Duration hidden); foley → Duration.
+        Guarded for early calls before the widgets exist.
+        """
+        if not hasattr(self, "_spn_frames") or not hasattr(self, "_spn_clip_dur"):
+            return
+        pw = self._playlist
+        is_ltx2 = pw is not None and getattr(pw, "_mode", "foley") == "ltx2"
+        self._spn_frames.setVisible(is_ltx2)
+        self._lbl_frames_secs.setVisible(is_ltx2)
+        if hasattr(self, "_lbl_frames"):
+            self._lbl_frames.setVisible(is_ltx2)
+        self._spn_clip_dur.setVisible(not is_ltx2)
+        if hasattr(self, "_lbl_duration"):
+            self._lbl_duration.setVisible(not is_ltx2)
+        if is_ltx2 and self._spn_resize.value() == 0:
+            self._spn_resize.setValue(512)  # LTX-2 default short side
+
+    def _ltx2_export_params(self) -> dict | None:
+        """Return LTX-2 ffmpeg kwargs for the active tab, or None for Foley."""
+        pw = self._playlist
+        if pw is None or getattr(pw, "_mode", "foley") != "ltx2":
+            return None
+        frames = int(self._spn_frames.value())
+        fps = 25.0
+        return {
+            "target_fps": fps,
+            "snap32": True,
+            "frames": frames,
+            "duration": frames / fps,
+            "short_side": self._spn_resize.value() or 512,
+        }
+
     def _on_tab_mode_toggle(self, idx: int) -> None:
         pw = self._playlist_tabs.widget(idx)
         if pw is None:
@@ -5022,6 +5092,7 @@ class MainWindow(QMainWindow):
         pw._mode = "ltx2" if getattr(pw, "_mode", "foley") != "ltx2" else "foley"
         self._refresh_layout()      # re-render tab titles (badge)
         self._save_playlist_tabs()
+        self._apply_mode_to_controls()
         self._show_status(f"{pw._label}: {pw._mode.upper()} mode", 3000)
 
     def _tab_title(self, pw) -> str:
@@ -5287,6 +5358,7 @@ class MainWindow(QMainWindow):
             w.set_filter(self._playlist_filter.text())
             self._sync_folder_field_to_tab()
         self._apply_playlist_filters()
+        self._apply_mode_to_controls()
         self._save_playlist_tabs()
 
     def _on_close_tab(self, idx: int) -> None:
@@ -7569,6 +7641,15 @@ class MainWindow(QMainWindow):
             ]
 
         short_side = self._spn_resize.value() or None
+        duration = self._clip_dur
+
+        # LTX-2 mode (active tab) overrides length/resize and feeds the
+        # 25fps / ÷32-crop / exact-frames params through to ffmpeg. Foley
+        # tabs return None here and keep byte-identical behavior.
+        ltx2 = self._ltx2_export_params()
+        if ltx2 is not None:
+            short_side = ltx2["short_side"]
+            duration = ltx2["duration"]
 
         # Stash export config for _on_clip_done DB writes.
         # Cursor is frozen here — user may move it during async export.
@@ -7578,7 +7659,7 @@ class MainWindow(QMainWindow):
         self._export_crop_center = self._crop_center
         self._export_format = fmt
         self._export_clip_count = self._spn_clips.value()
-        self._export_clip_duration = self._clip_dur
+        self._export_clip_duration = duration
         self._export_spread = self._spn_spread.value()
         self._export_folder = folder
         self._export_folder_suffix = folder_suffix
@@ -7601,14 +7682,18 @@ class MainWindow(QMainWindow):
         # (typically 3–5 on consumer NVIDIA cards), so cap workers.
         max_workers = min(self._spn_workers.value(), 3) if hw_on else self._spn_workers.value()
         _log(f"Export: {len(jobs)} clip(s), encoder={encoder}, workers={max_workers}, "
-             f"resize={short_side}, format={fmt}")
+             f"resize={short_side}, format={fmt}"
+             + (f", ltx2 frames={ltx2['frames']}@{ltx2['target_fps']:g}fps" if ltx2 else ""))
         self._export_worker = ExportWorker(
             self._file_path, jobs,
             short_side=short_side,
             image_sequence=image_sequence,
             max_workers=max_workers,
             encoder=encoder,
-            duration=self._clip_dur,
+            duration=duration,
+            target_fps=ltx2["target_fps"] if ltx2 else None,
+            snap32=ltx2["snap32"] if ltx2 else False,
+            frames=ltx2["frames"] if ltx2 else None,
         )
         self._export_worker.finished.connect(self._on_clip_done)
         self._export_worker.all_done.connect(self._on_batch_done)
