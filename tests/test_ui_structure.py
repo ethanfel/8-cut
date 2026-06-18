@@ -190,3 +190,26 @@ def test_ltx2_params_for_ltx2_tab(win):
     # show/hide flag that the Duration control is hidden in ltx2 mode.
     assert win._spn_clip_dur.isHidden()
     assert not win._spn_frames.isHidden()
+
+
+def test_duplicate_preserves_ltx2_mode(win):
+    # Duplicating an LTX-2 tab must yield an LTX-2 tab (mode is copied alongside
+    # the folder fields). Suppress QSettings writes via _loading_tabs.
+    win._loading_tabs = True
+    try:
+        src = win._pws[0]
+        src._mode = "ltx2"
+        win._on_duplicate_tab(win._playlist_tabs.indexOf(src))
+    finally:
+        win._loading_tabs = False
+    dup = win._pws[-1]
+    assert dup._mode == "ltx2"
+
+
+def test_frames_snaps_to_legal(win):
+    # A typed (illegal) frame count snaps to the nearest legal 8k+1 value so the
+    # displayed value == the exported value and is always a valid LTX-2 clip.
+    win._spn_frames.setValue(100)
+    win._snap_frames_to_legal()              # the editingFinished slot
+    assert win._spn_frames.value() == 97     # nearest 8k+1 to 100
+    assert (win._spn_frames.value() - 1) % 8 == 0

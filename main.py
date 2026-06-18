@@ -40,6 +40,7 @@ from core.ffmpeg import (
 from core.db import ProcessedDB
 from core.annotations import remove_clip_annotation, upsert_clip_annotation
 from core.tracking import track_centers_for_jobs
+from core.ltx2 import nearest_legal_frames
 
 _ASSET_DIR = (Path(sys._MEIPASS) if getattr(sys, "frozen", False) else Path(__file__).parent) / "assets"
 
@@ -4160,6 +4161,7 @@ class MainWindow(QMainWindow):
         self._lbl_frames_secs = QLabel()
         self._lbl_frames_secs.setToolTip("Clip length at 25 fps")
         self._spn_frames.valueChanged.connect(self._update_frames_secs_label)
+        self._spn_frames.editingFinished.connect(self._snap_frames_to_legal)
         self._update_frames_secs_label()
 
         self._spn_clips = QSpinBox()
@@ -5057,7 +5059,9 @@ class MainWindow(QMainWindow):
         # a sibling ".../AlexisCrystal_copy", not a child ".../AlexisCrystal/_copy".
         pw._dest_folder = (src_folder.rstrip("/" + os.sep) + "_copy") if src_folder else ""
         pw._tab_folder = getattr(src, "_tab_folder", False)
-        self._sync_folder_field_to_tab()
+        pw._mode = getattr(src, "_mode", "foley")
+        self._refresh_layout()      # re-render tab titles (LTX2 badge)
+        self._on_active_pw_changed()
         self._save_playlist_tabs()
         self._show_status(f"Duplicated tab → {label}", 4000)
 
@@ -5065,6 +5069,22 @@ class MainWindow(QMainWindow):
         """Refresh the LTX-2 read-out (= F/25 s @25fps) from _spn_frames."""
         f = self._spn_frames.value()
         self._lbl_frames_secs.setText(f"= {f / 25:.2f}s @25fps")
+
+    def _snap_frames_to_legal(self) -> None:
+        """Snap a typed frame count to the nearest legal 8k+1 value.
+
+        Keeps the displayed value == the exported value, always legal. No-op
+        (and re-entrancy-safe) when the value is already legal.
+        """
+        cur = self._spn_frames.value()
+        legal = nearest_legal_frames(cur)
+        if legal != cur:
+            self._spn_frames.setValue(legal)
+
+    def _on_active_pw_changed(self) -> None:
+        """Re-sync everything that depends on which tab is active."""
+        self._sync_folder_field_to_tab()
+        self._apply_mode_to_controls()
 
     def _apply_mode_to_controls(self) -> None:
         """Show the length control matching the active tab's mode.
@@ -5372,9 +5392,8 @@ class MainWindow(QMainWindow):
         if w is not None:
             self._active_pw = w
             w.set_filter(self._playlist_filter.text())
-            self._sync_folder_field_to_tab()
+            self._on_active_pw_changed()
         self._apply_playlist_filters()
-        self._apply_mode_to_controls()
         self._save_playlist_tabs()
 
     def _on_close_tab(self, idx: int) -> None:
@@ -5468,7 +5487,7 @@ class MainWindow(QMainWindow):
             if not self._active_pw._pinned:
                 self._playlist_tabs.setCurrentWidget(self._active_pw)
             self._active_pw.set_filter(self._playlist_filter.text())
-            self._sync_folder_field_to_tab()
+            self._on_active_pw_changed()
 
     def _on_profile_activated(self, index: int) -> None:
         text = self._cmb_profile.itemText(index)
@@ -5522,7 +5541,7 @@ class MainWindow(QMainWindow):
             self._playlist._select(0)
         self._refresh_markers()
         self._update_status_perm()
-        self._sync_folder_field_to_tab()
+        self._on_active_pw_changed()
         _log(f"Profile switched: {text}")
         self._show_status(f"Profile: {text}", 3000)
 
@@ -5687,6 +5706,7 @@ class MainWindow(QMainWindow):
         if paths:
             target = self._add_target_playlist()
             self._active_pw = target
+            self._on_active_pw_changed()
             target.add_files(paths)
             self._apply_playlist_filters()
             self._save_playlist_tabs()
@@ -5698,7 +5718,7 @@ class MainWindow(QMainWindow):
         sender = self.sender()
         if isinstance(sender, PlaylistWidget) and sender in self._pws and sender is not self._active_pw:
             self._active_pw = sender
-            self._sync_folder_field_to_tab()
+            self._on_active_pw_changed()
         elif isinstance(sender, PlaylistWidget) and sender in self._pws:
             self._active_pw = sender
         if not os.path.isfile(path):
@@ -7252,7 +7272,11 @@ class MainWindow(QMainWindow):
             return
 
         spread = self._spn_spread.value()
-        clip_dur = self._clip_dur
+        # LTX-2 mode (active tab) sets the clip length from the exact frame
+        # count (F/25 s), not the Foley Duration spinbox — which is stale/hidden
+        # in LTX-2 mode. Computed here so span windowing uses the real length.
+        ltx2 = self._ltx2_export_params()
+        clip_dur = ltx2["duration"] if ltx2 is not None else self._clip_dur
         groups = self._build_export_spans(
             regions, fuse_gap=self._spn_auto_fuse.value(),
             spread=spread, min_dur=clip_dur,
@@ -7307,9 +7331,9 @@ class MainWindow(QMainWindow):
         clip_duration = self._clip_dur
         # LTX-2 mode (active tab) overrides length/resize and feeds the
         # 25fps / ÷32-crop / exact-frames params through to ffmpeg. Foley
-        # tabs return None here and keep byte-identical behavior. Captured at
-        # batch-build time so queued batches keep their own geometry.
-        ltx2 = self._ltx2_export_params()
+        # tabs return None (see `ltx2` above) and keep byte-identical behavior.
+        # `ltx2` was captured at the top of this batch build so the windowing
+        # min_dur and the stashed geometry share one consistent length.
         if ltx2 is not None:
             short_side = ltx2["short_side"]
             clip_duration = ltx2["duration"]
@@ -8097,6 +8121,7 @@ class MainWindow(QMainWindow):
         if paths:
             target = self._add_target_playlist()
             self._active_pw = target
+            self._on_active_pw_changed()
             target.add_files(paths)
             self._apply_playlist_filters()
             self._save_playlist_tabs()
