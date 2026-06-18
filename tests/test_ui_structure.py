@@ -127,7 +127,7 @@ def test_duplicate_tab(win):
     try:
         src = win._pws[0]
         src._label = "AlexisCrystal"
-        src._dest_folder = "/data/alexis"
+        src._dest_folder = "/data/alexis/"   # trailing slash, like real folders
         n_before = len(win._pws)
         win._on_duplicate_tab(win._playlist_tabs.indexOf(src))
     finally:
@@ -135,4 +135,5 @@ def test_duplicate_tab(win):
     assert len(win._pws) == n_before + 1
     dup = win._pws[-1]
     assert dup._label == "AlexisCrystal copy"
+    # sibling, not a child: ".../alexis/" -> ".../alexis_copy" (not ".../alexis/_copy")
     assert dup._dest_folder == "/data/alexis_copy"

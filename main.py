@@ -4999,7 +4999,9 @@ class MainWindow(QMainWindow):
             select=True,
         )
         src_folder = getattr(src, "_dest_folder", "")
-        pw._dest_folder = (src_folder + "_copy") if src_folder else ""
+        # rstrip the trailing separator so ".../AlexisCrystal/" + "_copy" becomes
+        # a sibling ".../AlexisCrystal_copy", not a child ".../AlexisCrystal/_copy".
+        pw._dest_folder = (src_folder.rstrip("/" + os.sep) + "_copy") if src_folder else ""
         pw._tab_folder = getattr(src, "_tab_folder", False)
         self._sync_folder_field_to_tab()
         self._save_playlist_tabs()
