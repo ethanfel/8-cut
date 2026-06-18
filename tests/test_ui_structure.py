@@ -137,3 +137,24 @@ def test_duplicate_tab(win):
     assert dup._label == "AlexisCrystal copy"
     # sibling, not a child: ".../alexis/" -> ".../alexis_copy" (not ".../alexis/_copy")
     assert dup._dest_folder == "/data/alexis_copy"
+
+
+def test_tab_mode_defaults_foley(win):
+    # Fresh tabs use the Foley pipeline; sessions/tabs without a stored mode
+    # load unchanged.
+    assert win._pws
+    for pw in win._pws:
+        assert pw._mode == "foley"
+
+
+def test_tab_mode_toggle(win):
+    # Right-click → "LTX-2 mode" flips the per-tab mode and the displayed title
+    # gains a [LTX2] badge (without mutating pw._label). Suppress QSettings
+    # writes via _loading_tabs so the test can't touch the real session.
+    win._loading_tabs = True
+    try:
+        win._on_tab_mode_toggle(win._playlist_tabs.indexOf(win._pws[0]))
+    finally:
+        win._loading_tabs = False
+    assert win._pws[0]._mode == "ltx2"
+    assert win._tab_title(win._pws[0]).endswith("[LTX2]")

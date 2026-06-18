@@ -3303,6 +3303,7 @@ class _PlaylistTabBar(QTabBar):
     pin_toggle_requested = pyqtSignal(int)
     tab_folder_toggle_requested = pyqtSignal(int)
     duplicate_requested = pyqtSignal(int)
+    mode_toggle_requested = pyqtSignal(int)
 
     def mouseDoubleClickEvent(self, event):
         idx = self.tabAt(event.pos())
@@ -3329,6 +3330,9 @@ class _PlaylistTabBar(QTabBar):
         act_tabfolder.setChecked(bool(getattr(pw, "_tab_folder", False)))
         act_rename = menu.addAction("Rename…")
         act_dup = menu.addAction("Duplicate tab")
+        act_mode = menu.addAction("LTX-2 mode")
+        act_mode.setCheckable(True)
+        act_mode.setChecked(bool(getattr(pw, "_mode", "foley") == "ltx2"))
         chosen = menu.exec(event.globalPos())
         if chosen == act_pin:
             self.pin_toggle_requested.emit(idx)
@@ -3338,6 +3342,8 @@ class _PlaylistTabBar(QTabBar):
             self._start_edit(idx)
         elif chosen == act_dup:
             self.duplicate_requested.emit(idx)
+        elif chosen == act_mode:
+            self.mode_toggle_requested.emit(idx)
 
     def _start_edit(self, idx: int) -> None:
         editor = QLineEdit(self)
@@ -3411,6 +3417,7 @@ class PlaylistWidget(QListWidget):
         self._pinned: bool = False            # shown in the side-by-side view
         self._tab_folder: bool = False        # append this tab's name to export folder
         self._dest_folder: str = ""           # per-tab export destination
+        self._mode: str = "foley"             # export pipeline mode: "foley" | "ltx2"
         self._label: str = ""                 # tab name (source of truth across views)
         self._visible: list[str | None] = []  # rows shown; None = separator row
         self._selected_path: str | None = None
@@ -3951,6 +3958,7 @@ class MainWindow(QMainWindow):
         self._playlist_tabs.tabBar().tab_folder_toggle_requested.connect(
             self._on_tab_folder_toggle)
         self._playlist_tabs.tabBar().duplicate_requested.connect(self._on_duplicate_tab)
+        self._playlist_tabs.tabBar().mode_toggle_requested.connect(self._on_tab_mode_toggle)
         self._playlist_tabs.tabCloseRequested.connect(self._on_close_tab)
         self._playlist_tabs.currentChanged.connect(self._on_tab_changed)
         self._btn_add_tab = QPushButton("+")
@@ -5007,6 +5015,20 @@ class MainWindow(QMainWindow):
         self._save_playlist_tabs()
         self._show_status(f"Duplicated tab → {label}", 4000)
 
+    def _on_tab_mode_toggle(self, idx: int) -> None:
+        pw = self._playlist_tabs.widget(idx)
+        if pw is None:
+            return
+        pw._mode = "ltx2" if getattr(pw, "_mode", "foley") != "ltx2" else "foley"
+        self._refresh_layout()      # re-render tab titles (badge)
+        self._save_playlist_tabs()
+        self._show_status(f"{pw._label}: {pw._mode.upper()} mode", 3000)
+
+    def _tab_title(self, pw) -> str:
+        """Displayed tab title — appends a [LTX2] badge for ltx2-mode tabs.
+        Does NOT mutate pw._label (the source of truth for export folders)."""
+        return f"{pw._label} [LTX2]" if getattr(pw, "_mode", "foley") == "ltx2" else pw._label
+
     # ── File-list tabs ───────────────────────────────────────────
     def _wire_pw(self, pw: "PlaylistWidget") -> None:
         pw.file_selected.connect(self._load_file)
@@ -5068,7 +5090,7 @@ class MainWindow(QMainWindow):
                 for pw in self._pws:
                     if not pw._pinned:
                         pw.setMinimumWidth(0)
-                        self._playlist_tabs.addTab(pw, pw._label)
+                        self._playlist_tabs.addTab(pw, self._tab_title(pw))
                 splitter = QSplitter(Qt.Orientation.Horizontal)
                 splitter.setChildrenCollapsible(False)
                 for pw in pinned:
@@ -5079,7 +5101,7 @@ class MainWindow(QMainWindow):
                     header = QWidget()
                     hdr = QHBoxLayout(header)
                     hdr.setContentsMargins(2, 1, 2, 1)
-                    lbl = QLabel(pw._label)
+                    lbl = QLabel(self._tab_title(pw))
                     lbl.setStyleSheet("font-weight: bold;")
                     btn = QPushButton("✕")
                     btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -5104,7 +5126,7 @@ class MainWindow(QMainWindow):
             else:
                 for pw in self._pws:
                     pw.setMinimumWidth(200)
-                    self._playlist_tabs.addTab(pw, pw._label)
+                    self._playlist_tabs.addTab(pw, self._tab_title(pw))
                 self._list_stack.setCurrentWidget(self._playlist_tabs)
                 self._set_left_pane_width(220)
         finally:
@@ -5302,6 +5324,7 @@ class MainWindow(QMainWindow):
             "pinned": pw._pinned,
             "tab_folder": pw._tab_folder,
             "export_folder": pw._dest_folder,
+            "mode": pw._mode,
         } for pw in self._pws]
         cur = self._pws.index(self._active_pw) if self._active_pw in self._pws else 0
         data = {"tabs": tabs, "current": cur}
@@ -5347,6 +5370,7 @@ class MainWindow(QMainWindow):
                     pw._tab_folder = bool(t.get("tab_folder"))
                     pw._dest_folder = t.get("export_folder") or self._settings.value(
                         "export_folder", str(Path.home()))
+                    pw._mode = t.get("mode", "foley")
                 cur = min(max(0, data.get("current", 0)), len(self._pws) - 1)
         finally:
             self._loading_tabs = False
