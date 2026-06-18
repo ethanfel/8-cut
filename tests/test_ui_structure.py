@@ -1,5 +1,15 @@
 import pytest
 
+# Redirect QSettings to a throwaway dir BEFORE any MainWindow is constructed, so
+# these GUI tests can never read or clobber the user's real ~/.config/8cut.conf
+# (constructing MainWindow loads — and on window close re-saves — the playlist
+# tabs; a test mutating tab state would otherwise persist into the real session).
+import tempfile as _tempfile
+from PyQt6.QtCore import QSettings as _QSettings
+_QS_DIR = _tempfile.mkdtemp(prefix="8cut-test-qs-")
+_QSettings.setPath(_QSettings.Format.NativeFormat, _QSettings.Scope.UserScope, _QS_DIR)
+_QSettings.setPath(_QSettings.Format.IniFormat, _QSettings.Scope.UserScope, _QS_DIR)
+
 # A real platform is needed because MpvWidget creates a GL context.
 # If construction fails for any environment reason, skip — this test is a
 # best-effort structural net, not a gate on core/ tests.
