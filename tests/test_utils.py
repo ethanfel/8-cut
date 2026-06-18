@@ -462,3 +462,25 @@ def test_ltx2_legal_series():
     s = legal_frames(min_f=9, max_f=33)
     assert s == [9, 17, 25, 33]
 
+
+# --- LTX-2 ffmpeg params (target_fps, snap32, frames) ---
+
+def test_ffmpeg_ltx2_fps_and_frames():
+    cmd = build_ffmpeg_command("/in/v.mp4", 0.0, "/out/c.mp4",
+                               short_side=512, target_fps=25, frames=201)
+    assert "-r" in cmd and cmd[cmd.index("-r")+1] == "25"
+    assert "-frames:v" in cmd and cmd[cmd.index("-frames:v")+1] == "201"
+    vf = cmd[cmd.index("-vf")+1]
+    assert "fps=25" in vf
+
+def test_ffmpeg_ltx2_snap32_crop():
+    cmd = build_ffmpeg_command("/in/v.mp4", 0.0, "/out/c.mp4",
+                               short_side=512, snap32=True)
+    vf = cmd[cmd.index("-vf")+1]
+    assert "crop=trunc(iw/32)*32:trunc(ih/32)*32" in vf
+
+def test_ffmpeg_foley_unchanged():
+    cmd = build_ffmpeg_command("/in/v.mp4", 0.0, "/out/c.mp4", short_side=256)
+    assert "-r" not in cmd and "-frames:v" not in cmd
+    assert "crop=trunc" not in cmd[cmd.index("-vf")+1]
+

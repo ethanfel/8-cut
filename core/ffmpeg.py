@@ -79,6 +79,9 @@ def build_ffmpeg_command(
     image_sequence: bool = False,
     encoder: str = "libx264",
     duration: float = 8.0,
+    target_fps: float | None = None,
+    snap32: bool = False,
+    frames: int | None = None,
 ) -> list[str]:
     # -ss before -i: fast input-seeking. Safe here because we always re-encode,
     # so there is no keyframe-alignment issue from pre-input seek.
@@ -109,6 +112,13 @@ def build_ffmpeg_command(
             f"scale='if(lt(iw,ih),{short_side},-2)':'if(lt(iw,ih),-2,{short_side})':flags=lanczos"
         )
 
+    # LTX-2: centered crop to ÷32 (no rescale → no aspect distortion) then fps.
+    # Placed among CPU filters, after scale and before the VAAPI hwupload block.
+    if snap32:
+        filters.append("crop=trunc(iw/32)*32:trunc(ih/32)*32")
+    if target_fps is not None:
+        filters.append(f"fps={target_fps:g}")
+
     # VAAPI: decoded frames are GPU surfaces. CPU filters need hwdownload first.
     if use_hw_vaapi:
         if filters:
@@ -119,6 +129,12 @@ def build_ffmpeg_command(
 
     if filters:
         cmd += ["-vf", ",".join(filters)]
+
+    # LTX-2 output rate + exact frame cap (apply to both clip and webp-seq paths).
+    if target_fps is not None:
+        cmd += ["-r", f"{target_fps:g}"]
+    if frames is not None:
+        cmd += ["-frames:v", str(frames)]
 
     if image_sequence:
         cmd += [
