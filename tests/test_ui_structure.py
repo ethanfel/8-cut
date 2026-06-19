@@ -213,3 +213,12 @@ def test_frames_snaps_to_legal(win):
     win._snap_frames_to_legal()              # the editingFinished slot
     assert win._spn_frames.value() == 97     # nearest 8k+1 to 100
     assert (win._spn_frames.value() - 1) % 8 == 0
+
+
+def test_export_base_name_handles_trailing_slash(win):
+    # A folder ending in "/" must still yield the real base name, else
+    # subprofile naming breaks ("_blowjob" instead of "mp4_blowjob").
+    win._txt_folder.setText("/x/AlexisCrystal/mp4/")
+    assert win._export_base_name() == "mp4"
+    win._txt_folder.setText("/x/AlexisCrystal/mp4")
+    assert win._export_base_name() == "mp4"

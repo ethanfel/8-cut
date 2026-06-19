@@ -4991,7 +4991,10 @@ class MainWindow(QMainWindow):
     def _tab_export_folder(self) -> str:
         """The export base folder, with the active tab name appended when its
         per-tab 'Export to tab-named folder' option is enabled."""
-        base = self._txt_folder.text()
+        # rstrip the trailing separator so basename()/suffix logic downstream
+        # never sees an empty base (a folder like ".../mp4/" → base "" broke
+        # subprofile naming, e.g. "_blowjob" instead of "mp4_blowjob").
+        base = self._txt_folder.text().rstrip("/" + os.sep)
         pw = self._playlist
         if pw is not None and getattr(pw, "_tab_folder", False):
             name = self._active_tab_name()
@@ -5872,7 +5875,7 @@ class MainWindow(QMainWindow):
         self._playlist.set_folder_counts(folder_counts)
         self._playlist.set_disabled_paths(disabled_paths)
         # Profile-wide subcategory counts (exclude the main export folder).
-        base = os.path.basename(self._txt_folder.text())
+        base = os.path.basename(self._txt_folder.text().rstrip("/" + os.sep))
         self._playlist.set_all_subcat_counts(
             {f: c for f, c in all_counts.items() if f != base})
 
@@ -6544,7 +6547,7 @@ class MainWindow(QMainWindow):
         from PyQt6.QtWidgets import QMenu, QWidgetAction, QCheckBox, QWidget, QVBoxLayout, QPushButton, QHBoxLayout
         menu = QMenu(self)
         menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        base = os.path.basename(self._txt_folder.text())
+        base = os.path.basename(self._txt_folder.text().rstrip("/" + os.sep))
         counts = self._db.get_all_folder_counts(self._profile)
         folder_set: set[str] = set()
         # Subcategories from the current video's markers …
@@ -6619,7 +6622,7 @@ class MainWindow(QMainWindow):
 
     def _disable_all_subcats(self) -> None:
         """Disable every enabled subcategory at once (across all videos)."""
-        base = os.path.basename(self._txt_folder.text())
+        base = os.path.basename(self._txt_folder.text().rstrip("/" + os.sep))
         counts = self._db.get_all_folder_counts(self._profile)
         folders = sorted(f for f, c in counts.items()
                          if c and f != base and not f.endswith("_disabled"))
