@@ -4405,17 +4405,23 @@ class MainWindow(QMainWindow):
         transport_row.addStretch()
         transport_row.addWidget(self._lbl_next)
         transport_row.addWidget(self._btn_export)
-        # Subprofile export buttons sit right after Export
+        transport_row.addWidget(self._btn_cancel)
+        transport_row.addWidget(self._btn_delete)
+        self._transport_row = transport_row
+
+        # Row 1b — subcategory (subprofile) export buttons live on their own
+        # centered row so the (often many) "▸ name" buttons don't crowd the
+        # transport controls. Stretches on both ends keep the group centered.
+        subprofile_row = QHBoxLayout()
+        subprofile_row.addStretch()
         self._subprofile_btns: list[QPushButton] = []
-        self._sub_insert_anchor = self._btn_cancel  # buttons inserted before this
         self._btn_add_sub = QPushButton("+")
         self._btn_add_sub.setFixedWidth(28)
         self._btn_add_sub.setToolTip("Add a subprofile — exports to folder_suffix")
         self._btn_add_sub.clicked.connect(self._add_subprofile)
-        transport_row.addWidget(self._btn_add_sub)
-        transport_row.addWidget(self._btn_cancel)
-        transport_row.addWidget(self._btn_delete)
-        self._transport_row = transport_row
+        subprofile_row.addWidget(self._btn_add_sub)
+        subprofile_row.addStretch()
+        self._subprofile_row = subprofile_row
         self._rebuild_subprofile_buttons()
 
         # Row 2/3 — annotation, output path, crop and scan controls all live in
@@ -4431,6 +4437,7 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self._timeline)
         right_layout.addWidget(self._crop_bar)
         right_layout.addLayout(transport_row)
+        right_layout.addLayout(self._subprofile_row)
         right_layout.addWidget(self._build_control_deck())
         self._build_export_tab()
         self._build_crop_tab()
@@ -5581,17 +5588,17 @@ class MainWindow(QMainWindow):
     # ── Subprofiles ──────────────────────────────────────────
 
     def _rebuild_subprofile_buttons(self):
-        """Recreate the per-subprofile export buttons in the transport row."""
+        """Recreate the per-subprofile export buttons on the subprofile row."""
         for btn in self._format_btns:
-            self._transport_row.removeWidget(btn)
             btn.setParent(None)
         self._format_btns.clear()
         for btn in self._subprofile_btns:
-            self._transport_row.removeWidget(btn)
+            self._subprofile_row.removeWidget(btn)
             btn.deleteLater()
         self._subprofile_btns.clear()
-        # Find where to insert: right after the main Export button.
-        anchor = self._transport_row.indexOf(self._btn_add_sub)
+        # Insert before the "+" add button (which sits before the trailing
+        # stretch), so the buttons stay centered on the row.
+        anchor = self._subprofile_row.indexOf(self._btn_add_sub)
         has_file = bool(self._file_path)
         for i, name in enumerate(self._subprofiles):
             btn = QPushButton(f"▸ {name}")
@@ -5599,7 +5606,7 @@ class MainWindow(QMainWindow):
             btn.setToolTip(f"Export to folder_{name}  (right-click to remove)")
             btn.setEnabled(has_file)
             btn.clicked.connect(lambda _, s=name: self._on_export(folder_suffix=s))
-            self._transport_row.insertWidget(anchor + i, btn)
+            self._subprofile_row.insertWidget(anchor + i, btn)
             self._subprofile_btns.append(btn)
         self._rebuild_format_buttons()
         # Keep the Edit ▸ Subprofiles ▸ Remove submenu in sync. Guarded because
@@ -6122,7 +6129,7 @@ class MainWindow(QMainWindow):
             if sub_btn.isHidden():
                 continue
             suffix = sub_btn.text().removeprefix("▸ ")
-            sub_idx = self._transport_row.indexOf(sub_btn) + 1
+            sub_idx = self._subprofile_row.indexOf(sub_btn) + 1
             for j, (label, ratio) in enumerate(formats):
                 btn = QPushButton(label)
                 btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -6132,7 +6139,7 @@ class MainWindow(QMainWindow):
                 btn.clicked.connect(
                     lambda _, s=suffix, r=ratio: self._on_export(
                         folder_suffix=s, force_ratio=r))
-                self._transport_row.insertWidget(sub_idx + j, btn)
+                self._subprofile_row.insertWidget(sub_idx + j, btn)
                 self._format_btns.append(btn)
 
     def _on_rand_toggle(self, _checked: bool = False) -> None:
@@ -6695,11 +6702,16 @@ class MainWindow(QMainWindow):
     def _apply_subcat_visibility(self) -> None:
         self._timeline._hidden_subcats = self._hidden_subcats
         self._timeline.update()
+        # Match the subcategory folder EXACTLY (same name the menu shows and
+        # _hidden_subcats stores: "<base>_<suffix>"). A fuzzy endswith() match
+        # let a ghost "_blowjob" (empty-base leftover) or an unrelated
+        # "mp4_no_clap" hide the wrong button, so enabling a subcategory never
+        # revealed its export button.
+        base = os.path.basename(self._txt_folder.text().rstrip("/" + os.sep))
         for btn in self._subprofile_btns:
             suffix = btn.text().removeprefix("▸ ")
-            visible = not any(f.endswith("_" + suffix) or f == suffix
-                              for f in self._hidden_subcats)
-            btn.setVisible(visible)
+            folder = f"{base}_{suffix}" if base else suffix
+            btn.setVisible(folder not in self._hidden_subcats)
         self._rebuild_format_buttons()
         self._refresh_playlist_checks()
 

@@ -222,3 +222,24 @@ def test_export_base_name_handles_trailing_slash(win):
     assert win._export_base_name() == "mp4"
     win._txt_folder.setText("/x/AlexisCrystal/mp4")
     assert win._export_base_name() == "mp4"
+
+
+def test_subprofile_button_visibility_exact_match(win):
+    # A subcategory's export button must track ITS folder exactly. A ghost
+    # "_blowjob" (empty-base leftover) or an unrelated "mp4_no_clap" must NOT
+    # hide the "blowjob"/"clap" buttons (the old fuzzy endswith() match did,
+    # so enabling a subcategory never revealed its export button).
+    win._txt_folder.setText("/x/AlexisCrystal/mp4")
+    win._subprofiles = ["blowjob", "clap"]
+    win._rebuild_subprofile_buttons()
+    btns = {b.text().removeprefix("▸ "): b for b in win._subprofile_btns}
+
+    win._hidden_subcats = {"_blowjob", "mp4_no_clap"}
+    win._apply_subcat_visibility()
+    assert not btns["blowjob"].isHidden()   # ghost "_blowjob" must not hide it
+    assert not btns["clap"].isHidden()      # "mp4_no_clap" must not hide "clap"
+
+    win._hidden_subcats = {"mp4_blowjob"}    # exact folder -> hidden
+    win._apply_subcat_visibility()
+    assert btns["blowjob"].isHidden()
+    assert not btns["clap"].isHidden()
