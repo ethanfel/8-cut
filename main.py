@@ -35,7 +35,8 @@ import mpv
 from core.paths import _bin, _log, build_export_path, build_sequence_dir, format_time
 from core.ffmpeg import (
     _RATIOS, resolve_keyframe, apply_keyframes_to_jobs,
-    build_ffmpeg_command, build_audio_extract_command, detect_hw_encoders,
+    build_ffmpeg_command, build_audio_extract_command, build_audio_clip_command,
+    detect_hw_encoders,
 )
 from core.db import ProcessedDB
 from core.annotations import remove_clip_annotation, upsert_clip_annotation
@@ -1896,6 +1897,9 @@ class TimelineWidget(QWidget):
         self._scan_regions: list[tuple[float, float, float, float, float]] = []
         self._scan_neg_times: set[float] = set()
         self._active_scan_region: tuple[float, float] | None = None
+        # Manual "Extract audio area" band (start, end) — drawn as a distinct
+        # teal dashed region so it reads apart from the blue clip selection.
+        self._audio_region: tuple[float, float] | None = None
 
         # View window for zoom/pan. When _view_span <= 0 the full duration is shown.
         self._view_start: float = 0.0
@@ -2056,6 +2060,17 @@ class TimelineWidget(QWidget):
     def clear_active_scan_region(self) -> None:
         if self._active_scan_region is not None:
             self._active_scan_region = None
+            self.update()
+
+    def set_audio_region(self, start: float, end: float) -> None:
+        region = (start, end)
+        if region != self._audio_region:
+            self._audio_region = region
+            self.update()
+
+    def clear_audio_region(self) -> None:
+        if self._audio_region is not None:
+            self._audio_region = None
             self.update()
 
     def set_play_position(self, t: float | None) -> None:
@@ -2285,6 +2300,18 @@ class TimelineWidget(QWidget):
                 p.setPen(QPen(QColor(60, 130, 220, 180), 1))
                 p.drawLine(x_start, rh, x_start, h)
                 p.drawLine(x_end,   rh, x_end,   h)
+
+            # ── audio-extract area (exact length from the playhead) ───────────
+            if (not self._scan_mode and self._audio_region is not None
+                    and self._duration > 0):
+                a0, a1 = self._audio_region
+                ax1 = int(self._time_to_x(a0))
+                ax2 = int(self._time_to_x(min(a1, self._duration)))
+                aw = max(ax2 - ax1, 1)
+                p.fillRect(ax1, rh, aw, th, QColor(0, 200, 180, 45))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(QColor(0, 220, 190), 1, Qt.PenStyle.DashLine))
+                p.drawRect(ax1, rh + 1, aw, th - 2)
 
             # ── ghost of the previous cursor position (undo-by-eye) ──────────
             if (not self._scan_mode and self._ghost_cursor is not None
@@ -4407,6 +4434,28 @@ class MainWindow(QMainWindow):
         transport_row.addWidget(self._btn_export)
         transport_row.addWidget(self._btn_cancel)
         transport_row.addWidget(self._btn_delete)
+
+        # Extract audio area — an exact-length audio slice from the playhead,
+        # saved via a Save As dialog (format follows the chosen extension).
+        transport_row.addSpacing(12)
+        self._spn_audio_len = QDoubleSpinBox()
+        self._spn_audio_len.setRange(0.10, 120.0)
+        self._spn_audio_len.setDecimals(2)
+        self._spn_audio_len.setSingleStep(0.10)
+        self._spn_audio_len.setSuffix(" s")
+        self._spn_audio_len.setFixedWidth(78)
+        self._spn_audio_len.setToolTip("Audio area length, measured from the playhead")
+        self._spn_audio_len.setValue(
+            float(self._settings.value("audio_extract_len", 3.0)))
+        self._spn_audio_len.valueChanged.connect(self._on_audio_len_changed)
+        self._btn_extract_audio = QPushButton("♪ Extract audio")
+        self._btn_extract_audio.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_extract_audio.setToolTip(
+            "Extract this exact length of audio from the playhead and save it")
+        self._btn_extract_audio.setEnabled(False)
+        self._btn_extract_audio.clicked.connect(self._on_extract_audio)
+        transport_row.addWidget(self._spn_audio_len)
+        transport_row.addWidget(self._btn_extract_audio)
         self._transport_row = transport_row
 
         # Row 1b — subcategory (subprofile) export buttons live on their own
@@ -5789,6 +5838,8 @@ class MainWindow(QMainWindow):
         self._btn_play.setEnabled(True)
         self._btn_pause.setEnabled(True)
         self._btn_export.setEnabled(True)
+        self._btn_extract_audio.setEnabled(True)
+        self._update_audio_region()
         self._set_subprofile_btns_enabled(True)
         # Reset stale state from previous file
         self._overwrite_path = ""
@@ -6321,6 +6372,7 @@ class MainWindow(QMainWindow):
         self._cursor = t
         dur = self._mpv.get_duration()
         self._lbl_time.setText(f"{format_time(t)} / {format_time(dur)}")
+        self._update_audio_region()
         self._preview_timer.start()
         if self._timeline._scan_mode:
             self._scan_panel.highlight_time(t)
@@ -6329,6 +6381,65 @@ class MainWindow(QMainWindow):
             self._mpv.play_loop(t, t + self._clip_span)
         else:
             self._mpv.seek(t)
+
+    def _on_audio_len_changed(self, value: float) -> None:
+        self._settings.setValue("audio_extract_len", value)
+        self._update_audio_region()
+
+    def _update_audio_region(self) -> None:
+        """Keep the timeline's audio-area band in sync with the playhead and
+        the audio-length control."""
+        if not self._file_path:
+            self._timeline.clear_audio_region()
+            return
+        start = self._cursor
+        self._timeline.set_audio_region(start, start + self._spn_audio_len.value())
+
+    def _on_extract_audio(self) -> None:
+        """Extract an exact-length audio slice starting at the playhead and
+        prompt for where to save it (format follows the chosen extension)."""
+        if not self._file_path:
+            self._show_status("Load a video first", 3000)
+            return
+        start = self._cursor
+        dur = self._spn_audio_len.value()
+        if start + dur > self._timeline._duration + 0.05:
+            dur = max(0.05, self._timeline._duration - start)
+        stem = os.path.splitext(os.path.basename(self._file_path))[0]
+        default_name = f"{stem}_{start:.2f}-{start + dur:.2f}s.wav"
+        default_dir = (self._settings.value("audio_extract_dir", "")
+                       or self._tab_export_folder()
+                       or os.path.dirname(self._file_path))
+        path, _sel = QFileDialog.getSaveFileName(
+            self, "Save audio clip", os.path.join(default_dir, default_name),
+            "WAV (*.wav);;MP3 (*.mp3);;FLAC (*.flac);;All files (*)")
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path += ".wav"
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        cmd = build_audio_clip_command(self._file_path, start, dur, path)
+        self._btn_extract_audio.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self._show_status(f"Extracting {dur:.2f}s of audio…")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except Exception as e:
+            proc = None
+            err = str(e)
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._btn_extract_audio.setEnabled(True)
+        if proc is not None and proc.returncode == 0 and os.path.exists(path):
+            self._settings.setValue("audio_extract_dir", os.path.dirname(path))
+            self._show_status(f"Saved audio: {os.path.basename(path)}", 5000)
+            _log(f"Audio extracted: {path} ({dur:.2f}s @ {start:.2f}s)")
+        else:
+            err = (proc.stderr.strip().splitlines()[-1] if proc and proc.stderr
+                   else (err if proc is None else "ffmpeg failed"))
+            self._show_status("Audio extract failed", 5000)
+            QMessageBox.warning(self, "Audio extract failed",
+                                f"Could not extract audio:\n\n{err}")
 
     def _toggle_play(self):
         if not self._file_path:

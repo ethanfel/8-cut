@@ -243,3 +243,28 @@ def test_subprofile_button_visibility_exact_match(win):
     win._apply_subcat_visibility()
     assert btns["blowjob"].isHidden()
     assert not btns["clap"].isHidden()
+
+
+def test_extract_audio_controls_exist(win):
+    from PyQt6.QtWidgets import QPushButton, QDoubleSpinBox
+    assert isinstance(win._btn_extract_audio, QPushButton)
+    assert isinstance(win._spn_audio_len, QDoubleSpinBox)
+    # Disabled until a file is loaded.
+    assert not win._btn_extract_audio.isEnabled()
+
+
+def test_audio_region_tracks_cursor_and_length(win):
+    # The teal audio band spans [cursor, cursor + length]; changing the length
+    # or moving the cursor moves the band. Fake a loaded file so the guard in
+    # _update_audio_region passes.
+    win._file_path = "/x/video.mp4"
+    win._cursor = 10.0
+    win._spn_audio_len.setValue(4.0)     # fires _on_audio_len_changed
+    assert win._timeline._audio_region == (10.0, 14.0)
+    win._cursor = 20.0
+    win._update_audio_region()
+    assert win._timeline._audio_region == (20.0, 24.0)
+    # No file -> band cleared.
+    win._file_path = ""
+    win._update_audio_region()
+    assert win._timeline._audio_region is None

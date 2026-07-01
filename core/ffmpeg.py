@@ -173,6 +173,36 @@ def build_audio_extract_command(input_path: str, start: float, sequence_dir: str
     ]
 
 
+# Audio codec chosen per output extension for the manual "Extract audio area"
+# tool. Empty list -> let ffmpeg pick a default encoder from the extension.
+_AUDIO_CODEC_BY_EXT: dict[str, list[str]] = {
+    ".wav":  ["-c:a", "pcm_s16le"],
+    ".flac": ["-c:a", "flac"],
+    ".mp3":  ["-c:a", "libmp3lame", "-q:a", "2"],
+    ".m4a":  ["-c:a", "aac", "-b:a", "256k"],
+    ".aac":  ["-c:a", "aac", "-b:a", "256k"],
+    ".ogg":  ["-c:a", "libvorbis", "-q:a", "5"],
+    ".opus": ["-c:a", "libopus", "-b:a", "192k"],
+}
+
+
+def build_audio_clip_command(input_path: str, start: float, duration: float,
+                             out_path: str) -> list[str]:
+    """ffmpeg command to extract exactly *duration* seconds of audio starting
+    at *start*, re-encoded per *out_path*'s extension (wav/mp3/flac/…)."""
+    ext = os.path.splitext(out_path)[1].lower()
+    codec = _AUDIO_CODEC_BY_EXT.get(ext, [])
+    return [
+        _bin("ffmpeg"), "-y",
+        "-ss", str(start),
+        "-i", input_path,
+        "-t", str(duration),
+        "-vn",
+        *codec,
+        out_path,
+    ]
+
+
 def detect_hw_encoders() -> list[str]:
     """Probe ffmpeg for available H.264 hardware encoders.
 

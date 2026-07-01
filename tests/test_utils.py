@@ -1,5 +1,6 @@
 import tempfile, os, json
 from main import build_export_path, format_time, build_ffmpeg_command, build_sequence_dir, build_audio_extract_command, resolve_keyframe, apply_keyframes_to_jobs
+from core.ffmpeg import build_audio_clip_command
 from core.annotations import build_annotation_json_path, upsert_clip_annotation
 from main import ProcessedDB
 
@@ -52,6 +53,27 @@ def test_ffmpeg_command_with_resize():
     assert "256" in vf_value
     assert "scale" in vf_value
     assert cmd[-1] == "/out/clip_001.mp4"
+
+
+def test_audio_clip_command_exact_length():
+    cmd = build_audio_clip_command("/in/video.mp4", 12.5, 3.2, "/out/clip.wav")
+    assert cmd[0] == "ffmpeg"
+    # fast seek before input, exact duration, no video
+    assert cmd[cmd.index("-ss") + 1] == "12.5"
+    assert cmd[cmd.index("-t") + 1] == "3.2"
+    assert cmd.index("-ss") < cmd.index("-i")
+    assert "-vn" in cmd
+    assert cmd[-1] == "/out/clip.wav"
+
+def test_audio_clip_command_codec_by_extension():
+    assert "pcm_s16le" in build_audio_clip_command("/in.mp4", 0, 1, "/o/a.wav")
+    assert "libmp3lame" in build_audio_clip_command("/in.mp4", 0, 1, "/o/a.mp3")
+    assert "flac" in build_audio_clip_command("/in.mp4", 0, 1, "/o/a.flac")
+    # Unknown extension -> no explicit -c:a, let ffmpeg pick from the container.
+    assert "-c:a" not in build_audio_clip_command("/in.mp4", 0, 1, "/o/a.xyz")
+
+def test_audio_clip_command_extension_case_insensitive():
+    assert "flac" in build_audio_clip_command("/in.mp4", 0, 1, "/o/A.FLAC")
 
 
 # --- ProcessedDB ---
