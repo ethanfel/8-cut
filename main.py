@@ -36,7 +36,7 @@ from core.paths import _bin, _log, build_export_path, build_sequence_dir, format
 from core.ffmpeg import (
     _RATIOS, resolve_keyframe, apply_keyframes_to_jobs,
     build_ffmpeg_command, build_audio_extract_command, build_audio_clip_command,
-    detect_hw_encoders,
+    probe_duration, detect_hw_encoders,
 )
 from core.db import ProcessedDB
 from core.annotations import remove_clip_annotation, upsert_clip_annotation
@@ -6403,8 +6403,9 @@ class MainWindow(QMainWindow):
             return
         start = self._cursor
         dur = self._spn_audio_len.value()
-        if start + dur > self._timeline._duration + 0.05:
-            dur = max(0.05, self._timeline._duration - start)
+        # No clamping: pass the requested length straight to ffmpeg. It stops
+        # cleanly at end-of-file if the source is shorter, and we report the
+        # actual length afterwards so any truncation is visible, not silent.
         stem = os.path.splitext(os.path.basename(self._file_path))[0]
         default_name = f"{stem}_{start:.2f}-{start + dur:.2f}s.wav"
         default_dir = (self._settings.value("audio_extract_dir", "")
@@ -6432,8 +6433,17 @@ class MainWindow(QMainWindow):
             self._btn_extract_audio.setEnabled(True)
         if proc is not None and proc.returncode == 0 and os.path.exists(path):
             self._settings.setValue("audio_extract_dir", os.path.dirname(path))
-            self._show_status(f"Saved audio: {os.path.basename(path)}", 5000)
-            _log(f"Audio extracted: {path} ({dur:.2f}s @ {start:.2f}s)")
+            actual = probe_duration(path)
+            name = os.path.basename(path)
+            if actual is not None and actual < dur - 0.1:
+                self._show_status(
+                    f"Saved {actual:.2f}s — source ended before {dur:.2f}s "
+                    f"requested  ({name})", 7000)
+            else:
+                self._show_status(
+                    f"Saved audio: {name} ({(actual or dur):.2f}s)", 5000)
+            _log(f"Audio extracted: {path} (requested {dur:.2f}s @ {start:.2f}s, "
+                 f"actual {actual if actual is not None else '?'})")
         else:
             err = (proc.stderr.strip().splitlines()[-1] if proc and proc.stderr
                    else (err if proc is None else "ffmpeg failed"))

@@ -186,6 +186,21 @@ _AUDIO_CODEC_BY_EXT: dict[str, list[str]] = {
 }
 
 
+def probe_duration(path: str) -> float | None:
+    """Return the media duration in seconds via ffprobe, or None on failure."""
+    try:
+        r = subprocess.run(
+            [_bin("ffprobe"), "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return float(r.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
 def build_audio_clip_command(input_path: str, start: float, duration: float,
                              out_path: str) -> list[str]:
     """ffmpeg command to extract exactly *duration* seconds of audio starting
