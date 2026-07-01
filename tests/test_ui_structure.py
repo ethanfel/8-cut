@@ -251,6 +251,9 @@ def test_extract_audio_controls_exist(win):
     assert isinstance(win._spn_audio_len, QDoubleSpinBox)
     # Disabled until a file is loaded.
     assert not win._btn_extract_audio.isEnabled()
+    # Arrows step by 1s and there's no practical upper cap (long audio areas).
+    assert win._spn_audio_len.singleStep() == 1.0
+    assert win._spn_audio_len.maximum() >= 3600.0
 
 
 def test_audio_region_tracks_cursor_and_length(win):

@@ -4439,12 +4439,17 @@ class MainWindow(QMainWindow):
         # saved via a Save As dialog (format follows the chosen extension).
         transport_row.addSpacing(12)
         self._spn_audio_len = QDoubleSpinBox()
-        self._spn_audio_len.setRange(0.10, 120.0)
+        # No practical upper cap — audio areas can be minutes long; ffmpeg stops
+        # cleanly at end-of-file if the source is shorter. Arrows step by 1s;
+        # type for sub-second precision.
+        self._spn_audio_len.setRange(0.10, 86400.0)
         self._spn_audio_len.setDecimals(2)
-        self._spn_audio_len.setSingleStep(0.10)
+        self._spn_audio_len.setSingleStep(1.0)
         self._spn_audio_len.setSuffix(" s")
-        self._spn_audio_len.setFixedWidth(78)
-        self._spn_audio_len.setToolTip("Audio area length, measured from the playhead")
+        self._spn_audio_len.setFixedWidth(92)
+        self._spn_audio_len.setToolTip(
+            "Audio area length, measured from the playhead "
+            "(arrows step 1s; type for finer)")
         self._spn_audio_len.setValue(
             float(self._settings.value("audio_extract_len", 3.0)))
         self._spn_audio_len.valueChanged.connect(self._on_audio_len_changed)
